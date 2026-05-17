@@ -1,0 +1,15 @@
+{
+  "errno": 0,
+  "request_id": 123456792,
+  "urls": [
+    {
+      "url": "https://fixture.invalid/download/hello.txt",
+      "encrypt": 0
+    },
+    {
+      "url": "https://fixture.invalid/download/encrypted",
+      "encrypt": 1
+    }
+  ]
+}
+
