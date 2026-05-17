@@ -39,3 +39,12 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 5b corrected: removed runtime demo entries; `tui` now reads the active BaiduPCS-Go config and performs a real read-only PCS list before rendering.
 - Stage 5b live smoke exposed real response compatibility gaps (`md5` and `errno` omitted on success); fixed parser defaults and added a regression test.
 - Stage 5b GREEN: implemented real Ratatui layout, config-backed remote listing, CLI `tui` entrypoint, and tmux smoke with `j/k/q` interaction.
+
+## 2026-05-18
+
+- Stage 5/5b gate tightened after feedback: runtime mock data is forbidden, `l/h/r` real navigation is mandatory, async/caching/UI quality are acceptance criteria, and each complete stage needs tests plus tmux validation.
+- Stage 5b yazi calibration: checked yazi `Folder`, `Files`, `Scrollable`, Dispatcher, and Executor structure before extending the browser path.
+- Stage 5b RED: added tests for cached refresh preserving stale entries, error refresh preserving cache, directory-first sorting, selected-directory navigation, long-list scrolling, selected-row highlight, and wide-name truncation.
+- Stage 5b GREEN: wired `DirectoryCache` into the real CLI runtime, moved PCS list calls into background workers, rejected stale generations, restored parent selections, and prefetches selected directories on `j/k`.
+- Stage 5b UI pass: files now render directory-first with truncation, visible selected-row background, responsive pane layout, two-line Tasks area, cache age, request state, and nonblank Preview metadata.
+- Stage 5b real tmux smoke: escalated tmux run used the local BaiduPCS-Go config, loaded a real remote list, verified `j/k/l/h/r/q`, confirmed `l` on files does not enter, and recorded redacted evidence in `docs/validation/2026-05-18-stage-5b-real-browser.md`.

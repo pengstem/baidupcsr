@@ -1,6 +1,7 @@
 use baidupcsr_pcs::FileEntry;
 use baidupcsr_tui::{
-    AppMode, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp, DEFAULT_KEYMAP,
+    AppMode, DirectoryRequestState, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp,
+    DEFAULT_KEYMAP,
 };
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
@@ -16,6 +17,15 @@ fn file(fs_id: i64, path: &str) -> FileEntry {
         size: 1,
         is_dir: false,
         has_subdir: false,
+    }
+}
+
+fn directory(fs_id: i64, path: &str) -> FileEntry {
+    FileEntry {
+        is_dir: true,
+        has_subdir: true,
+        size: 0,
+        ..file(fs_id, path)
     }
 }
 
@@ -79,7 +89,10 @@ fn status_line_reports_mode_path_and_task_count() {
     let mut app = TuiApp::new("/docs");
     app.set_background_tasks(2);
 
-    assert_eq!(app.status_line(), "mode=NORMAL path=/docs tasks=2");
+    assert_eq!(
+        app.status_line(),
+        "mode=NORMAL path=/docs request=idle cache_age=none tasks=2"
+    );
 }
 
 #[test]
@@ -96,4 +109,125 @@ fn preview_budget_line_reports_memory_and_disk_boundary() {
         budget.status_line(),
         "preview=text fetched=1024 limit=16777216 truncated=false disk=false"
     );
+}
+
+#[test]
+fn selected_directory_path_only_returns_directories() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![directory(1, "/docs"), file(2, "/notes.txt")]);
+
+    assert_eq!(app.selected_directory_path(), Some("/docs".to_string()));
+
+    app.handle_key(KeyEvent::Char('j'));
+    assert_eq!(app.selected_directory_path(), None);
+}
+
+#[test]
+fn directory_load_state_replaces_path_entries_and_status() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![directory(1, "/docs")]);
+
+    app.begin_directory_refresh("/docs", Vec::new(), None, None);
+    assert_eq!(app.path(), "/docs");
+    assert_eq!(app.entries(), &[]);
+    assert_eq!(app.selected_index(), None);
+    assert_eq!(app.notice(), Some("loading /docs"));
+    assert_eq!(app.request_state(), DirectoryRequestState::Loading);
+    assert_eq!(
+        app.status_line(),
+        "mode=NORMAL path=/docs request=loading cache_age=none tasks=1"
+    );
+
+    app.finish_directory_success(
+        "/docs",
+        vec![file(2, "/docs/readme.md"), directory(3, "/docs/src")],
+        Some(0),
+        None,
+    );
+
+    assert_eq!(app.path(), "/docs");
+    assert_eq!(app.entries().len(), 2);
+    assert_eq!(app.selected_index(), Some(0));
+    assert_eq!(app.notice(), Some("loaded /docs"));
+    assert_eq!(
+        app.status_line(),
+        "mode=NORMAL path=/docs request=idle cache_age=0s tasks=0"
+    );
+}
+
+#[test]
+fn directory_load_failure_keeps_cached_entries_and_reports_error() {
+    let mut app = TuiApp::new("/docs");
+
+    app.begin_directory_refresh(
+        "/missing",
+        vec![file(1, "/missing/cached.txt")],
+        Some(7),
+        None,
+    );
+    app.finish_directory_error(
+        "/missing",
+        vec![file(1, "/missing/cached.txt")],
+        Some(7),
+        "remote_list_error: 403",
+        None,
+    );
+
+    assert_eq!(app.path(), "/missing");
+    assert_eq!(app.entries().len(), 1);
+    assert_eq!(app.notice(), Some("remote_list_error: 403"));
+    assert_eq!(
+        app.status_line(),
+        "mode=NORMAL path=/missing request=failed cache_age=7s tasks=0"
+    );
+}
+
+#[test]
+fn parent_path_handles_root_and_nested_paths() {
+    assert_eq!(TuiApp::parent_path("/"), None);
+    assert_eq!(TuiApp::parent_path("/docs"), Some("/".to_string()));
+    assert_eq!(
+        TuiApp::parent_path("/docs/books/"),
+        Some("/docs".to_string())
+    );
+}
+
+#[test]
+fn cached_directory_refresh_keeps_stale_entries_visible() {
+    let mut app = TuiApp::new("/");
+
+    app.begin_directory_refresh(
+        "/docs",
+        vec![file(1, "/docs/cached.txt"), directory(2, "/docs/src")],
+        Some(12),
+        Some("/docs/src"),
+    );
+
+    assert_eq!(app.path(), "/docs");
+    assert_eq!(app.request_state(), DirectoryRequestState::Refreshing);
+    assert_eq!(app.entries().len(), 2);
+    assert_eq!(
+        app.selected_entry().map(|entry| entry.path.as_str()),
+        Some("/docs/src")
+    );
+    assert_eq!(app.notice(), Some("refreshing /docs from cache"));
+}
+
+#[test]
+fn entries_are_sorted_directory_first_by_name() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![
+        file(1, "/zeta.txt"),
+        directory(2, "/beta"),
+        file(3, "/alpha.txt"),
+        directory(4, "/alpha"),
+    ]);
+
+    let names: Vec<&str> = app
+        .entries()
+        .iter()
+        .map(|entry| entry.server_filename.as_str())
+        .collect();
+
+    assert_eq!(names, vec!["alpha", "beta", "alpha.txt", "zeta.txt"]);
 }

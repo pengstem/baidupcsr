@@ -1,13 +1,14 @@
 use baidupcsr_pcs::FileEntry;
 use ratatui::{
     crossterm::event::{self, Event as CrosstermEvent, KeyCode},
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, Paragraph, Wrap},
     Frame,
 };
-use std::{io, time::Duration};
+use std::{cmp::Ordering, io, ops::Range, time::Duration};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const fn crate_name() -> &'static str {
     "baidupcsr-tui"
@@ -56,6 +57,31 @@ pub enum KeyAction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TuiRuntimeEvent {
+    Tick,
+    Action(KeyAction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectoryRequestState {
+    Idle,
+    Loading,
+    Refreshing,
+    Failed,
+}
+
+impl DirectoryRequestState {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Loading => "loading",
+            Self::Refreshing => "refreshing",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyMap;
 
 impl KeyMap {
@@ -83,27 +109,93 @@ pub struct TuiApp {
     mode: AppMode,
     background_tasks: usize,
     notice: Option<String>,
+    request_state: DirectoryRequestState,
+    cache_age_seconds: Option<u64>,
 }
 
 impl TuiApp {
     pub fn new(path: &str) -> Self {
         Self {
-            path: path.to_string(),
+            path: normalize_path(path),
             entries: Vec::new(),
             selected_index: None,
             mode: AppMode::Normal,
             background_tasks: 0,
             notice: None,
+            request_state: DirectoryRequestState::Idle,
+            cache_age_seconds: None,
         }
     }
 
     pub fn set_entries(&mut self, entries: Vec<FileEntry>) {
-        self.entries = entries;
-        self.selected_index = if self.entries.is_empty() {
-            None
+        self.set_entries_with_selection(entries, None);
+    }
+
+    pub fn begin_directory_load(&mut self, path: &str) {
+        self.begin_directory_refresh(path, Vec::new(), None, None);
+    }
+
+    pub fn finish_directory_load(&mut self, path: &str, result: Result<Vec<FileEntry>, String>) {
+        match result {
+            Ok(entries) => self.finish_directory_success(path, entries, Some(0), None),
+            Err(message) => self.finish_directory_error(path, Vec::new(), None, message, None),
+        }
+    }
+
+    pub fn begin_directory_refresh(
+        &mut self,
+        path: &str,
+        cached_entries: Vec<FileEntry>,
+        cache_age_seconds: Option<u64>,
+        preferred_selection_path: Option<&str>,
+    ) {
+        self.path = normalize_path(path);
+        self.cache_age_seconds = cache_age_seconds;
+        self.background_tasks = 1;
+        self.request_state = if cached_entries.is_empty() {
+            DirectoryRequestState::Loading
         } else {
-            Some(0)
+            DirectoryRequestState::Refreshing
         };
+        self.notice = Some(match self.request_state {
+            DirectoryRequestState::Loading => format!("loading {}", self.path),
+            DirectoryRequestState::Refreshing => format!("refreshing {} from cache", self.path),
+            DirectoryRequestState::Idle | DirectoryRequestState::Failed => {
+                format!("loading {}", self.path)
+            }
+        });
+        self.set_entries_with_selection(cached_entries, preferred_selection_path);
+    }
+
+    pub fn finish_directory_success(
+        &mut self,
+        path: &str,
+        entries: Vec<FileEntry>,
+        cache_age_seconds: Option<u64>,
+        preferred_selection_path: Option<&str>,
+    ) {
+        self.path = normalize_path(path);
+        self.cache_age_seconds = cache_age_seconds;
+        self.background_tasks = 0;
+        self.request_state = DirectoryRequestState::Idle;
+        self.set_entries_with_selection(entries, preferred_selection_path);
+        self.notice = Some(format!("loaded {}", self.path));
+    }
+
+    pub fn finish_directory_error(
+        &mut self,
+        path: &str,
+        cached_entries: Vec<FileEntry>,
+        cache_age_seconds: Option<u64>,
+        message: impl Into<String>,
+        preferred_selection_path: Option<&str>,
+    ) {
+        self.path = normalize_path(path);
+        self.cache_age_seconds = cache_age_seconds;
+        self.background_tasks = 0;
+        self.request_state = DirectoryRequestState::Failed;
+        self.set_entries_with_selection(cached_entries, preferred_selection_path);
+        self.notice = Some(message.into());
     }
 
     pub fn set_background_tasks(&mut self, count: usize) {
@@ -116,6 +208,10 @@ impl TuiApp {
 
     pub fn clear_notice(&mut self) {
         self.notice = None;
+    }
+
+    pub fn set_cache_age_seconds(&mut self, value: Option<u64>) {
+        self.cache_age_seconds = value;
     }
 
     pub fn handle_key(&mut self, event: KeyEvent) {
@@ -149,6 +245,10 @@ impl TuiApp {
         self.mode
     }
 
+    pub const fn request_state(&self) -> DirectoryRequestState {
+        self.request_state
+    }
+
     pub fn path(&self) -> &str {
         &self.path
     }
@@ -162,17 +262,42 @@ impl TuiApp {
             .and_then(|index| self.entries.get(index))
     }
 
+    pub fn selected_directory_path(&self) -> Option<String> {
+        self.selected_entry()
+            .filter(|entry| entry.is_dir)
+            .map(|entry| normalize_path(entry.path.as_str()))
+    }
+
     pub fn notice(&self) -> Option<&str> {
         self.notice.as_deref()
     }
 
     pub fn status_line(&self) -> String {
         format!(
-            "mode={} path={} tasks={}",
+            "mode={} path={} request={} cache_age={} tasks={}",
             self.mode.label(),
             self.path,
+            self.request_state.label(),
+            self.cache_age_label(),
             self.background_tasks
         )
+    }
+
+    pub fn visible_entry_range(&self, rows: usize) -> Range<usize> {
+        visible_range(self.entries.len(), self.selected_index.unwrap_or(0), rows)
+    }
+
+    pub fn parent_path(path: &str) -> Option<String> {
+        let trimmed = path.trim_end_matches('/');
+        if trimmed.is_empty() || trimmed == "/" {
+            return None;
+        }
+
+        match trimmed.rfind('/') {
+            Some(0) => Some("/".to_string()),
+            Some(index) => Some(trimmed[..index].to_string()),
+            None => Some("/".to_string()),
+        }
     }
 
     fn move_down(&mut self) {
@@ -187,6 +312,64 @@ impl TuiApp {
             self.selected_index = Some(index.saturating_sub(1));
         }
     }
+
+    fn set_entries_with_selection(
+        &mut self,
+        mut entries: Vec<FileEntry>,
+        preferred_selection_path: Option<&str>,
+    ) {
+        sort_entries(&mut entries);
+        self.entries = entries;
+        self.selected_index = preferred_selection_path
+            .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
+            .or_else(|| (!self.entries.is_empty()).then_some(0));
+    }
+
+    fn cache_age_label(&self) -> String {
+        self.cache_age_seconds
+            .map(|seconds| format!("{seconds}s"))
+            .unwrap_or_else(|| "none".to_string())
+    }
+}
+
+fn normalize_path(path: &str) -> String {
+    if path.is_empty() {
+        "/".to_string()
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    }
+}
+
+fn sort_entries(entries: &mut [FileEntry]) {
+    entries.sort_by(|left, right| match right.is_dir.cmp(&left.is_dir) {
+        Ordering::Equal => left
+            .server_filename
+            .to_lowercase()
+            .cmp(&right.server_filename.to_lowercase())
+            .then_with(|| left.server_filename.cmp(&right.server_filename)),
+        order => order,
+    });
+}
+
+fn visible_range(total: usize, selected: usize, rows: usize) -> Range<usize> {
+    if total == 0 || rows == 0 {
+        return 0..0;
+    }
+
+    let rows = rows.min(total);
+    let selected = selected.min(total.saturating_sub(1));
+    let scrolloff = rows / 2;
+    let start = if selected < scrolloff {
+        0
+    } else if selected.saturating_add(scrolloff) >= total {
+        total.saturating_sub(rows)
+    } else {
+        selected.saturating_sub(scrolloff)
+    };
+
+    start..start.saturating_add(rows)
 }
 
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
@@ -195,38 +378,68 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(1),
         ])
         .areas(frame.area());
 
-    let [locations, files, preview_area] = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22),
-            Constraint::Percentage(45),
-            Constraint::Min(28),
-        ])
-        .areas(body);
-
     frame.render_widget(header_widget(app), header);
-    frame.render_widget(locations_widget(app), locations);
-    frame.render_widget(files_widget(app), files);
-    frame.render_widget(preview_widget(app, preview), preview_area);
+    if body.width >= 88 {
+        let [locations, files, preview_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(22),
+                Constraint::Percentage(45),
+                Constraint::Min(28),
+            ])
+            .areas(body);
+        frame.render_widget(locations_widget(app), locations);
+        frame.render_widget(files_widget(app, files), files);
+        frame.render_widget(preview_widget(app, preview), preview_area);
+    } else if body.width >= 56 {
+        let [files, preview_area] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+            .areas(body);
+        frame.render_widget(files_widget(app, files), files);
+        frame.render_widget(preview_widget(app, preview), preview_area);
+    } else {
+        let [files, preview_area] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .areas(body);
+        frame.render_widget(files_widget(app, files), files);
+        frame.render_widget(preview_widget(app, preview), preview_area);
+    }
     frame.render_widget(tasks_widget(app), tasks);
     frame.render_widget(status_widget(app), status);
 }
 
 pub fn run_terminal_app(app: TuiApp) -> io::Result<()> {
+    run_terminal_app_with_handler(app, |_, _| {})
+}
+
+pub fn run_terminal_app_with_handler<F>(app: TuiApp, mut handler: F) -> io::Result<()>
+where
+    F: FnMut(&mut TuiApp, TuiRuntimeEvent),
+{
     let mut app = app;
     let mut terminal = ratatui::init();
-    let result = run_terminal_loop(&mut terminal, &mut app);
+    let result = run_terminal_loop(&mut terminal, &mut app, &mut handler);
     ratatui::restore();
     result
 }
 
-fn run_terminal_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut TuiApp) -> io::Result<()> {
+fn run_terminal_loop<F>(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut TuiApp,
+    handler: &mut F,
+) -> io::Result<()>
+where
+    F: FnMut(&mut TuiApp, TuiRuntimeEvent),
+{
     loop {
+        handler(app, TuiRuntimeEvent::Tick);
         terminal.draw(|frame| {
             render_app(
                 frame,
@@ -248,12 +461,17 @@ fn run_terminal_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut TuiApp) 
             let Some(tui_key) = map_crossterm_key(key.code) else {
                 continue;
             };
+            let mode_before = app.mode();
+            let action = DEFAULT_KEYMAP.action_for(tui_key);
             if DEFAULT_KEYMAP.action_for(tui_key) == KeyAction::Quit
-                && app.mode() == AppMode::Normal
+                && mode_before == AppMode::Normal
             {
                 break;
             }
             app.handle_key(tui_key);
+            if mode_before == AppMode::Normal {
+                handler(app, TuiRuntimeEvent::Action(action));
+            }
         }
     }
 
@@ -275,7 +493,12 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::raw(app.path()),
+        Span::styled(app.path(), Style::new().fg(Color::White)),
+        Span::raw("  "),
+        Span::styled(
+            app.request_state.label(),
+            Style::new().fg(request_state_color(app.request_state)),
+        ),
     ]))
     .block(Block::bordered().title("Session"))
 }
@@ -295,35 +518,54 @@ fn locations_widget(app: &TuiApp) -> Paragraph<'_> {
     .wrap(Wrap { trim: true })
 }
 
-fn files_widget(app: &TuiApp) -> List<'_> {
-    let items: Vec<ListItem<'_>> = app
-        .entries()
+fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
+    let rows = area.height.saturating_sub(2) as usize;
+    let range = app.visible_entry_range(rows);
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let items: Vec<ListItem<'_>> = app.entries()[range.clone()]
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let marker = if app.selected_index() == Some(index) {
-                ">"
-            } else {
-                " "
-            };
+        .map(|(relative_index, entry)| {
+            let index = range.start + relative_index;
+            let selected = app.selected_index() == Some(index);
+            let marker = if selected { ">" } else { " " };
             let suffix = if entry.is_dir { "/" } else { "" };
-            let size = if entry.is_dir {
-                "-".to_string()
+            let size = file_size_label(entry);
+            let name_width = inner_width
+                .saturating_sub(UnicodeWidthStr::width(marker))
+                .saturating_sub(2)
+                .saturating_sub(UnicodeWidthStr::width(size.as_str()))
+                .saturating_sub(2)
+                .max(4);
+            let name = truncate_cells(&format!("{}{}", entry.server_filename, suffix), name_width);
+            let base_style = if selected {
+                Style::new()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                entry.size.to_string()
+                Style::new()
+            };
+            let name_style = if selected {
+                base_style
+            } else if entry.is_dir {
+                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::new().fg(Color::White)
             };
             ListItem::new(Line::from(vec![
                 Span::styled(marker, Style::new().fg(Color::Yellow)),
                 Span::raw(" "),
-                Span::raw(entry.server_filename.as_str()),
-                Span::raw(suffix),
+                Span::styled(name, name_style),
                 Span::raw("  "),
                 Span::styled(size, Style::new().fg(Color::DarkGray)),
             ]))
+            .style(base_style)
         })
         .collect();
 
-    List::new(items).block(Block::bordered().title("Files"))
+    let title = format!("Files {} items", app.entries().len());
+    List::new(items).block(Block::bordered().title(title))
 }
 
 fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_> {
@@ -344,8 +586,23 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
     });
 
     let lines = vec![
-        Line::raw(title.to_string()),
-        Line::raw(kind.to_string()),
+        Line::from(vec![
+            Span::styled("selected=", Style::new().fg(Color::DarkGray)),
+            Span::raw(title.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("kind=", Style::new().fg(Color::DarkGray)),
+            Span::raw(kind.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("path=", Style::new().fg(Color::DarkGray)),
+            Span::raw(
+                selected
+                    .map(|entry| entry.path.as_str())
+                    .unwrap_or_else(|| app.path())
+                    .to_string(),
+            ),
+        ]),
         Line::raw(""),
         Line::raw(format!("preview={}", budget.kind.label())),
         Line::raw(format!("fetched={}", budget.fetched_bytes)),
@@ -361,8 +618,10 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
 
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     let mut lines = vec![Line::raw(format!(
-        "refresh=idle preview=idle background={}",
-        app.background_tasks
+        "request={} cache_age={} background={}",
+        app.request_state.label(),
+        app.cache_age_label(),
+        app.background_tasks,
     ))];
     if let Some(notice) = app.notice() {
         lines.push(Line::raw(notice.to_string()));
@@ -372,10 +631,59 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(Line::raw(format!(
-        "{}  keys j/k h/l / : r q",
+        "Status {}  keys j/k h/l / : r q",
         app.status_line()
     )))
     .style(Style::new().fg(Color::Black).bg(Color::Gray))
+}
+
+fn request_state_color(state: DirectoryRequestState) -> Color {
+    match state {
+        DirectoryRequestState::Idle => Color::Green,
+        DirectoryRequestState::Loading | DirectoryRequestState::Refreshing => Color::Yellow,
+        DirectoryRequestState::Failed => Color::Red,
+    }
+}
+
+fn file_size_label(entry: &FileEntry) -> String {
+    if entry.is_dir {
+        return "<DIR>".to_string();
+    }
+
+    let bytes = u64::try_from(entry.size).unwrap_or(0);
+    if bytes < 1024 {
+        format!("{bytes}B")
+    } else if bytes < 1024 * 1024 {
+        format!("{}KiB", bytes / 1024)
+    } else {
+        format!("{}MiB", bytes / 1024 / 1024)
+    }
+}
+
+fn truncate_cells(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let budget = max_width - 3;
+    let mut output = String::new();
+    let mut used = 0;
+    for ch in value.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > budget {
+            break;
+        }
+        output.push(ch);
+        used += width;
+    }
+    output.push_str("...");
+    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

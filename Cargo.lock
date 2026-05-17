@@ -115,6 +115,7 @@ dependencies = [
  "baidupcsr-core",
  "baidupcsr-pcs",
  "ratatui",
+ "unicode-width",
 ]
 
 [[package]]

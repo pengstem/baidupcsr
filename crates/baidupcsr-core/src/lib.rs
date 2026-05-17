@@ -80,6 +80,16 @@ impl DirectoryCache {
         }
     }
 
+    pub fn snapshot(&self, path: &str) -> DirectoryView {
+        let entry = self.entries.get(path);
+        DirectoryView {
+            path: path.to_string(),
+            entries: entry.map_or_else(Vec::new, |entry| entry.entries.clone()),
+            status: entry.map_or(DirectoryStatus::Empty, |entry| entry.status),
+            generation: entry.map_or(RefreshGeneration(0), |entry| entry.generation),
+        }
+    }
+
     pub fn begin_refresh(&mut self, path: &str) -> RefreshGeneration {
         let entry = self
             .entries
@@ -115,6 +125,31 @@ impl DirectoryCache {
         RefreshResult {
             applied: true,
             changes,
+        }
+    }
+
+    pub fn finish_refresh_error(
+        &mut self,
+        path: &str,
+        generation: RefreshGeneration,
+    ) -> RefreshResult {
+        let entry = self
+            .entries
+            .entry(path.to_string())
+            .or_insert_with(CacheEntry::empty);
+
+        if entry.generation != generation {
+            return RefreshResult {
+                applied: false,
+                changes: Vec::new(),
+            };
+        }
+
+        entry.status = DirectoryStatus::Error;
+
+        RefreshResult {
+            applied: true,
+            changes: Vec::new(),
         }
     }
 }

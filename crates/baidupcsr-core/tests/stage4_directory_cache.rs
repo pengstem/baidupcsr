@@ -47,6 +47,22 @@ fn stale_refresh_result_cannot_overwrite_newer_generation() {
 }
 
 #[test]
+fn refresh_error_preserves_cached_entries_and_marks_error() {
+    let mut cache = DirectoryCache::new();
+    cache.seed("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
+
+    let generation = cache.begin_refresh("/docs");
+    let result = cache.finish_refresh_error("/docs", generation);
+
+    assert!(result.applied);
+
+    let view = cache.snapshot("/docs");
+    assert_eq!(view.status, DirectoryStatus::Error);
+    assert_eq!(view.entries.len(), 1);
+    assert_eq!(view.entries[0].path, "/docs/a.txt");
+}
+
+#[test]
 fn refresh_reports_added_removed_and_modified_entries() {
     let mut cache = DirectoryCache::new();
     cache.seed(
