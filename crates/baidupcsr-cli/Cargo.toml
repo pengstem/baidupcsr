@@ -15,4 +15,3 @@ baidupcsr-tui = { path = "../baidupcsr-tui" }
 
 [lints]
 workspace = true
-

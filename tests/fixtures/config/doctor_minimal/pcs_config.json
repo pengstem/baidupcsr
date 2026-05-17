@@ -1,0 +1,42 @@
+{
+  "baidu_active_uid": 100000001,
+  "baidu_user_list": [
+    {
+      "uid": 100000001,
+      "name": "fixture-user",
+      "sex": "default",
+      "age": 1,
+      "bduss": "FAKE_BDUSS",
+      "ptoken": "",
+      "stoken": "FAKE_STOKEN",
+      "baiduid": "",
+      "sboxtkn": "",
+      "cookies": "",
+      "accesstoken": "",
+      "workdir": "/"
+    }
+  ],
+  "appid": 266719,
+  "cache_size": 65536,
+  "max_parallel": 1,
+  "max_upload_parallel": 4,
+  "max_download_load": 1,
+  "max_upload_load": 4,
+  "max_download_rate": 0,
+  "max_upload_rate": 0,
+  "user_agent": "fixture-user-agent",
+  "pcs_ua": "",
+  "pcs_addr": "pcs.baidu.com",
+  "pan_ua": "fixture-pan-ua",
+  "savedir": "/tmp/baidupcsr-fixture-downloads",
+  "enable_https": true,
+  "fix_pcs_addr": false,
+  "force_login_username": "",
+  "proxy": "",
+  "proxy_hostnames": "",
+  "local_addrs": "",
+  "no_check": true,
+  "ignore_illegal": true,
+  "u_policy": "skip"
+}
+

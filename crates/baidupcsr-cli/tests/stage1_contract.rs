@@ -2,8 +2,12 @@ use std::process::Command;
 
 #[test]
 fn doctor_redact_reports_stage1_shell() {
+    let missing_config_dir = std::env::temp_dir()
+        .join(format!("baidupcsr-missing-config-{}", std::process::id()))
+        .display()
+        .to_string();
     let output_result = Command::new(env!("CARGO_BIN_EXE_baidupcsr-cli"))
-        .args(["doctor", "--redact"])
+        .args(["doctor", "--redact", "--config-dir", &missing_config_dir])
         .output();
     assert!(output_result.is_ok(), "failed to run baidupcsr-cli doctor");
     let output = match output_result {
