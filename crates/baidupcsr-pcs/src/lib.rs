@@ -1,7 +1,7 @@
-use std::{fmt, time::Duration};
+use std::{fmt, io::Read, time::Duration};
 
 use md5::{Digest as Md5Digest, Md5};
-use reqwest::header::{COOKIE, USER_AGENT};
+use reqwest::header::{COOKIE, RANGE, USER_AGENT};
 use serde::Deserialize;
 use sha1::{Digest as Sha1Digest, Sha1};
 use url::form_urlencoded;
@@ -12,6 +12,9 @@ pub const fn crate_name() -> &'static str {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcsError {
+    Cancelled {
+        operation: String,
+    },
     Parse {
         operation: String,
         message: String,
@@ -30,6 +33,9 @@ pub enum PcsError {
 impl fmt::Display for PcsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Cancelled { operation } => {
+                write!(f, "{operation}: cancelled")
+            }
             Self::Parse { operation, message } => {
                 write!(f, "{operation}: failed to parse response: {message}")
             }
@@ -65,6 +71,12 @@ pub struct PcsApi {
 pub struct PcsRequest {
     pub method: &'static str,
     pub url: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ByteRange {
+    start: u64,
+    end_inclusive: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -128,6 +140,54 @@ impl PcsApi {
                 query
             ),
         }
+    }
+
+    pub fn download_request(&self, path: &str) -> PcsRequest {
+        let query = form_urlencoded::Serializer::new(String::new())
+            .append_pair("app_id", &self.options.app_id.to_string())
+            .append_pair("method", "download")
+            .append_pair("path", path)
+            .finish();
+
+        PcsRequest {
+            method: "GET",
+            url: format!(
+                "{}://{}/rest/2.0/pcs/file?{}",
+                scheme(self.options.enable_https),
+                self.options.pcs_addr,
+                query
+            ),
+        }
+    }
+}
+
+impl ByteRange {
+    pub const fn prefix(length: u64) -> Self {
+        Self {
+            start: 0,
+            end_inclusive: length.saturating_sub(1),
+        }
+    }
+
+    pub fn try_prefix(length: u64) -> Result<Self, PcsError> {
+        if length == 0 {
+            return Err(PcsError::Network {
+                operation: "download".to_string(),
+                message: "range length must be greater than zero".to_string(),
+            });
+        }
+
+        Ok(Self::prefix(length))
+    }
+
+    pub fn header_value(&self) -> String {
+        format!("bytes={}-{}", self.start, self.end_inclusive)
+    }
+
+    pub fn read_limit_bytes(&self) -> u64 {
+        self.end_inclusive
+            .saturating_sub(self.start)
+            .saturating_add(2)
     }
 }
 
@@ -209,6 +269,89 @@ impl BlockingPcsClient {
         }
 
         parse_file_list(&text)
+    }
+
+    pub fn download_range(&self, path: &str, range: ByteRange) -> Result<Vec<u8>, PcsError> {
+        self.download_range_with_cancel(path, range, || false)
+    }
+
+    pub fn download_range_with_cancel<F>(
+        &self,
+        path: &str,
+        range: ByteRange,
+        mut is_cancelled: F,
+    ) -> Result<Vec<u8>, PcsError>
+    where
+        F: FnMut() -> bool,
+    {
+        if is_cancelled() {
+            return Err(PcsError::Cancelled {
+                operation: "download".to_string(),
+            });
+        }
+
+        let request = self.api.download_request(path);
+        let client = self.build_client("download")?;
+        let builder = client
+            .get(&request.url)
+            .header(USER_AGENT, self.options.user_agent.as_str())
+            .header(COOKIE, self.auth.cookie_header())
+            .header(RANGE, range.header_value());
+        if !request.method.eq_ignore_ascii_case("GET") {
+            return Err(PcsError::Network {
+                operation: "download".to_string(),
+                message: format!("unsupported method {}", request.method),
+            });
+        }
+
+        if is_cancelled() {
+            return Err(PcsError::Cancelled {
+                operation: "download".to_string(),
+            });
+        }
+
+        let response = builder.send().map_err(|source| PcsError::Network {
+            operation: "download".to_string(),
+            message: source.to_string(),
+        })?;
+        if is_cancelled() {
+            return Err(PcsError::Cancelled {
+                operation: "download".to_string(),
+            });
+        }
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().map_err(|source| PcsError::Network {
+                operation: "download".to_string(),
+                message: source.to_string(),
+            })?;
+            return Err(parse_remote_error("download", &text));
+        }
+
+        let mut limited = response.take(range.read_limit_bytes());
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        loop {
+            if is_cancelled() {
+                return Err(PcsError::Cancelled {
+                    operation: "download".to_string(),
+                });
+            }
+
+            let read = limited
+                .read(&mut buffer)
+                .map_err(|source| PcsError::Network {
+                    operation: "download".to_string(),
+                    message: source.to_string(),
+                })?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+
+        Ok(bytes)
     }
 
     fn build_client(&self, operation: &str) -> Result<reqwest::blocking::Client, PcsError> {

@@ -1,5 +1,6 @@
 use baidupcsr_preview::{
-    PreviewKey, PreviewKind, PreviewManager, PreviewStatus, PreviewText, RequestState,
+    PreviewAction, PreviewKey, PreviewKind, PreviewManager, PreviewPlan, PreviewStatus,
+    PreviewText, RequestState,
 };
 
 fn key(fs_id: i64, size: u64, mtime: i64) -> PreviewKey {
@@ -72,4 +73,27 @@ fn stale_preview_request_cannot_overwrite_newer_request() {
         manager.get(&key(1, 3, 1)).map(|item| item.content.as_str()),
         Some("new")
     );
+}
+
+#[test]
+fn preview_plan_fetches_small_text_files_only() {
+    let plan = PreviewPlan::for_entry("notes.md", false, 1024, 16 * 1024 * 1024);
+
+    assert_eq!(plan.kind, PreviewKind::Text);
+    assert_eq!(plan.action, PreviewAction::FetchText);
+    assert_eq!(plan.reason, "text preview within memory budget");
+}
+
+#[test]
+fn preview_plan_uses_metadata_for_directories_binary_and_oversized_files() {
+    let directory = PreviewPlan::for_entry("docs", true, 0, 16 * 1024 * 1024);
+    let binary = PreviewPlan::for_entry("photo.heic", false, 1024, 16 * 1024 * 1024);
+    let huge_text = PreviewPlan::for_entry("huge.log", false, 32 * 1024 * 1024, 16 * 1024 * 1024);
+
+    assert_eq!(directory.action, PreviewAction::MetadataOnly);
+    assert_eq!(directory.reason, "directory metadata only");
+    assert_eq!(binary.action, PreviewAction::MetadataOnly);
+    assert_eq!(binary.reason, "binary or unsupported preview type");
+    assert_eq!(huge_text.action, PreviewAction::MetadataOnly);
+    assert_eq!(huge_text.reason, "file exceeds preview memory budget");
 }

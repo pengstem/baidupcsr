@@ -24,12 +24,73 @@ pub enum PreviewKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PreviewAction {
+    FetchText,
+    MetadataOnly,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreviewPlan {
+    pub kind: PreviewKind,
+    pub action: PreviewAction,
+    pub reason: String,
+}
+
+impl PreviewPlan {
+    pub fn for_entry(
+        file_name: &str,
+        is_dir: bool,
+        size_bytes: u64,
+        memory_limit_bytes: u64,
+    ) -> Self {
+        if is_dir {
+            return Self::metadata(PreviewKind::Metadata, "directory metadata only");
+        }
+        if size_bytes > memory_limit_bytes {
+            return Self::metadata(PreviewKind::Metadata, "file exceeds preview memory budget");
+        }
+
+        match preview_kind_from_name(file_name) {
+            PreviewKind::Text => Self {
+                kind: PreviewKind::Text,
+                action: PreviewAction::FetchText,
+                reason: "text preview within memory budget".to_string(),
+            },
+            kind => Self::metadata(kind, "binary or unsupported preview type"),
+        }
+    }
+
+    fn metadata(kind: PreviewKind, reason: &str) -> Self {
+        Self {
+            kind,
+            action: PreviewAction::MetadataOnly,
+            reason: reason.to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewStatus {
     pub kind: PreviewKind,
     pub fetched_bytes: u64,
     pub memory_limit_bytes: u64,
     pub truncated: bool,
     pub disk_backed: bool,
+}
+
+pub fn preview_kind_from_name(file_name: &str) -> PreviewKind {
+    let Some(extension) = file_name.rsplit_once('.').map(|(_, extension)| extension) else {
+        return PreviewKind::Metadata;
+    };
+
+    match extension.to_ascii_lowercase().as_str() {
+        "txt" | "md" | "markdown" | "rs" | "toml" | "json" | "yaml" | "yml" | "log" | "c"
+        | "cc" | "cpp" | "h" | "hpp" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "css"
+        | "xml" | "csv" | "ini" | "conf" | "sh" | "bash" | "zsh" | "fish" => PreviewKind::Text,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "avif" => PreviewKind::Image,
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "flv" => PreviewKind::Video,
+        _ => PreviewKind::Metadata,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -48,6 +109,12 @@ pub enum RequestState {
 pub struct PreviewRequest {
     key: PreviewKey,
     generation: u64,
+}
+
+impl PreviewRequest {
+    pub const fn key(self) -> PreviewKey {
+        self.key
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

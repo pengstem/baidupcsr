@@ -111,6 +111,9 @@ pub struct TuiApp {
     notice: Option<String>,
     request_state: DirectoryRequestState,
     cache_age_seconds: Option<u64>,
+    preview_title: String,
+    preview_lines: Vec<String>,
+    preview_budget: PreviewBudget,
 }
 
 impl TuiApp {
@@ -124,6 +127,9 @@ impl TuiApp {
             notice: None,
             request_state: DirectoryRequestState::Idle,
             cache_age_seconds: None,
+            preview_title: String::new(),
+            preview_lines: Vec::new(),
+            preview_budget: default_preview_budget(),
         }
     }
 
@@ -214,6 +220,36 @@ impl TuiApp {
         self.cache_age_seconds = value;
     }
 
+    pub fn begin_preview(&mut self, title: &str, message: &str) {
+        self.preview_title = title.to_string();
+        self.preview_lines = vec![message.to_string()];
+        self.preview_budget = default_preview_budget();
+    }
+
+    pub fn finish_preview_text(&mut self, title: &str, content: &str, budget: PreviewBudget) {
+        self.preview_title = title.to_string();
+        self.preview_lines = content.lines().map(str::to_string).collect();
+        self.preview_budget = budget;
+    }
+
+    pub fn finish_preview_metadata(
+        &mut self,
+        title: &str,
+        kind: PreviewKind,
+        reason: impl Into<String>,
+        budget: PreviewBudget,
+    ) {
+        self.preview_title = title.to_string();
+        self.preview_lines = vec![format!("metadata: {}", reason.into())];
+        self.preview_budget = PreviewBudget { kind, ..budget };
+    }
+
+    pub fn finish_preview_error(&mut self, title: &str, message: impl Into<String>) {
+        self.preview_title = title.to_string();
+        self.preview_lines = vec![format!("preview_error: {}", message.into())];
+        self.preview_budget = default_preview_budget();
+    }
+
     pub fn handle_key(&mut self, event: KeyEvent) {
         if event == KeyEvent::Esc {
             self.mode = AppMode::Normal;
@@ -266,6 +302,18 @@ impl TuiApp {
         self.selected_entry()
             .filter(|entry| entry.is_dir)
             .map(|entry| normalize_path(entry.path.as_str()))
+    }
+
+    pub fn preview_title(&self) -> &str {
+        &self.preview_title
+    }
+
+    pub fn preview_lines(&self) -> &[String] {
+        &self.preview_lines
+    }
+
+    pub const fn preview_budget(&self) -> PreviewBudget {
+        self.preview_budget
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -441,17 +489,7 @@ where
     loop {
         handler(app, TuiRuntimeEvent::Tick);
         terminal.draw(|frame| {
-            render_app(
-                frame,
-                app,
-                Some(PreviewBudget {
-                    kind: PreviewKind::Metadata,
-                    fetched_bytes: 0,
-                    memory_limit_bytes: 16 * 1024 * 1024,
-                    truncated: false,
-                    disk_backed: false,
-                }),
-            );
+            render_app(frame, app, None);
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -570,25 +608,23 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
 
 fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_> {
     let selected = app.selected_entry();
-    let title = selected
-        .map(|entry| entry.server_filename.as_str())
-        .or_else(|| app.notice())
-        .unwrap_or("metadata");
+    let title = if app.preview_title.is_empty() {
+        selected
+            .map(|entry| entry.server_filename.as_str())
+            .or_else(|| app.notice())
+            .unwrap_or("metadata")
+    } else {
+        app.preview_title.as_str()
+    };
     let kind = selected
         .map(|entry| if entry.is_dir { "directory" } else { "file" })
         .unwrap_or("none");
-    let budget = preview.unwrap_or(PreviewBudget {
-        kind: PreviewKind::Metadata,
-        fetched_bytes: 0,
-        memory_limit_bytes: 0,
-        truncated: false,
-        disk_backed: false,
-    });
+    let budget = preview.unwrap_or(app.preview_budget);
 
-    let lines = vec![
+    let mut lines = vec![
         Line::from(vec![
             Span::styled("selected=", Style::new().fg(Color::DarkGray)),
-            Span::raw(title.to_string()),
+            Span::raw(truncate_cells(title, 24)),
         ]),
         Line::from(vec![
             Span::styled("kind=", Style::new().fg(Color::DarkGray)),
@@ -596,12 +632,12 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
         ]),
         Line::from(vec![
             Span::styled("path=", Style::new().fg(Color::DarkGray)),
-            Span::raw(
+            Span::raw(truncate_cells(
                 selected
                     .map(|entry| entry.path.as_str())
-                    .unwrap_or_else(|| app.path())
-                    .to_string(),
-            ),
+                    .unwrap_or_else(|| app.path()),
+                24,
+            )),
         ]),
         Line::raw(""),
         Line::raw(format!("preview={}", budget.kind.label())),
@@ -609,11 +645,25 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
         Line::raw(format!("limit={}", budget.memory_limit_bytes)),
         Line::raw(format!("truncated={}", budget.truncated)),
         Line::raw(format!("disk={}", budget.disk_backed)),
+        Line::raw(""),
     ];
+    for line in app.preview_lines.iter().take(6) {
+        lines.push(Line::raw(line.to_string()));
+    }
 
     Paragraph::new(lines)
         .block(Block::bordered().title("Preview"))
         .wrap(Wrap { trim: true })
+}
+
+fn default_preview_budget() -> PreviewBudget {
+    PreviewBudget {
+        kind: PreviewKind::Metadata,
+        fetched_bytes: 0,
+        memory_limit_bytes: 16 * 1024 * 1024,
+        truncated: false,
+        disk_backed: false,
+    }
 }
 
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {

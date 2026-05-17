@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 
 use baidupcsr_pcs::{
     dev_uid, locatedownload_sign_with, parse_file_list, parse_locatedownload, parse_remote_error,
-    select_download_urls, OrderBy, OrderDirection, OrderOptions, PcsApi, PcsClientOptions,
-    PcsError,
+    select_download_urls, BlockingPcsClient, BlockingPcsClientOptions, ByteRange, OrderBy,
+    OrderDirection, OrderOptions, PcsApi, PcsAuth, PcsClientOptions, PcsError,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -94,6 +94,62 @@ fn list_request_builds_pcs_url_with_ordering() {
     assert_eq!(
         request.url.as_str(),
         "https://pcs.baidu.com/rest/2.0/pcs/file?app_id=266719&method=list&path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90&by=name&order=asc"
+    );
+}
+
+#[test]
+fn download_request_builds_readonly_pcs_file_url() {
+    let api = PcsApi::new(PcsClientOptions {
+        app_id: 266719,
+        pcs_addr: "pcs.baidu.com".to_string(),
+        enable_https: true,
+    });
+
+    let request = api.download_request("/我的资源/notes.md");
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.url.as_str(),
+        "https://pcs.baidu.com/rest/2.0/pcs/file?app_id=266719&method=download&path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90%2Fnotes.md"
+    );
+}
+
+#[test]
+fn preview_range_header_is_bounded_to_requested_bytes() {
+    let range = baidupcsr_pcs::ByteRange::prefix(16);
+
+    assert_eq!(range.header_value(), "bytes=0-15");
+    assert_eq!(range.read_limit_bytes(), 17);
+}
+
+#[test]
+fn empty_preview_range_is_rejected() {
+    assert_eq!(
+        baidupcsr_pcs::ByteRange::try_prefix(0),
+        Err(baidupcsr_pcs::PcsError::Network {
+            operation: "download".to_string(),
+            message: "range length must be greater than zero".to_string(),
+        })
+    );
+}
+
+#[test]
+fn download_range_can_be_cancelled_before_network_work() {
+    let client = BlockingPcsClient::new(
+        PcsApi::new(PcsClientOptions {
+            app_id: 266719,
+            pcs_addr: "invalid.local".to_string(),
+            enable_https: true,
+        }),
+        PcsAuth::from_cookie_header("BDUSS=redacted"),
+        BlockingPcsClientOptions::new("baidupcsr-test", None),
+    );
+
+    assert_eq!(
+        client.download_range_with_cancel("/remote.txt", ByteRange::prefix(8), || true),
+        Err(PcsError::Cancelled {
+            operation: "download".to_string()
+        })
     );
 }
 

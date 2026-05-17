@@ -164,3 +164,56 @@ fn ratatui_render_truncates_long_wide_names_without_breaking_layout() {
     assert!(screen.contains("Preview"));
     assert!(screen.contains("Status"));
 }
+
+#[test]
+fn ratatui_render_draws_text_preview_content() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/notes.md", 11, false)]);
+    app.finish_preview_text(
+        "notes.md",
+        "hello\nworld",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 11,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let screen = draw_to_text(&app, None);
+
+    assert!(screen.contains("hello"));
+    assert!(screen.contains("world"));
+    assert!(screen.contains("preview=text"));
+    assert!(screen.contains("disk=false"));
+}
+
+#[test]
+fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
+    let mut app = TuiApp::new("/docs/course/chapter/session");
+    app.set_entries(vec![file(
+        1,
+        "/docs/course/chapter/session/readme.txt",
+        96,
+        false,
+    )]);
+    app.finish_preview_text(
+        "readme.txt",
+        "line one\nline two\nline three\nline four\nline five\nline six\nline seven",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 96,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let screen = buffer_to_text(&draw_buffer(&app, None, 80, 24));
+
+    assert!(screen.contains("preview=text"));
+    assert!(screen.contains("fetched=96"));
+    assert!(screen.contains("disk=false"));
+    assert!(screen.contains("line one"));
+}

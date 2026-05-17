@@ -112,6 +112,34 @@ fn preview_budget_line_reports_memory_and_disk_boundary() {
 }
 
 #[test]
+fn preview_text_updates_panel_content_and_budget() {
+    let mut app = TuiApp::new("/docs");
+
+    app.begin_preview("notes.md", "loading text preview");
+    app.finish_preview_text(
+        "notes.md",
+        "hello\nworld",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 11,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    assert_eq!(app.preview_title(), "notes.md");
+    assert_eq!(
+        app.preview_lines(),
+        &["hello".to_string(), "world".to_string()]
+    );
+    assert_eq!(
+        app.preview_budget().status_line(),
+        "preview=text fetched=11 limit=16777216 truncated=false disk=false"
+    );
+}
+
+#[test]
 fn selected_directory_path_only_returns_directories() {
     let mut app = TuiApp::new("/");
     app.set_entries(vec![directory(1, "/docs"), file(2, "/notes.txt")]);

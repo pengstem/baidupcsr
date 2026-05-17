@@ -2,9 +2,15 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc, Arc,
+};
 use std::thread;
 use std::time::Instant;
+
+const PREVIEW_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+const TEXT_PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -35,11 +41,16 @@ fn main() -> ExitCode {
 
 struct BrowserRuntime {
     client: Option<baidupcsr_pcs::BlockingPcsClient>,
+    account_uid: u64,
     cache: baidupcsr_core::DirectoryCache,
     loaded_at: HashMap<String, Instant>,
     selection_memory: HashMap<String, String>,
+    preview_manager: baidupcsr_preview::PreviewManager,
+    preview_epoch: Arc<AtomicU64>,
     tx: mpsc::Sender<DirectoryLoadResult>,
     rx: mpsc::Receiver<DirectoryLoadResult>,
+    preview_tx: mpsc::Sender<PreviewLoadResult>,
+    preview_rx: mpsc::Receiver<PreviewLoadResult>,
     inflight: usize,
     initial_path: String,
     startup_notice: Option<String>,
@@ -51,9 +62,16 @@ struct DirectoryLoadResult {
     result: Result<Vec<baidupcsr_pcs::FileEntry>, String>,
 }
 
+struct PreviewLoadResult {
+    request: baidupcsr_preview::PreviewRequest,
+    title: String,
+    result: Result<Vec<u8>, String>,
+}
+
 impl BrowserRuntime {
     fn from_config() -> Self {
         let (tx, rx) = mpsc::channel();
+        let (preview_tx, preview_rx) = mpsc::channel();
         let discovery = baidupcsr_config::discovery_input_from_env(None);
         let config_path = baidupcsr_config::discover_config_file(&discovery);
         let config = match baidupcsr_config::load_config(&config_path) {
@@ -61,11 +79,18 @@ impl BrowserRuntime {
             Err(err) => {
                 return Self {
                     client: None,
+                    account_uid: 0,
                     cache: baidupcsr_core::DirectoryCache::new(),
                     loaded_at: HashMap::new(),
                     selection_memory: HashMap::new(),
+                    preview_manager: baidupcsr_preview::PreviewManager::new(
+                        PREVIEW_MEMORY_LIMIT_BYTES,
+                    ),
+                    preview_epoch: Arc::new(AtomicU64::new(0)),
                     tx,
                     rx,
+                    preview_tx,
+                    preview_rx,
                     inflight: 0,
                     initial_path: "/".to_string(),
                     startup_notice: Some(format!("config_error: {err}")),
@@ -76,11 +101,16 @@ impl BrowserRuntime {
         let Some(user) = baidupcsr_config::active_user(&config) else {
             return Self {
                 client: None,
+                account_uid: 0,
                 cache: baidupcsr_core::DirectoryCache::new(),
                 loaded_at: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
+                preview_epoch: Arc::new(AtomicU64::new(0)),
                 tx,
                 rx,
+                preview_tx,
+                preview_rx,
                 inflight: 0,
                 initial_path: "/".to_string(),
                 startup_notice: Some("active_user: missing".to_string()),
@@ -99,22 +129,32 @@ impl BrowserRuntime {
         match client {
             Ok(client) => Self {
                 client: Some(client),
+                account_uid: user.uid,
                 cache: baidupcsr_core::DirectoryCache::new(),
                 loaded_at: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
+                preview_epoch: Arc::new(AtomicU64::new(0)),
                 tx,
                 rx,
+                preview_tx,
+                preview_rx,
                 inflight: 0,
                 initial_path,
                 startup_notice: None,
             },
             Err(message) => Self {
                 client: None,
+                account_uid: user.uid,
                 cache: baidupcsr_core::DirectoryCache::new(),
                 loaded_at: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
+                preview_epoch: Arc::new(AtomicU64::new(0)),
                 tx,
                 rx,
+                preview_tx,
+                preview_rx,
                 inflight: 0,
                 initial_path,
                 startup_notice: Some(message),
@@ -140,6 +180,7 @@ impl BrowserRuntime {
         match event {
             baidupcsr_tui::TuiRuntimeEvent::Tick => {
                 self.drain_directory_results(app);
+                self.drain_preview_results(app);
                 self.refresh_current_cache_age(app);
             }
             baidupcsr_tui::TuiRuntimeEvent::Action(action) => self.handle_action(app, action),
@@ -173,6 +214,7 @@ impl BrowserRuntime {
             }
             baidupcsr_tui::KeyAction::Up | baidupcsr_tui::KeyAction::Down => {
                 self.prefetch_selected_directory(app);
+                self.update_preview_for_selection(app);
             }
             baidupcsr_tui::KeyAction::Search
             | baidupcsr_tui::KeyAction::Command
@@ -193,6 +235,7 @@ impl BrowserRuntime {
             .as_deref()
             .or_else(|| self.selection_memory.get(path.as_str()).map(String::as_str));
         app.begin_directory_refresh(path.as_str(), view.entries, cache_age, preferred);
+        app.begin_preview(path.as_str(), "directory loading");
 
         let Some(client) = self.client.clone() else {
             let view = self.cache.snapshot(path.as_str());
@@ -266,6 +309,7 @@ impl BrowserRuntime {
                                 self.cache_age_seconds(path.as_str()),
                                 preferred,
                             );
+                            self.update_preview_for_selection(app);
                         }
                     }
                 }
@@ -289,6 +333,148 @@ impl BrowserRuntime {
             }
         }
         app.set_background_tasks(self.inflight);
+    }
+
+    fn update_preview_for_selection(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let preview_epoch = self
+            .preview_epoch
+            .fetch_add(1, Ordering::AcqRel)
+            .saturating_add(1);
+        let Some(entry) = app.selected_entry().cloned() else {
+            app.begin_preview("metadata", "no selected entry");
+            return;
+        };
+
+        let size = nonnegative_size(entry.size);
+        let plan = baidupcsr_preview::PreviewPlan::for_entry(
+            entry.server_filename.as_str(),
+            entry.is_dir,
+            size,
+            PREVIEW_MEMORY_LIMIT_BYTES,
+        );
+        let budget = baidupcsr_tui::PreviewBudget {
+            kind: tui_preview_kind(plan.kind),
+            fetched_bytes: 0,
+            memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
+            truncated: false,
+            disk_backed: false,
+        };
+
+        if plan.action == baidupcsr_preview::PreviewAction::MetadataOnly {
+            app.finish_preview_metadata(
+                entry.server_filename.as_str(),
+                tui_preview_kind(plan.kind),
+                plan.reason,
+                budget,
+            );
+            return;
+        }
+
+        let key = preview_key_for_entry(self.account_uid, &entry);
+        if let Some(text) = self.preview_manager.get(&key) {
+            app.finish_preview_text(
+                entry.server_filename.as_str(),
+                text.content.as_str(),
+                preview_budget_from_status(text.status),
+            );
+            return;
+        }
+
+        let Some(client) = self.client.clone() else {
+            app.finish_preview_error(entry.server_filename.as_str(), "client unavailable");
+            return;
+        };
+
+        let request = self.preview_manager.start_request(key);
+        app.begin_preview(entry.server_filename.as_str(), "loading text preview");
+        let fetch_bytes = size.min(TEXT_PREVIEW_FETCH_BYTES);
+        if fetch_bytes == 0 {
+            let update = self.preview_manager.finish_text_request(request, b"");
+            if update.request_state == baidupcsr_preview::RequestState::Applied {
+                app.finish_preview_text(
+                    entry.server_filename.as_str(),
+                    "",
+                    preview_budget_from_status(update.status),
+                );
+            }
+            return;
+        }
+
+        self.spawn_preview_load(
+            client,
+            entry.path,
+            entry.server_filename,
+            request,
+            fetch_bytes,
+            preview_epoch,
+        );
+        app.set_background_tasks(self.inflight);
+    }
+
+    fn spawn_preview_load(
+        &mut self,
+        client: baidupcsr_pcs::BlockingPcsClient,
+        path: String,
+        title: String,
+        request: baidupcsr_preview::PreviewRequest,
+        fetch_bytes: u64,
+        preview_epoch: u64,
+    ) {
+        self.inflight = self.inflight.saturating_add(1);
+        let tx = self.preview_tx.clone();
+        let cancellation_epoch = Arc::clone(&self.preview_epoch);
+        thread::spawn(move || {
+            let range = baidupcsr_pcs::ByteRange::prefix(fetch_bytes);
+            let result = client
+                .download_range_with_cancel(path.as_str(), range, || {
+                    cancellation_epoch.load(Ordering::Acquire) != preview_epoch
+                })
+                .map_err(|err| format!("preview_error: {err}"));
+            let _ = tx.send(PreviewLoadResult {
+                request,
+                title,
+                result,
+            });
+        });
+    }
+
+    fn drain_preview_results(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        while let Ok(result) = self.preview_rx.try_recv() {
+            self.inflight = self.inflight.saturating_sub(1);
+            match result.result {
+                Ok(bytes) => {
+                    let key = result.request.key();
+                    let update = self
+                        .preview_manager
+                        .finish_text_request(result.request, &bytes);
+                    if update.request_state == baidupcsr_preview::RequestState::Applied
+                        && self.selected_preview_key(app) == Some(key)
+                    {
+                        if let Some(text) = self.preview_manager.get(&key) {
+                            app.finish_preview_text(
+                                result.title.as_str(),
+                                text.content.as_str(),
+                                preview_budget_from_status(text.status),
+                            );
+                        }
+                    }
+                }
+                Err(message) => {
+                    if self.selected_preview_key(app) == Some(result.request.key()) {
+                        app.finish_preview_error(result.title.as_str(), message);
+                    }
+                }
+            }
+        }
+        app.set_background_tasks(self.inflight);
+    }
+
+    fn selected_preview_key(
+        &self,
+        app: &baidupcsr_tui::TuiApp,
+    ) -> Option<baidupcsr_preview::PreviewKey> {
+        app.selected_entry()
+            .map(|entry| preview_key_for_entry(self.account_uid, entry))
     }
 
     fn refresh_current_cache_age(&self, app: &mut baidupcsr_tui::TuiApp) {
@@ -386,6 +572,43 @@ fn list_remote_directory(
         .map_err(|err| format!("remote_list_error: {err}"))
 }
 
+fn preview_key_for_entry(
+    account_uid: u64,
+    entry: &baidupcsr_pcs::FileEntry,
+) -> baidupcsr_preview::PreviewKey {
+    baidupcsr_preview::PreviewKey {
+        account_uid,
+        fs_id: entry.fs_id,
+        mtime: entry.mtime,
+        size: nonnegative_size(entry.size),
+    }
+}
+
+fn nonnegative_size(size: i64) -> u64 {
+    u64::try_from(size).unwrap_or(0)
+}
+
+fn preview_budget_from_status(
+    status: baidupcsr_preview::PreviewStatus,
+) -> baidupcsr_tui::PreviewBudget {
+    baidupcsr_tui::PreviewBudget {
+        kind: tui_preview_kind(status.kind),
+        fetched_bytes: status.fetched_bytes,
+        memory_limit_bytes: status.memory_limit_bytes,
+        truncated: status.truncated,
+        disk_backed: status.disk_backed,
+    }
+}
+
+fn tui_preview_kind(kind: baidupcsr_preview::PreviewKind) -> baidupcsr_tui::PreviewKind {
+    match kind {
+        baidupcsr_preview::PreviewKind::Text => baidupcsr_tui::PreviewKind::Text,
+        baidupcsr_preview::PreviewKind::Image => baidupcsr_tui::PreviewKind::Image,
+        baidupcsr_preview::PreviewKind::Metadata => baidupcsr_tui::PreviewKind::Metadata,
+        baidupcsr_preview::PreviewKind::Video => baidupcsr_tui::PreviewKind::Video,
+    }
+}
+
 fn first_non_empty<'a>(values: &'a [&str]) -> Option<&'a str> {
     values.iter().copied().find(|value| !value.is_empty())
 }
@@ -446,5 +669,50 @@ fn presence(value: bool) -> &'static str {
         "present"
     } else {
         "missing"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use baidupcsr_pcs::FileEntry;
+
+    use super::{preview_key_for_entry, tui_preview_kind};
+
+    fn file(fs_id: i64, size: i64) -> FileEntry {
+        FileEntry {
+            fs_id,
+            app_id: 266719,
+            path: "/docs/notes.md".to_string(),
+            server_filename: "notes.md".to_string(),
+            ctime: 1,
+            mtime: 2,
+            md5: String::new(),
+            block_list: Vec::new(),
+            size,
+            is_dir: false,
+            has_subdir: false,
+        }
+    }
+
+    #[test]
+    fn preview_key_uses_account_file_mtime_and_nonnegative_size() {
+        let key = preview_key_for_entry(42, &file(7, -1));
+
+        assert_eq!(key.account_uid, 42);
+        assert_eq!(key.fs_id, 7);
+        assert_eq!(key.mtime, 2);
+        assert_eq!(key.size, 0);
+    }
+
+    #[test]
+    fn preview_kind_mapping_preserves_text_and_metadata_boundaries() {
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Text),
+            baidupcsr_tui::PreviewKind::Text
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Metadata),
+            baidupcsr_tui::PreviewKind::Metadata
+        );
     }
 }
