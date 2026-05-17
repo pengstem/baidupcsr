@@ -46,6 +46,10 @@ version = "0.1.0"
 [[package]]
 name = "baidupcsr-tui"
 version = "0.1.0"
+dependencies = [
+ "baidupcsr-core",
+ "baidupcsr-pcs",
+]
 
 [[package]]
 name = "block-buffer"

@@ -21,3 +21,7 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 4 started: added failing tests for stale-while-revalidate directory cache behavior, generation ordering, change detection, and session path state.
 - Stage 4 RED: `cargo test -p baidupcsr-core --test stage4_directory_cache` failed on missing cache/session types.
 - Stage 4 GREEN: implemented a pure directory cache state machine and session state, then verified workspace tests, clippy, and formatting.
+- Stage 4 committed as `a50717e` with directory cache state machine.
+- Stage 5 started: added failing tests for default Vim keymap, TUI mode changes, selection bounds, status line, and preview budget status.
+- Stage 5 RED: `cargo test -p baidupcsr-tui --test stage5_tui_state` failed on missing TUI state/keymap types.
+- Stage 5 GREEN: implemented the TUI state core and verified workspace tests, clippy, and formatting. Ratatui terminal rendering remains future work.

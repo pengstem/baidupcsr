@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[dependencies]
+baidupcsr-core = { path = "../baidupcsr-core" }
+baidupcsr-pcs = { path = "../baidupcsr-pcs" }
+
 [lints]
 workspace = true
-
