@@ -1,0 +1,109 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use baidupcsr_pcs::{
+    dev_uid, locatedownload_sign_with, parse_file_list, parse_locatedownload, parse_remote_error,
+    select_download_urls, OrderBy, OrderDirection, OrderOptions, PcsApi, PcsClientOptions,
+    PcsError,
+};
+
+fn fixture_path(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/api")
+        .join(name)
+}
+
+fn fixture_string(name: &str) -> String {
+    let data = fs::read_to_string(fixture_path(name));
+    assert!(data.is_ok(), "fixture should be readable");
+    data.unwrap_or_default()
+}
+
+#[test]
+fn parse_list_response_preserves_file_model_fields() {
+    let entries = parse_file_list(&fixture_string("list_root.json"));
+    assert!(entries.is_ok(), "list fixture should parse");
+    let entries = match entries {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].fs_id, 9001);
+    assert!(entries[0].is_dir);
+    assert_eq!(entries[1].server_filename, "hello.txt");
+    assert_eq!(
+        entries[1].block_list,
+        vec!["5d41402abc4b2a76b9719d911017c592"]
+    );
+}
+
+#[test]
+fn parse_remote_error_keeps_remote_code_and_message() {
+    let error = parse_remote_error("list", &fixture_string("remote_error.json"));
+    assert!(matches!(
+        error,
+        PcsError::Remote {
+            operation: _,
+            code: 31066,
+            message: _
+        }
+    ));
+}
+
+#[test]
+fn list_request_builds_pcs_url_with_ordering() {
+    let api = PcsApi::new(PcsClientOptions {
+        app_id: 266719,
+        pcs_addr: "pcs.baidu.com".to_string(),
+        enable_https: true,
+    });
+
+    let request = api.list_request(
+        "/我的资源",
+        OrderOptions {
+            by: OrderBy::Name,
+            direction: OrderDirection::Asc,
+        },
+    );
+
+    assert_eq!(request.method, "GET");
+    assert_eq!(
+        request.url.as_str(),
+        "https://pcs.baidu.com/rest/2.0/pcs/file?app_id=266719&method=list&path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90&by=name&order=asc"
+    );
+}
+
+#[test]
+fn locatedownload_sign_matches_reference_vector() {
+    let sign = locatedownload_sign_with(
+        1_571_140_066,
+        "O|1E67351CCE80B2CF48DB511CD77ACD9F",
+        10086,
+        "test_bduss",
+    );
+
+    assert_eq!(sign.rand, "b6bb7a6f46899e181baea58798d4fdb889775c2c");
+    assert_eq!(
+        sign.url_param(),
+        "time=1571140066&rand=b6bb7a6f46899e181baea58798d4fdb889775c2c&devuid=O|1E67351CCE80B2CF48DB511CD77ACD9F&cuid=O|1E67351CCE80B2CF48DB511CD77ACD9F"
+    );
+}
+
+#[test]
+fn devuid_is_uppercase_md5_plus_suffix() {
+    assert_eq!(dev_uid("test_bduss"), "66AE65D3C5D483FC4431FC43670A4673|0");
+}
+
+#[test]
+fn locatedownload_parser_selects_unencrypted_urls() {
+    let info = parse_locatedownload(&fixture_string("locatedownload.json"));
+    assert!(info.is_ok(), "locatedownload fixture should parse");
+    let info = match info {
+        Ok(info) => info,
+        Err(_) => return,
+    };
+
+    let urls = select_download_urls(&info, true);
+    assert_eq!(urls, vec!["https://fixture.invalid/download/hello.txt"]);
+}

@@ -13,3 +13,7 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 2 started: added failing tests for BaiduPCS-Go config discovery, JSON loading, active user selection, cookie auth presence, and redacted doctor output.
 - Stage 2 RED: `cargo test --workspace` failed on missing config APIs, then GREEN after implementing the read-only config model and doctor integration.
 - Stage 2 tmux smoke: ran `doctor --redact` in `baidupcsr-stage2`; it loaded the local BaiduPCS-Go config and printed only redacted credential presence.
+- Stage 2 committed as `4e1ffa7` with read-only config compatibility and redacted doctor integration.
+- Stage 3 started: added failing tests for PCS/Pan response parsing, request URL construction, locatedownload signing, devuid generation, and dlink filtering.
+- Stage 3 RED: `cargo test -p baidupcsr-pcs --test stage3_api` failed on missing PCS API core; a wrong devuid expectation was corrected after checking `md5sum`.
+- Stage 3 GREEN: implemented fixture-based PCS API core and verified workspace test, clippy, and formatting. Real HTTP execution remains a later step.
