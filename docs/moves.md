@@ -17,3 +17,7 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 3 started: added failing tests for PCS/Pan response parsing, request URL construction, locatedownload signing, devuid generation, and dlink filtering.
 - Stage 3 RED: `cargo test -p baidupcsr-pcs --test stage3_api` failed on missing PCS API core; a wrong devuid expectation was corrected after checking `md5sum`.
 - Stage 3 GREEN: implemented fixture-based PCS API core and verified workspace test, clippy, and formatting. Real HTTP execution remains a later step.
+- Stage 3 committed as `b40acde` with PCS/Pan API core.
+- Stage 4 started: added failing tests for stale-while-revalidate directory cache behavior, generation ordering, change detection, and session path state.
+- Stage 4 RED: `cargo test -p baidupcsr-core --test stage4_directory_cache` failed on missing cache/session types.
+- Stage 4 GREEN: implemented a pure directory cache state machine and session state, then verified workspace tests, clippy, and formatting.
