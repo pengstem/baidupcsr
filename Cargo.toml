@@ -1,0 +1,25 @@
+[workspace]
+members = [
+    "crates/baidupcsr-cli",
+    "crates/baidupcsr-config",
+    "crates/baidupcsr-core",
+    "crates/baidupcsr-pcs",
+    "crates/baidupcsr-preview",
+    "crates/baidupcsr-tui",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://example.invalid/baidupcsr"
+rust-version = "1.75"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
