@@ -115,11 +115,51 @@ fn download_request_builds_readonly_pcs_file_url() {
 }
 
 #[test]
+fn locatedownload_request_builds_signed_pcs_url() {
+    let api = PcsApi::new(PcsClientOptions {
+        app_id: 266719,
+        pcs_addr: "pcs.baidu.com".to_string(),
+        enable_https: true,
+    });
+    let sign = locatedownload_sign_with(
+        1_571_140_066,
+        "O|1E67351CCE80B2CF48DB511CD77ACD9F",
+        10086,
+        "test_bduss",
+    );
+
+    let request = api.locatedownload_request("/我的资源/movie.mp4", &sign);
+
+    assert_eq!(request.method, "POST");
+    assert!(request
+        .url
+        .starts_with("https://pcs.baidu.com/rest/2.0/pcs/file?ant=1&check_blue=1"));
+    assert!(request.url.contains("method=locatedownload"));
+    assert!(request.url.contains("app_id=250528"));
+    assert!(request
+        .url
+        .contains("path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90%2Fmovie.mp4"));
+    assert!(request.url.contains("time=1571140066"));
+    assert!(request
+        .url
+        .contains("devuid=O%7C1E67351CCE80B2CF48DB511CD77ACD9F"));
+}
+
+#[test]
 fn preview_range_header_is_bounded_to_requested_bytes() {
     let range = baidupcsr_pcs::ByteRange::prefix(16);
 
     assert_eq!(range.header_value(), "bytes=0-15");
     assert_eq!(range.read_limit_bytes(), 17);
+}
+
+#[test]
+fn preview_range_header_supports_seek_offsets() -> Result<(), PcsError> {
+    let range = ByteRange::new(1024, 2047)?;
+
+    assert_eq!(range.header_value(), "bytes=1024-2047");
+    assert_eq!(range.read_limit_bytes(), 1025);
+    Ok(())
 }
 
 #[test]
@@ -147,6 +187,38 @@ fn download_range_can_be_cancelled_before_network_work() {
 
     assert_eq!(
         client.download_range_with_cancel("/remote.txt", ByteRange::prefix(8), || true),
+        Err(PcsError::Cancelled {
+            operation: "download".to_string()
+        })
+    );
+}
+
+#[test]
+fn client_options_keep_pan_user_agent_separate() {
+    let options = BlockingPcsClientOptions::new_with_pan("pcs-ua", "pan-ua", None);
+
+    assert_eq!(options.user_agent, "pcs-ua");
+    assert_eq!(options.pan_user_agent, "pan-ua");
+}
+
+#[test]
+fn download_url_range_can_be_cancelled_before_network_work() {
+    let client = BlockingPcsClient::new(
+        PcsApi::new(PcsClientOptions {
+            app_id: 266719,
+            pcs_addr: "invalid.local".to_string(),
+            enable_https: true,
+        }),
+        PcsAuth::from_cookie_header("BDUSS=redacted"),
+        BlockingPcsClientOptions::new_with_pan("pcs-ua", "pan-ua", None),
+    );
+
+    assert_eq!(
+        client.download_url_range_with_cancel(
+            "https://fixture.invalid/video.mp4",
+            ByteRange::prefix(8),
+            || true
+        ),
         Err(PcsError::Cancelled {
             operation: "download".to_string()
         })
@@ -185,4 +257,21 @@ fn locatedownload_parser_selects_unencrypted_urls() {
 
     let urls = select_download_urls(&info, true);
     assert_eq!(urls, vec!["https://fixture.invalid/download/hello.txt"]);
+}
+
+#[test]
+fn locatedownload_parser_accepts_success_without_errno() -> Result<(), PcsError> {
+    let info = parse_locatedownload(
+        r#"{
+            "urls": [
+                {
+                    "url": "http://fixture.invalid/download/movie.mp4",
+                    "encrypt": 0
+                }
+            ]
+        }"#,
+    )?;
+
+    assert_eq!(select_download_urls(&info, true).len(), 1);
+    Ok(())
 }

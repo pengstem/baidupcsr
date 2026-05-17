@@ -52,6 +52,7 @@ pub enum KeyAction {
     Search,
     Command,
     Refresh,
+    Preview,
     Quit,
     None,
 }
@@ -94,6 +95,7 @@ impl KeyMap {
             KeyEvent::Char('/') => KeyAction::Search,
             KeyEvent::Char(':') => KeyAction::Command,
             KeyEvent::Char('r') => KeyAction::Refresh,
+            KeyEvent::Char('p') => KeyAction::Preview,
             KeyEvent::Char('q') => KeyAction::Quit,
             KeyEvent::Esc => KeyAction::None,
             KeyEvent::Char(_) => KeyAction::None,
@@ -250,6 +252,15 @@ impl TuiApp {
         self.preview_budget = default_preview_budget();
     }
 
+    pub fn finish_preview_video(&mut self, title: &str, lines: Vec<String>, budget: PreviewBudget) {
+        self.preview_title = title.to_string();
+        self.preview_lines = lines;
+        self.preview_budget = PreviewBudget {
+            kind: PreviewKind::Video,
+            ..budget
+        };
+    }
+
     pub fn handle_key(&mut self, event: KeyEvent) {
         if event == KeyEvent::Esc {
             self.mode = AppMode::Normal;
@@ -268,6 +279,7 @@ impl TuiApp {
             KeyAction::Back
             | KeyAction::Enter
             | KeyAction::Refresh
+            | KeyAction::Preview
             | KeyAction::Quit
             | KeyAction::None => {}
         }

@@ -1,0 +1,3 @@
+video_preview_enabled = true
+video_chunk_size_bytes = 262144
+video_max_chunks = 2

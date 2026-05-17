@@ -51,6 +51,10 @@ fn default_keymap_exposes_vim_navigation() {
         DEFAULT_KEYMAP.action_for(KeyEvent::Char('q')),
         KeyAction::Quit
     );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::Char('p')),
+        KeyAction::Preview
+    );
 }
 
 #[test]
@@ -137,6 +141,34 @@ fn preview_text_updates_panel_content_and_budget() {
         app.preview_budget().status_line(),
         "preview=text fetched=11 limit=16777216 truncated=false disk=false"
     );
+}
+
+#[test]
+fn video_preview_status_updates_panel_without_disk_cache() {
+    let mut app = TuiApp::new("/videos");
+
+    app.finish_preview_video(
+        "movie.mp4",
+        vec![
+            "video=loopback".to_string(),
+            "listen=127.0.0.1:39177".to_string(),
+            "player=mpv".to_string(),
+            "cache=0/1048576".to_string(),
+        ],
+        PreviewBudget {
+            kind: PreviewKind::Video,
+            fetched_bytes: 0,
+            memory_limit_bytes: 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    assert_eq!(app.preview_title(), "movie.mp4");
+    assert_eq!(app.preview_budget().kind, PreviewKind::Video);
+    assert_eq!(app.preview_budget().memory_limit_bytes, 1024 * 1024);
+    assert!(!app.preview_budget().disk_backed);
+    assert_eq!(app.preview_lines()[0], "video=loopback");
 }
 
 #[test]

@@ -9,6 +9,8 @@ use serde_json::Value;
 
 pub const CONFIG_FILE_NAME: &str = "pcs_config.json";
 pub const ENV_CONFIG_DIR: &str = "BAIDUPCS_GO_CONFIG_DIR";
+pub const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
+pub const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
 
 pub const fn crate_name() -> &'static str {
     "baidupcsr-config"
@@ -40,6 +42,10 @@ pub enum ConfigError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    InvalidUiConfig {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl fmt::Display for ConfigError {
@@ -51,6 +57,9 @@ impl fmt::Display for ConfigError {
             Self::Parse { path, source } => {
                 write!(f, "failed to parse config {}: {source}", path.display())
             }
+            Self::InvalidUiConfig { path, message } => {
+                write!(f, "invalid UI config {}: {message}", path.display())
+            }
         }
     }
 }
@@ -60,6 +69,7 @@ impl std::error::Error for ConfigError {
         match self {
             Self::Read { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
+            Self::InvalidUiConfig { .. } => None,
         }
     }
 }
@@ -118,6 +128,30 @@ pub struct AuthPresence {
     pub stoken: bool,
     pub cookies: bool,
     pub access_token: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UiConfig {
+    pub video_preview: VideoPreviewConfig,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VideoPreviewConfig {
+    pub enabled: bool,
+    pub chunk_size_bytes: u64,
+    pub max_chunks: usize,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self {
+            video_preview: VideoPreviewConfig {
+                enabled: false,
+                chunk_size_bytes: 256 * 1024,
+                max_chunks: 4,
+            },
+        }
+    }
 }
 
 impl BaiduUser {
@@ -193,6 +227,102 @@ pub fn load_config(path: &Path) -> Result<PcsConfig, ConfigError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+pub fn discover_ui_config_file() -> PathBuf {
+    if let Some(path) = env::var_os(ENV_UI_CONFIG).map(PathBuf::from) {
+        return path;
+    }
+
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| {
+            path.join(".config")
+                .join("baidupcsr")
+                .join(UI_CONFIG_FILE_NAME)
+        })
+        .unwrap_or_else(|| PathBuf::from(UI_CONFIG_FILE_NAME))
+}
+
+pub fn load_ui_config_or_default(path: &Path) -> Result<UiConfig, ConfigError> {
+    match load_ui_config(path) {
+        Ok(config) => Ok(config),
+        Err(ConfigError::Read { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+            Ok(UiConfig::default())
+        }
+        Err(err) => Err(err),
+    }
+}
+
+pub fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
+    let data = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    parse_ui_config(path, &data)
+}
+
+fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
+    let mut config = UiConfig::default();
+    for line in data.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            return Err(invalid_ui_config(path, "expected key = value"));
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"');
+        match key {
+            "video_preview_enabled" => {
+                config.video_preview.enabled = parse_bool(path, value)?;
+            }
+            "video_chunk_size_bytes" => {
+                config.video_preview.chunk_size_bytes = parse_u64(path, value)?;
+            }
+            "video_max_chunks" => {
+                config.video_preview.max_chunks = parse_usize(path, value)?;
+            }
+            _ => {}
+        }
+    }
+
+    if config.video_preview.chunk_size_bytes == 0 || config.video_preview.max_chunks == 0 {
+        return Err(invalid_ui_config(
+            path,
+            "video preview chunk budget must be greater than zero",
+        ));
+    }
+
+    Ok(config)
+}
+
+fn parse_bool(path: &Path, value: &str) -> Result<bool, ConfigError> {
+    match value {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(invalid_ui_config(path, "expected boolean value")),
+    }
+}
+
+fn parse_u64(path: &Path, value: &str) -> Result<u64, ConfigError> {
+    value
+        .parse::<u64>()
+        .map_err(|_| invalid_ui_config(path, "expected unsigned integer"))
+}
+
+fn parse_usize(path: &Path, value: &str) -> Result<usize, ConfigError> {
+    value
+        .parse::<usize>()
+        .map_err(|_| invalid_ui_config(path, "expected unsigned integer"))
+}
+
+fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {
+    ConfigError::InvalidUiConfig {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    }
 }
 
 pub fn active_user(config: &PcsConfig) -> Option<&BaiduUser> {

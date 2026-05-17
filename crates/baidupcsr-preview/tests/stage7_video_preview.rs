@@ -1,7 +1,13 @@
 use baidupcsr_preview::{
     LoopbackEndpoint, PlayerBackend, PreviewKey, VideoCacheBudget, VideoChunkCache,
-    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
-    VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+    VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
+    VideoProxyRequest, VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+};
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpStream};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 fn key() -> PreviewKey {
@@ -38,6 +44,15 @@ fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), Video
     let args = launch.args().join(" ");
     assert!(args.contains("127.0.0.1:39177"));
     assert!(!args.contains("baidu"));
+    assert!(args.contains("--cache-on-disk=no"));
+    assert!(!args.contains("--disk-cache=no"));
+    assert!(args.contains("--no-config"));
+    assert!(args.contains("--load-scripts=no"));
+    assert!(args.contains("--osc=no"));
+    assert!(args.contains("--no-terminal"));
+    assert!(args.contains("--pause"));
+    assert!(args.contains("--keep-open=yes"));
+    assert!(args.contains("--idle=yes"));
     assert_eq!(launch.max_memory_cache_bytes(), 512);
     assert!(launch.disk_cache_disabled());
     Ok(())
@@ -137,4 +152,152 @@ fn chunk_cache_rejects_chunks_larger_than_budget_chunk_size() -> Result<(), Vide
         Err(VideoPreviewError::VideoChunkTooLarge)
     );
     Ok(())
+}
+
+#[test]
+fn loopback_server_serves_head_and_range_without_exposing_upstream() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = VideoToken::new("tok_loopback_server_0001").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 2).map_err(debug)?,
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    assert!(server.player_url().contains("127.0.0.1"));
+    assert!(!server.player_url().contains("baidu"));
+
+    let head = raw_http(
+        server.endpoint().port(),
+        &format!(
+            "HEAD /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            token.as_str()
+        ),
+    )?;
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert!(head.contains("Accept-Ranges: bytes"));
+    assert!(head.contains("Content-Length: 1000"));
+    assert!(body(&head).is_empty());
+    assert_eq!(fetches.load(Ordering::Acquire), 0);
+
+    let get = raw_http(
+        server.endpoint().port(),
+        &format!(
+            "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+            token.as_str()
+        ),
+    )?;
+    assert!(get.starts_with("HTTP/1.1 206 Partial Content"));
+    assert!(get.contains("Content-Range: bytes 0-63/1000"));
+    assert_eq!(body(&get).len(), 64);
+    assert_eq!(fetches.load(Ordering::Acquire), 1);
+    assert_eq!(server.stats().used_bytes, 64);
+    assert!(server.stats().used_bytes <= 128);
+    Ok(())
+}
+
+#[test]
+fn loopback_server_rejects_wrong_token_without_fetching_upstream() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let server = VideoLoopbackServer::spawn(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        VideoToken::new("tok_loopback_server_0002").map_err(debug)?,
+        VideoCacheBudget::new(64, 2).map_err(debug)?,
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    let response = raw_http(
+        server.endpoint().port(),
+        "GET /preview/video/wrong HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+    )?;
+
+    assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+    assert_eq!(fetches.load(Ordering::Acquire), 0);
+    assert_eq!(server.stats().used_bytes, 0);
+    Ok(())
+}
+
+#[test]
+fn loopback_server_reuses_chunk_cache_and_reports_stats() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = VideoToken::new("tok_loopback_server_0003").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 2).map_err(debug)?,
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+    let request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token.as_str()
+    );
+
+    let first = raw_http(server.endpoint().port(), &request)?;
+    let second = raw_http(server.endpoint().port(), &request)?;
+
+    assert_eq!(body(&first), body(&second));
+    assert_eq!(fetches.load(Ordering::Acquire), 1);
+    assert_eq!(server.stats().upstream_fetches, 1);
+    assert_eq!(server.stats().cache_hits, 1);
+    assert!(server.stats().used_bytes <= 128);
+    assert_eq!(server.stats().last_range_start, Some(0));
+    assert_eq!(server.stats().last_range_end_inclusive, Some(63));
+    assert_eq!(server.stats().window_start, Some(0));
+    assert_eq!(server.stats().window_end_inclusive, Some(63));
+    assert_eq!(server.stats().last_error, None);
+    Ok(())
+}
+
+fn bytes_for_range(range: VideoRange) -> Result<Vec<u8>, VideoPreviewError> {
+    let len = range
+        .end_inclusive
+        .saturating_sub(range.start)
+        .saturating_add(1);
+    Ok(vec![b'v'; usize::try_from(len).unwrap_or(usize::MAX)])
+}
+
+fn raw_http(port: u16, request: &str) -> Result<String, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|err| err.to_string())?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| err.to_string())?;
+    stream
+        .shutdown(Shutdown::Write)
+        .map_err(|err| err.to_string())?;
+
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| err.to_string())?;
+    Ok(response)
+}
+
+fn body(response: &str) -> &str {
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or("")
+}
+
+fn debug(err: VideoPreviewError) -> String {
+    format!("{err:?}")
 }

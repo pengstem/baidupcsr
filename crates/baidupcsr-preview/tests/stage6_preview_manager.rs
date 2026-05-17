@@ -97,3 +97,12 @@ fn preview_plan_uses_metadata_for_directories_binary_and_oversized_files() {
     assert_eq!(huge_text.action, PreviewAction::MetadataOnly);
     assert_eq!(huge_text.reason, "file exceeds preview memory budget");
 }
+
+#[test]
+fn preview_plan_keeps_large_video_files_on_video_path() {
+    let video = PreviewPlan::for_entry("movie.mp4", false, 512 * 1024 * 1024, 16 * 1024 * 1024);
+
+    assert_eq!(video.kind, PreviewKind::Video);
+    assert_eq!(video.action, PreviewAction::MetadataOnly);
+    assert_eq!(video.reason, "video preview requires explicit action");
+}

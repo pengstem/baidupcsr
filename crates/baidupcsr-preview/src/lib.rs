@@ -1,6 +1,14 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::Duration,
 };
 
 pub const fn crate_name() -> &'static str {
@@ -46,15 +54,28 @@ impl PreviewPlan {
         if is_dir {
             return Self::metadata(PreviewKind::Metadata, "directory metadata only");
         }
-        if size_bytes > memory_limit_bytes {
-            return Self::metadata(PreviewKind::Metadata, "file exceeds preview memory budget");
-        }
 
         match preview_kind_from_name(file_name) {
+            PreviewKind::Video => {
+                Self::metadata(PreviewKind::Video, "video preview requires explicit action")
+            }
             PreviewKind::Text => Self {
-                kind: PreviewKind::Text,
-                action: PreviewAction::FetchText,
-                reason: "text preview within memory budget".to_string(),
+                kind: if size_bytes > memory_limit_bytes {
+                    PreviewKind::Metadata
+                } else {
+                    PreviewKind::Text
+                },
+                action: if size_bytes > memory_limit_bytes {
+                    PreviewAction::MetadataOnly
+                } else {
+                    PreviewAction::FetchText
+                },
+                reason: if size_bytes > memory_limit_bytes {
+                    "file exceeds preview memory budget"
+                } else {
+                    "text preview within memory budget"
+                }
+                .to_string(),
             },
             kind => Self::metadata(kind, "binary or unsupported preview type"),
         }
@@ -233,6 +254,9 @@ pub enum VideoPreviewError {
     InvalidVideoToken,
     InactiveVideoSession,
     VideoChunkTooLarge,
+    LoopbackServerIo,
+    MalformedHttpRequest,
+    UnsupportedHttpMethod,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -374,6 +398,19 @@ impl VideoRange {
             end_inclusive: self.end_inclusive.min(file_size - 1),
         })
     }
+
+    fn clamp_len(self, max_len: u64) -> Result<Self, VideoPreviewError> {
+        if max_len == 0 {
+            return Err(VideoPreviewError::InvalidCacheBudget);
+        }
+
+        Ok(Self {
+            start: self.start,
+            end_inclusive: self
+                .end_inclusive
+                .min(self.start.saturating_add(max_len).saturating_sub(1)),
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -418,6 +455,25 @@ impl VideoChunkCache {
 
     pub const fn used_bytes(&self) -> u64 {
         self.used_bytes
+    }
+
+    pub fn window(&self) -> Option<VideoRange> {
+        let mut start = u64::MAX;
+        let mut end = 0;
+        for (offset, bytes) in &self.chunks {
+            start = start.min(*offset);
+            let chunk_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            end = end.max(offset.saturating_add(chunk_len).saturating_sub(1));
+        }
+
+        if start == u64::MAX {
+            None
+        } else {
+            Some(VideoRange {
+                start,
+                end_inclusive: end,
+            })
+        }
     }
 
     pub fn retain_window(&mut self, window_start: u64, window_len: u64) {
@@ -487,6 +543,18 @@ pub enum VideoProxyResponse {
         accept_ranges: bool,
     },
     Fetch(VideoRange),
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VideoProxyStats {
+    pub used_bytes: u64,
+    pub cache_hits: u64,
+    pub upstream_fetches: u64,
+    pub last_range_start: Option<u64>,
+    pub last_range_end_inclusive: Option<u64>,
+    pub window_start: Option<u64>,
+    pub window_end_inclusive: Option<u64>,
+    pub last_error: Option<VideoPreviewError>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -591,7 +659,8 @@ impl VideoPreviewSession {
                 let range = request
                     .range
                     .unwrap_or_else(|| self.default_range())
-                    .clamp_to_file(self.key.size)?;
+                    .clamp_to_file(self.key.size)?
+                    .clamp_len(self.budget.chunk_size_bytes)?;
                 Ok(VideoProxyResponse::Fetch(range))
             }
         }
@@ -602,10 +671,21 @@ impl VideoPreviewSession {
             PlayerBackend::Mpv => Ok(PlayerLaunch {
                 program: "mpv".to_string(),
                 args: vec![
-                    "--disk-cache=no".to_string(),
+                    "--no-config".to_string(),
+                    "--load-scripts=no".to_string(),
+                    "--osc=no".to_string(),
+                    "--no-terminal".to_string(),
+                    "--cache-on-disk=no".to_string(),
                     "--cache=yes".to_string(),
                     format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
                     "--demuxer-max-back-bytes=0".to_string(),
+                    "--force-window=no".to_string(),
+                    "--vo=null".to_string(),
+                    "--ao=null".to_string(),
+                    "--pause".to_string(),
+                    "--keep-open=yes".to_string(),
+                    "--idle=yes".to_string(),
+                    "--really-quiet".to_string(),
                     "--no-ytdl".to_string(),
                     self.player_url(),
                 ],
@@ -626,4 +706,366 @@ impl VideoPreviewSession {
             end_inclusive: end,
         }
     }
+}
+
+type VideoRangeFetcher =
+    dyn Fn(VideoRange) -> Result<Vec<u8>, VideoPreviewError> + Send + Sync + 'static;
+
+struct VideoLoopbackState {
+    session: VideoPreviewSession,
+    cache: VideoChunkCache,
+    stats: VideoProxyStats,
+    fetcher: Arc<VideoRangeFetcher>,
+}
+
+pub struct VideoLoopbackServer {
+    endpoint: LoopbackEndpoint,
+    player_url: String,
+    stop: Arc<AtomicBool>,
+    state: Arc<Mutex<VideoLoopbackState>>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
+impl VideoLoopbackServer {
+    pub fn spawn<F>(
+        key: PreviewKey,
+        upstream: VideoUpstream,
+        token: VideoToken,
+        budget: VideoCacheBudget,
+        fetcher: F,
+    ) -> Result<Self, VideoPreviewError>
+    where
+        F: Fn(VideoRange) -> Result<Vec<u8>, VideoPreviewError> + Send + Sync + 'static,
+    {
+        let listener = TcpListener::bind((LOOPBACK_HOST, 0))
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        listener
+            .set_nonblocking(true)
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?
+            .port();
+        let endpoint = LoopbackEndpoint::new(port)?;
+        let session = VideoPreviewSession::new(key, upstream, token, endpoint.clone(), budget)?;
+        let player_url = session.player_url();
+        let state = Arc::new(Mutex::new(VideoLoopbackState {
+            session,
+            cache: VideoChunkCache::new(budget),
+            stats: VideoProxyStats::default(),
+            fetcher: Arc::new(fetcher),
+        }));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_state = Arc::clone(&state);
+        let thread_stop = Arc::clone(&stop);
+        let handle =
+            thread::spawn(move || serve_video_loopback(listener, thread_state, thread_stop));
+
+        Ok(Self {
+            endpoint,
+            player_url,
+            stop,
+            state,
+            handle: Some(handle),
+        })
+    }
+
+    pub const fn endpoint(&self) -> &LoopbackEndpoint {
+        &self.endpoint
+    }
+
+    pub fn player_url(&self) -> &str {
+        &self.player_url
+    }
+
+    pub fn stats(&self) -> VideoProxyStats {
+        match self.state.lock() {
+            Ok(state) => {
+                let mut stats = state.stats.clone();
+                stats.used_bytes = state.cache.used_bytes();
+                if let Some(window) = state.cache.window() {
+                    stats.window_start = Some(window.start);
+                    stats.window_end_inclusive = Some(window.end_inclusive);
+                }
+                stats
+            }
+            Err(_) => VideoProxyStats::default(),
+        }
+    }
+
+    pub fn player_launch(&self, backend: PlayerBackend) -> Result<PlayerLaunch, VideoPreviewError> {
+        self.state
+            .lock()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?
+            .session
+            .player_launch(backend)
+    }
+
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Ok(stream) = TcpStream::connect((LOOPBACK_HOST, self.endpoint.port())) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for VideoLoopbackServer {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+fn serve_video_loopback(
+    listener: TcpListener,
+    state: Arc<Mutex<VideoLoopbackState>>,
+    stop: Arc<AtomicBool>,
+) {
+    while !stop.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((stream, _addr)) => {
+                handle_video_connection(stream, &state);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break,
+        }
+    }
+}
+
+fn handle_video_connection(mut stream: TcpStream, state: &Arc<Mutex<VideoLoopbackState>>) {
+    let response = match read_http_request(&mut stream)
+        .and_then(|request| handle_http_request(request, state))
+    {
+        Ok(response) => response,
+        Err(err) => video_error_response(err),
+    };
+    let _ = stream.write_all(&response);
+    let _ = stream.flush();
+}
+
+struct ParsedHttpRequest {
+    method: VideoProxyMethod,
+    token: String,
+    range: Option<VideoRange>,
+}
+
+fn read_http_request(stream: &mut TcpStream) -> Result<ParsedHttpRequest, VideoPreviewError> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+    let mut data = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream
+            .read(&mut buffer)
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        if read == 0 {
+            break;
+        }
+        data.extend_from_slice(&buffer[..read]);
+        if data.windows(4).any(|window| window == b"\r\n\r\n") || data.len() > 16 * 1024 {
+            break;
+        }
+    }
+
+    parse_http_request(&String::from_utf8_lossy(&data))
+}
+
+fn parse_http_request(request: &str) -> Result<ParsedHttpRequest, VideoPreviewError> {
+    let mut lines = request.split("\r\n");
+    let line = lines
+        .next()
+        .filter(|line| !line.is_empty())
+        .ok_or(VideoPreviewError::MalformedHttpRequest)?;
+    let mut parts = line.split_whitespace();
+    let method = match parts.next() {
+        Some("HEAD") => VideoProxyMethod::Head,
+        Some("GET") => VideoProxyMethod::Get,
+        Some(_) => return Err(VideoPreviewError::UnsupportedHttpMethod),
+        None => return Err(VideoPreviewError::MalformedHttpRequest),
+    };
+    let path = parts
+        .next()
+        .ok_or(VideoPreviewError::MalformedHttpRequest)?;
+    let token = path
+        .strip_prefix(VIDEO_PREVIEW_PATH)
+        .and_then(|value| value.split(['?', '/']).next())
+        .filter(|value| !value.is_empty())
+        .ok_or(VideoPreviewError::InvalidVideoToken)?
+        .to_string();
+    let range = lines.find_map(parse_range_header).transpose()?;
+
+    Ok(ParsedHttpRequest {
+        method,
+        token,
+        range,
+    })
+}
+
+fn parse_range_header(line: &str) -> Option<Result<VideoRange, VideoPreviewError>> {
+    let (name, value) = line.split_once(':')?;
+    if !name.trim().eq_ignore_ascii_case("range") {
+        return None;
+    }
+
+    let value = value.trim();
+    let range = value.strip_prefix("bytes=")?;
+    let (start, end) = range.split_once('-')?;
+    let Ok(start) = start.parse::<u64>() else {
+        return Some(Err(VideoPreviewError::InvalidRange));
+    };
+    let end = if end.is_empty() {
+        u64::MAX
+    } else {
+        match end.parse::<u64>() {
+            Ok(end) => end,
+            Err(_) => return Some(Err(VideoPreviewError::InvalidRange)),
+        }
+    };
+
+    Some(VideoRange::new(start, end))
+}
+
+fn handle_http_request(
+    request: ParsedHttpRequest,
+    state: &Arc<Mutex<VideoLoopbackState>>,
+) -> Result<Vec<u8>, VideoPreviewError> {
+    let decision = {
+        let state = state
+            .lock()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        state.session.handle_proxy_request(VideoProxyRequest {
+            method: request.method,
+            token: request.token,
+            range: request.range,
+        })?
+    };
+
+    match decision {
+        VideoProxyResponse::Head {
+            content_length,
+            accept_ranges,
+        } => Ok(video_head_response(content_length, accept_ranges)),
+        VideoProxyResponse::Fetch(range) => video_get_response(range, state),
+    }
+}
+
+fn video_get_response(
+    range: VideoRange,
+    state: &Arc<Mutex<VideoLoopbackState>>,
+) -> Result<Vec<u8>, VideoPreviewError> {
+    {
+        let mut state = state
+            .lock()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        state.stats.last_range_start = Some(range.start);
+        state.stats.last_range_end_inclusive = Some(range.end_inclusive);
+    }
+
+    let cached = {
+        let mut state = state
+            .lock()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        if let Some(bytes) = state.cache.get(range.start).map(<[u8]>::to_vec) {
+            state.stats.cache_hits = state.stats.cache_hits.saturating_add(1);
+            state.stats.last_error = None;
+            Some((bytes, state.session.key.size))
+        } else {
+            None
+        }
+    };
+    let (bytes, file_size) = match cached {
+        Some(hit) => hit,
+        None => {
+            let fetcher = {
+                let state = state
+                    .lock()
+                    .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                Arc::clone(&state.fetcher)
+            };
+            let bytes = match fetcher(range) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    if let Ok(mut state) = state.lock() {
+                        state.stats.last_error = Some(err.clone());
+                    }
+                    return Err(err);
+                }
+            };
+            let file_size = {
+                let mut state = state
+                    .lock()
+                    .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                state.cache.put(range.start, bytes.clone())?;
+                state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
+                state.stats.last_error = None;
+                state.session.key.size
+            };
+            (bytes, file_size)
+        }
+    };
+    let body_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let response_end = range.start.saturating_add(body_len).saturating_sub(1);
+
+    Ok(video_body_response(
+        "206 Partial Content",
+        &[
+            ("Accept-Ranges", "bytes".to_string()),
+            (
+                "Content-Range",
+                format!("bytes {}-{}/{}", range.start, response_end, file_size),
+            ),
+            ("Content-Length", bytes.len().to_string()),
+        ],
+        &bytes,
+    ))
+}
+
+fn video_head_response(content_length: u64, accept_ranges: bool) -> Vec<u8> {
+    let accept_ranges = if accept_ranges { "bytes" } else { "none" };
+    video_body_response(
+        "200 OK",
+        &[
+            ("Accept-Ranges", accept_ranges.to_string()),
+            ("Content-Length", content_length.to_string()),
+        ],
+        &[],
+    )
+}
+
+fn video_error_response(err: VideoPreviewError) -> Vec<u8> {
+    let status = match err {
+        VideoPreviewError::InvalidVideoToken => "403 Forbidden",
+        VideoPreviewError::InactiveVideoSession => "410 Gone",
+        VideoPreviewError::InvalidRange => "416 Range Not Satisfiable",
+        VideoPreviewError::UnsupportedHttpMethod => "405 Method Not Allowed",
+        VideoPreviewError::MalformedHttpRequest => "400 Bad Request",
+        VideoPreviewError::InvalidUpstreamUrl
+        | VideoPreviewError::InvalidVideoTokenFormat
+        | VideoPreviewError::InvalidCacheBudget
+        | VideoPreviewError::InvalidPort
+        | VideoPreviewError::NonLoopbackBindAddress
+        | VideoPreviewError::VideoChunkTooLarge
+        | VideoPreviewError::LoopbackServerIo => "500 Internal Server Error",
+    };
+    video_body_response(status, &[("Content-Length", "0".to_string())], &[])
+}
+
+fn video_body_response(status: &str, headers: &[(&str, String)], body: &[u8]) -> Vec<u8> {
+    let mut head = format!("HTTP/1.1 {status}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        head.push_str(name);
+        head.push_str(": ");
+        head.push_str(value);
+        head.push_str("\r\n");
+    }
+    head.push_str("\r\n");
+
+    let mut response = head.into_bytes();
+    response.extend_from_slice(body);
+    response
 }

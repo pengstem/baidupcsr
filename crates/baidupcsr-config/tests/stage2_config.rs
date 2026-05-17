@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use baidupcsr_config::{
     active_user, discover_config_file, load_config, AuthPresence, ConfigDiscoveryInput,
-    ConfigError, TargetOs,
+    ConfigError, TargetOs, UiConfig,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -103,4 +103,58 @@ fn load_config_extracts_auth_presence_from_cookie_string() {
 fn load_config_rejects_invalid_json_shape() {
     let err = load_config(&fixture_path("pcs_config_invalid.json"));
     assert!(matches!(err, Err(ConfigError::Parse { .. })));
+}
+
+#[test]
+fn ui_config_default_keeps_video_preview_disabled() {
+    let config = UiConfig::default();
+
+    assert!(!config.video_preview.enabled);
+    assert_eq!(config.video_preview.chunk_size_bytes, 256 * 1024);
+    assert_eq!(config.video_preview.max_chunks, 4);
+}
+
+#[test]
+fn ui_config_sidecar_can_enable_strict_video_preview() -> Result<(), ConfigError> {
+    let dir = std::env::temp_dir().join(format!("baidupcsr-ui-config-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|source| ConfigError::Read {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("ui_config.toml");
+    std::fs::write(
+        &path,
+        "video_preview_enabled = true\nvideo_chunk_size_bytes = 131072\nvideo_max_chunks = 3\n",
+    )
+    .map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+
+    let config = baidupcsr_config::load_ui_config(&path)?;
+
+    assert!(config.video_preview.enabled);
+    assert_eq!(config.video_preview.chunk_size_bytes, 131_072);
+    assert_eq!(config.video_preview.max_chunks, 3);
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir(dir);
+    Ok(())
+}
+
+#[test]
+fn ui_config_rejects_zero_video_chunk_budget() {
+    let path = std::env::temp_dir().join(format!(
+        "baidupcsr-ui-config-invalid-{}.toml",
+        std::process::id()
+    ));
+    let write_result = std::fs::write(
+        &path,
+        "video_preview_enabled = true\nvideo_chunk_size_bytes = 0\nvideo_max_chunks = 3\n",
+    );
+    assert!(write_result.is_ok());
+
+    let result = baidupcsr_config::load_ui_config(&path);
+
+    assert!(matches!(result, Err(ConfigError::InvalidUiConfig { .. })));
+    let _ = std::fs::remove_file(path);
 }
