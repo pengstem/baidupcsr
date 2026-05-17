@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 baidupcsr-core = { path = "../baidupcsr-core" }
 baidupcsr-pcs = { path = "../baidupcsr-pcs" }
+ratatui = "0.30.0"
 
 [lints]
 workspace = true

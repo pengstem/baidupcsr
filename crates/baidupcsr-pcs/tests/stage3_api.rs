@@ -39,6 +39,29 @@ fn parse_list_response_preserves_file_model_fields() {
 }
 
 #[test]
+fn parse_list_response_accepts_real_success_defaults() -> Result<(), PcsError> {
+    let response = r#"{
+        "list": [
+            {
+                "fs_id": 10,
+                "path": "/我的资源/example",
+                "server_filename": "example",
+                "isdir": 1
+            }
+        ]
+    }"#;
+
+    let files = parse_file_list(response)?;
+
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].server_filename, "example");
+    assert!(files[0].is_dir);
+    assert_eq!(files[0].md5, "");
+    assert_eq!(files[0].size, 0);
+    Ok(())
+}
+
+#[test]
 fn parse_remote_error_keeps_remote_code_and_message() {
     let error = parse_remote_error("list", &fixture_string("remote_error.json"));
     assert!(matches!(

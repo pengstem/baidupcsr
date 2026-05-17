@@ -306,6 +306,29 @@ Stage 7 完成后：
 - 用户能在 UI 里确认 preview 使用的是内存预算，不是隐式下载。
 - 通过 Stage 5 tmux TUI smoke，退出后终端状态恢复。
 
+### Stage 5b: Ratatui 渲染补齐
+
+目标：补齐 Stage 5 欠下的真实 Ratatui 界面，避免 TUI 阶段只停留在状态模型。
+
+任务：
+
+- 引入 `ratatui` 0.30 主 crate，使用 crossterm 默认后端。
+- 实现 `render_app`，至少绘制 Session、Locations、Files、Preview、Tasks、Status 区域。
+- Preview 面板把预算拆成可读字段，不能在窄 pane 里被整行截断。
+- CLI 默认入口和 `tui` 子命令启动真实 terminal UI，而不是普通文本 shell。
+- TUI 启动必须读取 BaiduPCS-Go active user 和 workdir，并用真实只读 PCS list 填充文件列表；运行时不允许用 demo/mock 文件替代远端数据。
+- 用 Ratatui `TestBackend` 断言三栏布局、选中项、Preview 预算和状态栏内容。
+- 用 tmux 启动真实 TUI，手动发送 `j/k/q`，捕获 pane 输出并记录。
+
+验收：
+
+- `cargo test -p baidupcsr-tui --test stage5b_ratatui_render` 通过。
+- `cargo run -p baidupcsr-cli -- tui` 能进入 Ratatui 界面。
+- 文件列表来自本机 BaiduPCS-Go 配置对应账号的真实远端目录；若配置、网络或鉴权失败，UI 显示错误而不是 fallback 到假数据。
+- `j/k` 能移动选择，右侧 Preview 标题随选择变化。
+- `q` 退出后终端状态恢复。
+- 通过 Stage 5b tmux smoke，并记录初始屏幕、移动后屏幕和退出证据。
+
 ### Stage 6: 内存 Preview 基础
 
 目标：实现类似 yazi 的右侧预览，但针对远程文件和网盘 API 做内存安全约束。

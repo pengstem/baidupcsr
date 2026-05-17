@@ -1,4 +1,13 @@
 use baidupcsr_pcs::FileEntry;
+use ratatui::{
+    crossterm::event::{self, Event as CrosstermEvent, KeyCode},
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    Frame,
+};
+use std::{io, time::Duration};
 
 pub const fn crate_name() -> &'static str {
     "baidupcsr-tui"
@@ -73,6 +82,7 @@ pub struct TuiApp {
     selected_index: Option<usize>,
     mode: AppMode,
     background_tasks: usize,
+    notice: Option<String>,
 }
 
 impl TuiApp {
@@ -83,6 +93,7 @@ impl TuiApp {
             selected_index: None,
             mode: AppMode::Normal,
             background_tasks: 0,
+            notice: None,
         }
     }
 
@@ -97,6 +108,14 @@ impl TuiApp {
 
     pub fn set_background_tasks(&mut self, count: usize) {
         self.background_tasks = count;
+    }
+
+    pub fn set_notice(&mut self, notice: impl Into<String>) {
+        self.notice = Some(notice.into());
+    }
+
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
     }
 
     pub fn handle_key(&mut self, event: KeyEvent) {
@@ -130,6 +149,23 @@ impl TuiApp {
         self.mode
     }
 
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn entries(&self) -> &[FileEntry] {
+        &self.entries
+    }
+
+    pub fn selected_entry(&self) -> Option<&FileEntry> {
+        self.selected_index
+            .and_then(|index| self.entries.get(index))
+    }
+
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
+    }
+
     pub fn status_line(&self) -> String {
         format!(
             "mode={} path={} tasks={}",
@@ -151,6 +187,195 @@ impl TuiApp {
             self.selected_index = Some(index.saturating_sub(1));
         }
     }
+}
+
+pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
+    let [header, body, tasks, status] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .areas(frame.area());
+
+    let [locations, files, preview_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(22),
+            Constraint::Percentage(45),
+            Constraint::Min(28),
+        ])
+        .areas(body);
+
+    frame.render_widget(header_widget(app), header);
+    frame.render_widget(locations_widget(app), locations);
+    frame.render_widget(files_widget(app), files);
+    frame.render_widget(preview_widget(app, preview), preview_area);
+    frame.render_widget(tasks_widget(app), tasks);
+    frame.render_widget(status_widget(app), status);
+}
+
+pub fn run_terminal_app(app: TuiApp) -> io::Result<()> {
+    let mut app = app;
+    let mut terminal = ratatui::init();
+    let result = run_terminal_loop(&mut terminal, &mut app);
+    ratatui::restore();
+    result
+}
+
+fn run_terminal_loop(terminal: &mut ratatui::DefaultTerminal, app: &mut TuiApp) -> io::Result<()> {
+    loop {
+        terminal.draw(|frame| {
+            render_app(
+                frame,
+                app,
+                Some(PreviewBudget {
+                    kind: PreviewKind::Metadata,
+                    fetched_bytes: 0,
+                    memory_limit_bytes: 16 * 1024 * 1024,
+                    truncated: false,
+                    disk_backed: false,
+                }),
+            );
+        })?;
+
+        if event::poll(Duration::from_millis(100))? {
+            let CrosstermEvent::Key(key) = event::read()? else {
+                continue;
+            };
+            let Some(tui_key) = map_crossterm_key(key.code) else {
+                continue;
+            };
+            if DEFAULT_KEYMAP.action_for(tui_key) == KeyAction::Quit
+                && app.mode() == AppMode::Normal
+            {
+                break;
+            }
+            app.handle_key(tui_key);
+        }
+    }
+
+    Ok(())
+}
+
+fn map_crossterm_key(code: KeyCode) -> Option<KeyEvent> {
+    match code {
+        KeyCode::Char(value) => Some(KeyEvent::Char(value)),
+        KeyCode::Esc => Some(KeyEvent::Esc),
+        _ => None,
+    }
+}
+
+fn header_widget(app: &TuiApp) -> Paragraph<'_> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(
+            "baidupcsr",
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::raw(app.path()),
+    ]))
+    .block(Block::bordered().title("Session"))
+}
+
+fn locations_widget(app: &TuiApp) -> Paragraph<'_> {
+    Paragraph::new(vec![
+        Line::raw("workdir"),
+        Line::raw(app.path()),
+        Line::raw(""),
+        Line::raw("recent"),
+        Line::raw("/"),
+        Line::raw(""),
+        Line::raw("favorites"),
+        Line::raw(app.path()),
+    ])
+    .block(Block::bordered().title("Locations"))
+    .wrap(Wrap { trim: true })
+}
+
+fn files_widget(app: &TuiApp) -> List<'_> {
+    let items: Vec<ListItem<'_>> = app
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            let marker = if app.selected_index() == Some(index) {
+                ">"
+            } else {
+                " "
+            };
+            let suffix = if entry.is_dir { "/" } else { "" };
+            let size = if entry.is_dir {
+                "-".to_string()
+            } else {
+                entry.size.to_string()
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(marker, Style::new().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::raw(entry.server_filename.as_str()),
+                Span::raw(suffix),
+                Span::raw("  "),
+                Span::styled(size, Style::new().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+
+    List::new(items).block(Block::bordered().title("Files"))
+}
+
+fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_> {
+    let selected = app.selected_entry();
+    let title = selected
+        .map(|entry| entry.server_filename.as_str())
+        .or_else(|| app.notice())
+        .unwrap_or("metadata");
+    let kind = selected
+        .map(|entry| if entry.is_dir { "directory" } else { "file" })
+        .unwrap_or("none");
+    let budget = preview.unwrap_or(PreviewBudget {
+        kind: PreviewKind::Metadata,
+        fetched_bytes: 0,
+        memory_limit_bytes: 0,
+        truncated: false,
+        disk_backed: false,
+    });
+
+    let lines = vec![
+        Line::raw(title.to_string()),
+        Line::raw(kind.to_string()),
+        Line::raw(""),
+        Line::raw(format!("preview={}", budget.kind.label())),
+        Line::raw(format!("fetched={}", budget.fetched_bytes)),
+        Line::raw(format!("limit={}", budget.memory_limit_bytes)),
+        Line::raw(format!("truncated={}", budget.truncated)),
+        Line::raw(format!("disk={}", budget.disk_backed)),
+    ];
+
+    Paragraph::new(lines)
+        .block(Block::bordered().title("Preview"))
+        .wrap(Wrap { trim: true })
+}
+
+fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
+    let mut lines = vec![Line::raw(format!(
+        "refresh=idle preview=idle background={}",
+        app.background_tasks
+    ))];
+    if let Some(notice) = app.notice() {
+        lines.push(Line::raw(notice.to_string()));
+    }
+    Paragraph::new(lines).block(Block::bordered().title("Tasks"))
+}
+
+fn status_widget(app: &TuiApp) -> Paragraph<'_> {
+    Paragraph::new(Line::raw(format!(
+        "{}  keys j/k h/l / : r q",
+        app.status_line()
+    )))
+    .style(Style::new().fg(Color::Black).bg(Color::Gray))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

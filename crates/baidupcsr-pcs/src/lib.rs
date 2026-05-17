@@ -1,6 +1,7 @@
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use md5::{Digest as Md5Digest, Md5};
+use reqwest::header::{COOKIE, USER_AGENT};
 use serde::Deserialize;
 use sha1::{Digest as Sha1Digest, Sha1};
 use url::form_urlencoded;
@@ -12,6 +13,10 @@ pub const fn crate_name() -> &'static str {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcsError {
     Parse {
+        operation: String,
+        message: String,
+    },
+    Network {
         operation: String,
         message: String,
     },
@@ -27,6 +32,9 @@ impl fmt::Display for PcsError {
         match self {
             Self::Parse { operation, message } => {
                 write!(f, "{operation}: failed to parse response: {message}")
+            }
+            Self::Network { operation, message } => {
+                write!(f, "{operation}: network error: {message}")
             }
             Self::Remote {
                 operation,
@@ -57,6 +65,25 @@ pub struct PcsApi {
 pub struct PcsRequest {
     pub method: &'static str,
     pub url: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PcsAuth {
+    cookie_header: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BlockingPcsClientOptions {
+    pub user_agent: String,
+    pub proxy: Option<String>,
+    pub timeout: Duration,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockingPcsClient {
+    api: PcsApi,
+    auth: PcsAuth,
+    options: BlockingPcsClientOptions,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -104,6 +131,108 @@ impl PcsApi {
     }
 }
 
+impl PcsAuth {
+    pub fn from_cookie_header(cookie_header: impl Into<String>) -> Self {
+        Self {
+            cookie_header: cookie_header.into(),
+        }
+    }
+
+    pub fn from_bduss_stoken(
+        bduss: &str,
+        stoken: Option<&str>,
+        baiduid: Option<&str>,
+    ) -> Option<Self> {
+        if bduss.is_empty() {
+            return None;
+        }
+
+        let mut parts = vec![format!("BDUSS={bduss}")];
+        if let Some(stoken) = stoken.filter(|value| !value.is_empty()) {
+            parts.push(format!("STOKEN={stoken}"));
+        }
+        if let Some(baiduid) = baiduid.filter(|value| !value.is_empty()) {
+            parts.push(format!("BAIDUID={baiduid}"));
+        }
+
+        Some(Self {
+            cookie_header: parts.join("; "),
+        })
+    }
+
+    pub fn cookie_header(&self) -> &str {
+        &self.cookie_header
+    }
+}
+
+impl BlockingPcsClientOptions {
+    pub fn new(user_agent: impl Into<String>, proxy: Option<String>) -> Self {
+        Self {
+            user_agent: user_agent.into(),
+            proxy,
+            timeout: Duration::from_secs(15),
+        }
+    }
+}
+
+impl BlockingPcsClient {
+    pub fn new(api: PcsApi, auth: PcsAuth, options: BlockingPcsClientOptions) -> Self {
+        Self { api, auth, options }
+    }
+
+    pub fn list(&self, path: &str, order: OrderOptions) -> Result<Vec<FileEntry>, PcsError> {
+        let request = self.api.list_request(path, order);
+        let client = self.build_client("list")?;
+        let builder = client
+            .get(&request.url)
+            .header(USER_AGENT, self.options.user_agent.as_str())
+            .header(COOKIE, self.auth.cookie_header());
+        if !request.method.eq_ignore_ascii_case("GET") {
+            return Err(PcsError::Network {
+                operation: "list".to_string(),
+                message: format!("unsupported method {}", request.method),
+            });
+        }
+
+        let response = builder.send().map_err(|source| PcsError::Network {
+            operation: "list".to_string(),
+            message: source.to_string(),
+        })?;
+        let status = response.status();
+        let text = response.text().map_err(|source| PcsError::Network {
+            operation: "list".to_string(),
+            message: source.to_string(),
+        })?;
+
+        if !status.is_success() {
+            return Err(parse_remote_error("list", &text));
+        }
+
+        parse_file_list(&text)
+    }
+
+    fn build_client(&self, operation: &str) -> Result<reqwest::blocking::Client, PcsError> {
+        let mut builder = reqwest::blocking::Client::builder().timeout(self.options.timeout);
+        if let Some(proxy) = self
+            .options
+            .proxy
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
+            let proxy = reqwest::Proxy::all(proxy).map_err(|source| PcsError::Network {
+                operation: operation.to_string(),
+                message: source.to_string(),
+            })?;
+            builder = builder.proxy(proxy);
+        }
+
+        builder.build().map_err(|source| PcsError::Network {
+            operation: operation.to_string(),
+            message: source.to_string(),
+        })
+    }
+}
+
 impl OrderBy {
     const fn as_str(self) -> &'static str {
         match self {
@@ -126,18 +255,23 @@ impl OrderDirection {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct FileEntry {
     pub fs_id: i64,
+    #[serde(default)]
     pub app_id: i64,
     pub path: String,
     pub server_filename: String,
+    #[serde(default)]
     pub ctime: i64,
+    #[serde(default)]
     pub mtime: i64,
+    #[serde(default)]
     pub md5: String,
     #[serde(default)]
     pub block_list: Vec<String>,
+    #[serde(default)]
     pub size: i64,
-    #[serde(rename = "isdir", deserialize_with = "int_to_bool")]
+    #[serde(default, rename = "isdir", deserialize_with = "int_to_bool")]
     pub is_dir: bool,
-    #[serde(rename = "ifhassubdir", deserialize_with = "int_to_bool")]
+    #[serde(default, rename = "ifhassubdir", deserialize_with = "int_to_bool")]
     pub has_subdir: bool,
 }
 
@@ -262,6 +396,7 @@ pub fn locatedownload_sign_with(
 
 #[derive(Deserialize)]
 struct ListResponse {
+    #[serde(default)]
     errno: i64,
     list: Vec<FileEntry>,
 }

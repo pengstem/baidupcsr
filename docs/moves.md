@@ -33,3 +33,9 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 7 started: added failing tests for strict video preview session URLs, loopback-only endpoint policy, token/session validation, HEAD/Range proxy decisions, and bounded chunk cache behavior.
 - Stage 7 RED: `cargo test -p baidupcsr-preview --test stage7_video_preview` failed on missing video preview types.
 - Stage 7 GREEN: implemented strict video preview core types without starting a real HTTP server or external player yet.
+- Stage 7 committed as `dbfdfff` with strict video preview core.
+- Stage 5b started after feedback: added Ratatui `TestBackend` render tests so the TUI stage covers actual terminal drawing instead of only state transitions.
+- Stage 5b RED: `cargo test -p baidupcsr-tui --test stage5b_ratatui_render` failed on missing `render_app`; first implementation exposed a truncated preview budget line, so Preview budget rendering was split into readable fields.
+- Stage 5b corrected: removed runtime demo entries; `tui` now reads the active BaiduPCS-Go config and performs a real read-only PCS list before rendering.
+- Stage 5b live smoke exposed real response compatibility gaps (`md5` and `errno` omitted on success); fixed parser defaults and added a regression test.
+- Stage 5b GREEN: implemented real Ratatui layout, config-backed remote listing, CLI `tui` entrypoint, and tmux smoke with `j/k/q` interaction.
