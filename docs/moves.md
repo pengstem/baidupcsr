@@ -29,3 +29,7 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Stage 6 started: added failing tests for in-memory text preview, cache keys, LRU eviction, and stale request rejection.
 - Stage 6 RED: `cargo test -p baidupcsr-preview --test stage6_preview_manager` failed on missing preview manager types; test API was corrected to return `PreviewUpdate`.
 - Stage 6 GREEN: implemented an in-memory preview manager with budget enforcement, LRU eviction, and generation-based stale protection.
+- Stage 6 committed as `0ff3873` with the in-memory preview manager.
+- Stage 7 started: added failing tests for strict video preview session URLs, loopback-only endpoint policy, token/session validation, HEAD/Range proxy decisions, and bounded chunk cache behavior.
+- Stage 7 RED: `cargo test -p baidupcsr-preview --test stage7_video_preview` failed on missing video preview types.
+- Stage 7 GREEN: implemented strict video preview core types without starting a real HTTP server or external player yet.
