@@ -1,8 +1,9 @@
 use baidupcsr_preview::{
-    LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState, PlayerBackend,
-    PlayerLogRing, PreviewKey, VideoCacheBudget, VideoChunkCache, VideoIntervalBuffer,
-    VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
-    VideoProxyRequest, VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+    parse_video_range_header, LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState,
+    PlayerBackend, PlayerLogRing, PreviewKey, RequestedVideoRange, VideoCacheBudget,
+    VideoChunkCache, VideoIntervalBuffer, VideoLoopbackServer, VideoPreviewError,
+    VideoPreviewSession, VideoProxyMethod, VideoProxyRequest, VideoProxyResponse, VideoRange,
+    VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -93,6 +94,38 @@ fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError>
 }
 
 #[test]
+fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoPreviewError> {
+    assert_eq!(
+        parse_video_range_header("Range: bytes=4096-").transpose()?,
+        Some(RequestedVideoRange::Explicit(VideoRange::new(
+            4096,
+            u64::MAX
+        )?))
+    );
+    assert_eq!(
+        parse_video_range_header("Range: bytes=-8192").transpose()?,
+        Some(RequestedVideoRange::Suffix(8192))
+    );
+    Ok(())
+}
+
+#[test]
+fn suffix_proxy_range_resolves_against_file_tail() -> Result<(), VideoPreviewError> {
+    let session = session()?;
+    let response = session.handle_proxy_request(VideoProxyRequest {
+        method: VideoProxyMethod::Get,
+        token: "tok_0123456789abcdef".to_string(),
+        range: Some(RequestedVideoRange::Suffix(128)),
+    })?;
+
+    assert_eq!(
+        response,
+        VideoProxyResponse::Fetch(VideoRange::new(872, 999)?)
+    );
+    Ok(())
+}
+
+#[test]
 fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), VideoPreviewError> {
     let session = session()?;
 
@@ -169,7 +202,7 @@ fn proxy_request_requires_matching_token_and_active_session() -> Result<(), Vide
     let rejected = session.handle_proxy_request(VideoProxyRequest {
         method: VideoProxyMethod::Get,
         token: "wrong".to_string(),
-        range: Some(VideoRange::new(10, 20)?),
+        range: Some(VideoRange::new(10, 20)?.into()),
     });
     assert_eq!(rejected, Err(VideoPreviewError::InvalidVideoToken));
 
@@ -177,7 +210,7 @@ fn proxy_request_requires_matching_token_and_active_session() -> Result<(), Vide
     let accepted = session.handle_proxy_request(VideoProxyRequest {
         method: VideoProxyMethod::Get,
         token: "tok_0123456789abcdef".to_string(),
-        range: Some(range),
+        range: Some(range.into()),
     })?;
     assert_eq!(accepted, VideoProxyResponse::Fetch(range));
 

@@ -216,7 +216,7 @@ git commit -m "feat: add video interval buffer"
 - Modify: `crates/baidupcsr-preview/src/lib.rs`
 - Modify: `crates/baidupcsr-preview/tests/stage7_video_preview.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests for request parsing:
 
@@ -235,13 +235,13 @@ fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoPrevie
 }
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview range_parser_accepts_open_ended_and_suffix_ranges`
 
 Expected: suffix range fails because current parser requires a numeric start.
 
-- [ ] **Step 3: Implement suffix range model**
+- [x] **Step 3: Implement suffix range model**
 
 Extend `VideoRange` with a suffix representation or add a `RequestedVideoRange` enum:
 
@@ -254,13 +254,13 @@ pub enum RequestedVideoRange {
 
 Convert suffix ranges to explicit ranges once file size is known.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview`
 
 Expected: all preview tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/baidupcsr-preview/src/lib.rs crates/baidupcsr-preview/tests/stage7_video_preview.rs

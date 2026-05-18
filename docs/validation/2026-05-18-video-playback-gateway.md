@@ -30,6 +30,8 @@ cargo test -p baidupcsr-preview --test stage7_video_preview
 cargo test -p baidupcsr-cli active_player_log_line_uses_last_sanitized_player_line
 cargo test -p baidupcsr-tui --test stage5b_ratatui_render ratatui_render_keeps_video_playback_diagnostics_visible
 cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer
+cargo test -p baidupcsr-preview --test stage7_video_preview range_parser_accepts_open_ended_and_suffix_ranges
+cargo test -p baidupcsr-preview --test stage7_video_preview suffix_proxy_range_resolves_against_file_tail
 ```
 
 Full gate commands to run before commit:
@@ -63,6 +65,8 @@ tmux kill-session -t baidupcsr-video-gateway
 - RED: interval-buffer test failed because `VideoIntervalBuffer` did not exist.
 - GREEN: `cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer` passed.
 - GREEN: `cargo test -p baidupcsr-preview --test stage7_video_preview` passed with 15 tests after Task 2.
+- RED: Range-parser test failed because `parse_video_range_header` and `RequestedVideoRange` did not exist.
+- GREEN: open-ended and suffix Range tests passed; stage7 preview tests passed with 17 tests after Task 3.
 - Full gate: `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` passed before the live smoke.
 - Live tmux smoke: started the TUI with the local BaiduPCS-Go config, navigated to a real video, pressed `p`, and verified the visible 80x24 panel showed `video=loopback seek=true`, `playback=playing`, `mpv_profile=user`, and `player_log=none`.
 - Live process check: mpv was launched with only a `http://127.0.0.1:<port>/preview/video/<token>` media URL; no dlink was present in process args.
@@ -77,4 +81,4 @@ This record does not include raw Cookie, BDUSS, STOKEN, SBOXTKN, access token, d
 
 ## Conclusion
 
-Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. The gateway is not fully smooth yet: request semantics and active prefetch remain the next tasks.
+Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. Task 3 adds open-ended and suffix Range request semantics. The gateway is not fully smooth yet: active prefetch and live retesting remain.

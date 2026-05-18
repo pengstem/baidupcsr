@@ -559,6 +559,40 @@ impl VideoRange {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestedVideoRange {
+    Explicit(VideoRange),
+    Suffix(u64),
+}
+
+impl RequestedVideoRange {
+    pub fn suffix(bytes: u64) -> Result<Self, VideoPreviewError> {
+        if bytes == 0 {
+            return Err(VideoPreviewError::InvalidRange);
+        }
+        Ok(Self::Suffix(bytes))
+    }
+
+    fn resolve(self, file_size: u64, max_len: u64) -> Result<VideoRange, VideoPreviewError> {
+        match self {
+            Self::Explicit(range) => range.clamp_to_file(file_size)?.clamp_len(max_len),
+            Self::Suffix(bytes) => {
+                if file_size == 0 || max_len == 0 || bytes == 0 {
+                    return Err(VideoPreviewError::InvalidRange);
+                }
+                let len = bytes.min(file_size).min(max_len);
+                VideoRange::new(file_size.saturating_sub(len), file_size.saturating_sub(1))
+            }
+        }
+    }
+}
+
+impl From<VideoRange> for RequestedVideoRange {
+    fn from(range: VideoRange) -> Self {
+        Self::Explicit(range)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VideoChunkCache {
     budget: VideoCacheBudget,
@@ -798,7 +832,7 @@ pub enum VideoProxyMethod {
 pub struct VideoProxyRequest {
     pub method: VideoProxyMethod,
     pub token: String,
-    pub range: Option<VideoRange>,
+    pub range: Option<RequestedVideoRange>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1034,9 +1068,8 @@ impl VideoPreviewSession {
             VideoProxyMethod::Get => {
                 let range = request
                     .range
-                    .unwrap_or_else(|| self.default_range())
-                    .clamp_to_file(self.key.size)?
-                    .clamp_len(self.budget.chunk_size_bytes)?;
+                    .unwrap_or_else(|| self.default_range().into())
+                    .resolve(self.key.size, self.budget.chunk_size_bytes)?;
                 Ok(VideoProxyResponse::Fetch(range))
             }
         }
@@ -1261,7 +1294,7 @@ fn handle_video_connection(mut stream: TcpStream, state: &Arc<Mutex<VideoLoopbac
 struct ParsedHttpRequest {
     method: VideoProxyMethod,
     token: String,
-    range: Option<VideoRange>,
+    range: Option<RequestedVideoRange>,
 }
 
 fn read_http_request(stream: &mut TcpStream) -> Result<ParsedHttpRequest, VideoPreviewError> {
@@ -1308,7 +1341,7 @@ fn parse_http_request(request: &str) -> Result<ParsedHttpRequest, VideoPreviewEr
         .filter(|value| !value.is_empty())
         .ok_or(VideoPreviewError::InvalidVideoToken)?
         .to_string();
-    let range = lines.find_map(parse_range_header).transpose()?;
+    let range = lines.find_map(parse_video_range_header).transpose()?;
 
     Ok(ParsedHttpRequest {
         method,
@@ -1317,7 +1350,9 @@ fn parse_http_request(request: &str) -> Result<ParsedHttpRequest, VideoPreviewEr
     })
 }
 
-fn parse_range_header(line: &str) -> Option<Result<VideoRange, VideoPreviewError>> {
+pub fn parse_video_range_header(
+    line: &str,
+) -> Option<Result<RequestedVideoRange, VideoPreviewError>> {
     let (name, value) = line.split_once(':')?;
     if !name.trim().eq_ignore_ascii_case("range") {
         return None;
@@ -1326,6 +1361,13 @@ fn parse_range_header(line: &str) -> Option<Result<VideoRange, VideoPreviewError
     let value = value.trim();
     let range = value.strip_prefix("bytes=")?;
     let (start, end) = range.split_once('-')?;
+    if start.is_empty() {
+        return Some(
+            end.parse::<u64>()
+                .map_err(|_| VideoPreviewError::InvalidRange)
+                .and_then(RequestedVideoRange::suffix),
+        );
+    }
     let Ok(start) = start.parse::<u64>() else {
         return Some(Err(VideoPreviewError::InvalidRange));
     };
@@ -1338,7 +1380,7 @@ fn parse_range_header(line: &str) -> Option<Result<VideoRange, VideoPreviewError
         }
     };
 
-    Some(VideoRange::new(start, end))
+    Some(VideoRange::new(start, end).map(Into::into))
 }
 
 fn handle_http_request(
