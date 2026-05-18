@@ -520,6 +520,20 @@ impl VideoRange {
         format!("bytes={}-{}", self.start, self.end_inclusive)
     }
 
+    pub fn len(&self) -> u64 {
+        self.end_inclusive
+            .saturating_sub(self.start)
+            .saturating_add(1)
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    pub fn contains(&self, other: Self) -> bool {
+        self.start <= other.start && self.end_inclusive >= other.end_inclusive
+    }
+
     fn clamp_to_file(self, file_size: u64) -> Result<Self, VideoPreviewError> {
         if file_size == 0 || self.start >= file_size {
             return Err(VideoPreviewError::InvalidRange);
@@ -652,6 +666,125 @@ impl VideoChunkCache {
                 self.used_bytes = self.used_bytes.saturating_sub(len);
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CachedInterval {
+    range: VideoRange,
+    bytes: Vec<u8>,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct VideoIntervalBuffer {
+    budget: VideoCacheBudget,
+    used_bytes: u64,
+    tick: u64,
+    intervals: Vec<CachedInterval>,
+}
+
+impl VideoIntervalBuffer {
+    pub fn new(budget: VideoCacheBudget) -> Self {
+        Self {
+            budget,
+            used_bytes: 0,
+            tick: 0,
+            intervals: Vec::new(),
+        }
+    }
+
+    pub fn put(&mut self, range: VideoRange, bytes: Vec<u8>) -> Result<(), VideoPreviewError> {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if len != range.len() || len > self.budget.memory_limit_bytes() {
+            return Err(VideoPreviewError::VideoChunkTooLarge);
+        }
+
+        self.remove_exact(range);
+        let last_used = self.next_tick();
+        self.used_bytes = self.used_bytes.saturating_add(len);
+        self.intervals.push(CachedInterval {
+            range,
+            bytes,
+            last_used,
+        });
+        self.evict_until_within_budget();
+        Ok(())
+    }
+
+    pub fn get(&mut self, range: VideoRange) -> Option<Vec<u8>> {
+        let index = self
+            .intervals
+            .iter()
+            .position(|interval| interval.range.contains(range))?;
+        let offset = usize::try_from(
+            range
+                .start
+                .saturating_sub(self.intervals[index].range.start),
+        )
+        .ok()?;
+        let len = usize::try_from(range.len()).ok()?;
+        let end = offset.checked_add(len)?;
+        let bytes = self.intervals[index].bytes.get(offset..end)?.to_vec();
+        self.intervals[index].last_used = self.next_tick();
+        Some(bytes)
+    }
+
+    pub const fn used_bytes(&self) -> u64 {
+        self.used_bytes
+    }
+
+    pub fn window(&self) -> Option<VideoRange> {
+        let mut start = u64::MAX;
+        let mut end = 0;
+        for interval in &self.intervals {
+            start = start.min(interval.range.start);
+            end = end.max(interval.range.end_inclusive);
+        }
+
+        if start == u64::MAX {
+            None
+        } else {
+            Some(VideoRange {
+                start,
+                end_inclusive: end,
+            })
+        }
+    }
+
+    fn remove_exact(&mut self, range: VideoRange) {
+        let mut index = 0;
+        while index < self.intervals.len() {
+            if self.intervals[index].range == range {
+                let old = self.intervals.remove(index);
+                let len = u64::try_from(old.bytes.len()).unwrap_or(u64::MAX);
+                self.used_bytes = self.used_bytes.saturating_sub(len);
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn evict_until_within_budget(&mut self) {
+        while self.used_bytes > self.budget.memory_limit_bytes() {
+            let Some(index) = self
+                .intervals
+                .iter()
+                .enumerate()
+                .min_by_key(|(_index, interval)| interval.last_used)
+                .map(|(index, _interval)| index)
+            else {
+                break;
+            };
+            let old = self.intervals.remove(index);
+            let len = u64::try_from(old.bytes.len()).unwrap_or(u64::MAX);
+            self.used_bytes = self.used_bytes.saturating_sub(len);
+        }
+    }
+
+    fn next_tick(&mut self) -> u64 {
+        self.tick = self.tick.saturating_add(1);
+        self.tick
     }
 }
 

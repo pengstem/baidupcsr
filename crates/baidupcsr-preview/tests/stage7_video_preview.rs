@@ -1,8 +1,8 @@
 use baidupcsr_preview::{
     LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState, PlayerBackend,
-    PlayerLogRing, PreviewKey, VideoCacheBudget, VideoChunkCache, VideoLoopbackServer,
-    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
-    VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+    PlayerLogRing, PreviewKey, VideoCacheBudget, VideoChunkCache, VideoIntervalBuffer,
+    VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
+    VideoProxyRequest, VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -62,6 +62,34 @@ fn playback_status_marks_stalled_after_no_progress_timeout() {
         .status_at(7_000, 5_000);
 
     assert_eq!(status, PlaybackState::Stalled);
+}
+
+#[test]
+fn interval_buffer_serves_overlapping_subranges() -> Result<(), VideoPreviewError> {
+    let budget = VideoCacheBudget::new(16, 2)?;
+    let mut buffer = VideoIntervalBuffer::new(budget);
+    buffer.put(VideoRange::new(0, 15)?, b"abcdefghijklmnop".to_vec())?;
+
+    assert_eq!(buffer.get(VideoRange::new(4, 7)?), Some(b"efgh".to_vec()));
+    assert_eq!(buffer.get(VideoRange::new(12, 20)?), None);
+    Ok(())
+}
+
+#[test]
+fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError> {
+    let budget = VideoCacheBudget::new(8, 2)?;
+    let mut buffer = VideoIntervalBuffer::new(budget);
+    buffer.put(VideoRange::new(0, 7)?, b"aaaaaaaa".to_vec())?;
+    buffer.put(VideoRange::new(8, 15)?, b"bbbbbbbb".to_vec())?;
+    buffer.put(VideoRange::new(16, 23)?, b"cccccccc".to_vec())?;
+
+    assert_eq!(buffer.used_bytes(), 16);
+    assert!(buffer.get(VideoRange::new(0, 7)?).is_none());
+    assert_eq!(
+        buffer.get(VideoRange::new(16, 23)?),
+        Some(b"cccccccc".to_vec())
+    );
+    Ok(())
 }
 
 #[test]

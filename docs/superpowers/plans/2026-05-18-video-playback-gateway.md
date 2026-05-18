@@ -29,7 +29,7 @@
 - Modify: `crates/baidupcsr-cli/src/main.rs`
 - Modify: `docs/validation/2026-05-18-video-playback-gateway.md`
 
-- [ ] **Step 1: Write failing preview tests**
+- [x] **Step 1: Write failing preview tests**
 
 Add tests asserting:
 
@@ -57,13 +57,13 @@ fn playback_status_marks_stalled_after_no_progress_timeout() {
 }
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview player_log_ring_keeps_recent_sanitized_lines playback_status_marks_stalled_after_no_progress_timeout`
 
 Expected: compile failure for missing `PlayerLogRing`, `PlaybackProgress`, and `PlaybackState`.
 
-- [ ] **Step 3: Implement minimal preview types**
+- [x] **Step 3: Implement minimal preview types**
 
 Add:
 
@@ -114,13 +114,13 @@ pub struct PlayerLogRing {
 
 Implement `new`, `push`, `lines`, and URL redaction for `http://`, `https://`, token-looking substrings.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview`
 
 Expected: all stage7 preview tests pass.
 
-- [ ] **Step 5: Wire CLI display**
+- [x] **Step 5: Wire CLI display**
 
 Extend active video preview lines to include:
 
@@ -132,7 +132,7 @@ player_log=<last sanitized line or none>
 
 Keep this minimal; do not yet change buffering behavior.
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run:
 
@@ -143,7 +143,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Expected: both pass.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/baidupcsr-preview/src/lib.rs crates/baidupcsr-preview/tests/stage7_video_preview.rs crates/baidupcsr-cli/src/main.rs docs/validation/2026-05-18-video-playback-gateway.md docs/moves.md
@@ -156,7 +156,7 @@ git commit -m "feat: add video playback diagnostics contract"
 - Modify: `crates/baidupcsr-preview/src/lib.rs`
 - Modify: `crates/baidupcsr-preview/tests/stage7_video_preview.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add tests:
 
@@ -187,23 +187,23 @@ fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError>
 }
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer`
 
 Expected: compile failure for missing `VideoIntervalBuffer`.
 
-- [ ] **Step 3: Implement minimal interval buffer**
+- [x] **Step 3: Implement minimal interval buffer**
 
 Add `VideoIntervalBuffer` alongside `VideoChunkCache`, leaving existing server behavior untouched until Task 3. Use a small internal `CachedInterval { range, bytes, last_used }` vector and evict oldest intervals while `used_bytes > memory_limit_bytes`.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer`
 
 Expected: the two interval tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/baidupcsr-preview/src/lib.rs crates/baidupcsr-preview/tests/stage7_video_preview.rs

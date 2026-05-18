@@ -29,6 +29,7 @@ cargo test -p baidupcsr-preview --test stage7_video_preview player_log_ring_reda
 cargo test -p baidupcsr-preview --test stage7_video_preview
 cargo test -p baidupcsr-cli active_player_log_line_uses_last_sanitized_player_line
 cargo test -p baidupcsr-tui --test stage5b_ratatui_render ratatui_render_keeps_video_playback_diagnostics_visible
+cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer
 ```
 
 Full gate commands to run before commit:
@@ -59,6 +60,9 @@ tmux kill-session -t baidupcsr-video-gateway
 - GREEN: `cargo test -p baidupcsr-preview --test stage7_video_preview` passed with 13 tests.
 - GREEN: `cargo test -p baidupcsr-cli active_player_log_line_uses_last_sanitized_player_line` passed.
 - GREEN: `cargo test -p baidupcsr-tui --test stage5b_ratatui_render ratatui_render_keeps_video_playback_diagnostics_visible` passed.
+- RED: interval-buffer test failed because `VideoIntervalBuffer` did not exist.
+- GREEN: `cargo test -p baidupcsr-preview --test stage7_video_preview interval_buffer` passed.
+- GREEN: `cargo test -p baidupcsr-preview --test stage7_video_preview` passed with 15 tests after Task 2.
 - Full gate: `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` passed before the live smoke.
 - Live tmux smoke: started the TUI with the local BaiduPCS-Go config, navigated to a real video, pressed `p`, and verified the visible 80x24 panel showed `video=loopback seek=true`, `playback=playing`, `mpv_profile=user`, and `player_log=none`.
 - Live process check: mpv was launched with only a `http://127.0.0.1:<port>/preview/video/<token>` media URL; no dlink was present in process args.
@@ -73,4 +77,4 @@ This record does not include raw Cookie, BDUSS, STOKEN, SBOXTKN, access token, d
 
 ## Conclusion
 
-Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. This improves diagnosis and mode clarity; it does not yet solve stutter by itself. Interval buffering, request semantics, and active prefetch remain the next gateway tasks.
+Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. The gateway is not fully smooth yet: request semantics and active prefetch remain the next tasks.

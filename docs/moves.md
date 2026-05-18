@@ -79,3 +79,4 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Video gateway Task 1 started after playback failure feedback: separated the immediate diagnostic contract from the later buffering rewrite, keeping Preview/Play/Open as distinct modes.
 - Video gateway Task 1 RED/GREEN: added playback state and bounded player-log models, redacted URLs plus token-like fields, captured mpv stderr into an in-memory ring, and surfaced `playback=...` plus `player_log=...` in the video preview panel.
 - Video gateway Task 1 real tmux smoke: used the local BaiduPCS-Go config, selected a real video, verified the 80x24 TUI shows `playback=playing`, `mpv_profile=user`, and `player_log=none`, confirmed mpv only received a loopback URL, and confirmed exit cleaned up mpv plus the listener.
+- Video gateway Task 2 RED/GREEN: added `VideoIntervalBuffer` so a cached interval can serve overlapping subranges, with LRU eviction bounded by the video memory budget.
