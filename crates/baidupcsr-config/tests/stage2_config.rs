@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use baidupcsr_config::{
     active_user, discover_config_file, load_config, AuthPresence, ConfigDiscoveryInput,
-    ConfigError, TargetOs, UiConfig,
+    ConfigError, TargetOs, UiConfig, VideoPlayerProfile,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -106,16 +106,20 @@ fn load_config_rejects_invalid_json_shape() {
 }
 
 #[test]
-fn ui_config_default_enables_strict_video_preview_after_explicit_keypress() {
+fn ui_config_default_uses_user_mpv_profile_with_larger_video_budget() {
     let config = UiConfig::default();
 
     assert!(config.video_preview.enabled);
-    assert_eq!(config.video_preview.chunk_size_bytes, 256 * 1024);
-    assert_eq!(config.video_preview.max_chunks, 4);
+    assert_eq!(config.video_preview.chunk_size_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.video_preview.max_chunks, 16);
+    assert_eq!(
+        config.video_preview.player_profile,
+        VideoPlayerProfile::User
+    );
 }
 
 #[test]
-fn ui_config_sidecar_can_enable_strict_video_preview() -> Result<(), ConfigError> {
+fn ui_config_sidecar_can_select_isolated_mpv_profile() -> Result<(), ConfigError> {
     let dir = std::env::temp_dir().join(format!("baidupcsr-ui-config-{}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|source| ConfigError::Read {
         path: dir.clone(),
@@ -124,7 +128,7 @@ fn ui_config_sidecar_can_enable_strict_video_preview() -> Result<(), ConfigError
     let path = dir.join("ui_config.toml");
     std::fs::write(
         &path,
-        "video_preview_enabled = true\nvideo_chunk_size_bytes = 131072\nvideo_max_chunks = 3\n",
+        "video_preview_enabled = true\nvideo_chunk_size_bytes = 131072\nvideo_max_chunks = 3\nvideo_player_profile = \"isolated\"\n",
     )
     .map_err(|source| ConfigError::Read {
         path: path.clone(),
@@ -136,6 +140,10 @@ fn ui_config_sidecar_can_enable_strict_video_preview() -> Result<(), ConfigError
     assert!(config.video_preview.enabled);
     assert_eq!(config.video_preview.chunk_size_bytes, 131_072);
     assert_eq!(config.video_preview.max_chunks, 3);
+    assert_eq!(
+        config.video_preview.player_profile,
+        VideoPlayerProfile::Isolated
+    );
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_dir(dir);
     Ok(())

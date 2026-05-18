@@ -694,6 +694,12 @@ pub enum PlayerBackend {
     Mpv,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MpvLaunchProfile {
+    User,
+    Isolated,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlayerLaunch {
     program: String,
@@ -799,29 +805,54 @@ impl VideoPreviewSession {
     }
 
     pub fn player_launch(&self, backend: PlayerBackend) -> Result<PlayerLaunch, VideoPreviewError> {
+        self.player_launch_with_profile(backend, MpvLaunchProfile::User)
+    }
+
+    pub fn player_launch_with_profile(
+        &self,
+        backend: PlayerBackend,
+        profile: MpvLaunchProfile,
+    ) -> Result<PlayerLaunch, VideoPreviewError> {
         match backend {
-            PlayerBackend::Mpv => Ok(PlayerLaunch {
-                program: "mpv".to_string(),
-                args: vec![
-                    "--no-config".to_string(),
-                    "--load-scripts=no".to_string(),
-                    "--osc=no".to_string(),
-                    "--no-terminal".to_string(),
-                    "--cache-on-disk=no".to_string(),
-                    "--cache=yes".to_string(),
+            PlayerBackend::Mpv => {
+                let mut args = match profile {
+                    MpvLaunchProfile::User => vec![
+                        "--no-terminal".to_string(),
+                        "--cache-on-disk=no".to_string(),
+                        "--cache=yes".to_string(),
+                        "--cache-pause=no".to_string(),
+                        "--demuxer-readahead-secs=20".to_string(),
+                    ],
+                    MpvLaunchProfile::Isolated => vec![
+                        "--no-config".to_string(),
+                        "--load-scripts=no".to_string(),
+                        "--osc=no".to_string(),
+                        "--no-terminal".to_string(),
+                        "--cache-on-disk=no".to_string(),
+                        "--cache=yes".to_string(),
+                    ],
+                };
+                args.extend([
                     format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
                     "--demuxer-max-back-bytes=0".to_string(),
                     "--force-window=yes".to_string(),
-                    "--ao=null".to_string(),
-                    "--mute=yes".to_string(),
+                ]);
+                if profile == MpvLaunchProfile::Isolated {
+                    args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
+                }
+                args.extend([
                     "--idle=yes".to_string(),
                     "--really-quiet".to_string(),
                     "--no-ytdl".to_string(),
                     self.player_url(),
-                ],
-                max_memory_cache_bytes: self.budget.memory_limit_bytes(),
-                disk_cache_disabled: true,
-            }),
+                ]);
+                Ok(PlayerLaunch {
+                    program: "mpv".to_string(),
+                    args,
+                    max_memory_cache_bytes: self.budget.memory_limit_bytes(),
+                    disk_cache_disabled: true,
+                })
+            }
         }
     }
 
@@ -929,6 +960,18 @@ impl VideoLoopbackServer {
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?
             .session
             .player_launch(backend)
+    }
+
+    pub fn player_launch_with_profile(
+        &self,
+        backend: PlayerBackend,
+        profile: MpvLaunchProfile,
+    ) -> Result<PlayerLaunch, VideoPreviewError> {
+        self.state
+            .lock()
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?
+            .session
+            .player_launch_with_profile(backend, profile)
     }
 
     pub fn shutdown(&mut self) {

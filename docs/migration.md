@@ -40,6 +40,21 @@ Rust-only state is kept outside `pcs_config.json`:
 - Directory cache: `BAIDUPCSR_CACHE_DIR`, otherwise
   `$XDG_CACHE_HOME/baidupcsr` or `$HOME/.cache/baidupcsr`.
 
+Video preview sidecar keys:
+
+```toml
+video_preview_enabled = true
+video_chunk_size_bytes = 4194304
+video_max_chunks = 16
+video_player_profile = "user"
+```
+
+`video_player_profile = "user"` is the default. It lets mpv load the user's
+normal config, OSD style, and scripts while still receiving only the local
+loopback URL and keeping `--cache-on-disk=no`. Use `"isolated"` to restore the
+stricter no-config/no-scripts launch profile for smoke tests or when a local mpv
+script writes unwanted temp files.
+
 The directory cache stores remote directory metadata. If filenames or paths are
 sensitive on the local machine, point `BAIDUPCSR_CACHE_DIR` at an encrypted or
 temporary location. Removing this directory is safe; the TUI will reload from

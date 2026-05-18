@@ -1247,7 +1247,10 @@ impl BrowserRuntime {
                 return;
             }
         };
-        let launch = match server.player_launch(baidupcsr_preview::PlayerBackend::Mpv) {
+        let launch = match server.player_launch_with_profile(
+            baidupcsr_preview::PlayerBackend::Mpv,
+            mpv_profile_from_config(self.video_config.player_profile),
+        ) {
             Ok(launch) => launch,
             Err(err) => {
                 app.finish_preview_error(
@@ -1321,6 +1324,10 @@ impl BrowserRuntime {
             format!(
                 "cache={}/{} hits={} upstream={}",
                 stats.used_bytes, memory_limit, stats.cache_hits, stats.upstream_fetches
+            ),
+            format!(
+                "mpv_profile={}",
+                mpv_profile_label(self.video_config.player_profile)
             ),
             format!(
                 "disk=false error={}",
@@ -1675,6 +1682,24 @@ fn video_memory_limit_from_config(config: &baidupcsr_config::VideoPreviewConfig)
     config
         .chunk_size_bytes
         .saturating_mul(u64::try_from(config.max_chunks).unwrap_or(u64::MAX))
+}
+
+fn mpv_profile_from_config(
+    profile: baidupcsr_config::VideoPlayerProfile,
+) -> baidupcsr_preview::MpvLaunchProfile {
+    match profile {
+        baidupcsr_config::VideoPlayerProfile::User => baidupcsr_preview::MpvLaunchProfile::User,
+        baidupcsr_config::VideoPlayerProfile::Isolated => {
+            baidupcsr_preview::MpvLaunchProfile::Isolated
+        }
+    }
+}
+
+fn mpv_profile_label(profile: baidupcsr_config::VideoPlayerProfile) -> &'static str {
+    match profile {
+        baidupcsr_config::VideoPlayerProfile::User => "user",
+        baidupcsr_config::VideoPlayerProfile::Isolated => "isolated",
+    }
 }
 
 fn video_range_label(start: Option<u64>, end_inclusive: Option<u64>) -> String {
@@ -2211,7 +2236,13 @@ fn print_doctor(config_dir: Option<PathBuf>) {
             } else {
                 "disabled"
             };
-            println!("video_preview: {state}");
+            println!(
+                "video_preview: {state} profile={} chunk={} chunks={} budget={}",
+                mpv_profile_label(config.video_preview.player_profile),
+                config.video_preview.chunk_size_bytes,
+                config.video_preview.max_chunks,
+                video_memory_limit_from_config(&config.video_preview)
+            );
         }
         Err(err) => {
             println!("video_preview: unknown");
@@ -2707,6 +2738,7 @@ mod tests {
             enabled: true,
             chunk_size_bytes: 128 * 1024,
             max_chunks: 3,
+            player_profile: baidupcsr_config::VideoPlayerProfile::Isolated,
         };
         let budget = video_budget_from_config(&config)?;
 

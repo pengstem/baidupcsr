@@ -21,6 +21,7 @@ fn doctor_reports_release_readiness_paths_without_secrets() -> Result<(), Box<dy
     assert!(stdout.contains("ui_config_path:"));
     assert!(stdout.contains("cache_dir:"));
     assert!(stdout.contains("video_preview: enabled"));
+    assert!(stdout.contains("profile=user"));
     assert!(stdout.contains("mpv:"));
     assert!(stdout.contains("config_permission:"));
     assert!(!stdout.contains("FAKE_BDUSS"));

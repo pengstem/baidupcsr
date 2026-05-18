@@ -36,6 +36,9 @@ Verify the output includes:
 - `config: loaded`
 - active UID and credential presence only, never raw token values
 
+The `video_preview` line should also expose the player profile and cache budget,
+for example `profile=user chunk=4194304 chunks=16 budget=67108864`.
+
 If config loading fails, `doctor` must print a repair hint that starts with
 `repair: set BAIDUPCS_GO_CONFIG_DIR`.
 
@@ -66,6 +69,10 @@ Required checks:
 The preload plan must stay bounded to the visible page neighborhood. It must not
 scan or enqueue an entire large directory just because the directory is large.
 
+For video smoothness, the default profile should allow user mpv config/scripts
+and use a larger bounded cache window. If a release candidate reverts to
+`profile=isolated` or a tiny video budget, record why.
+
 ## Security Smoke
 
 Before release, inspect outputs from `doctor`, TUI status lines, validation
@@ -82,6 +89,11 @@ records, and panic/error paths for these forbidden values:
 `doctor` may print paths and active UID, but credential values must be reduced
 to presence labels. Validation docs must redact private remote paths and
 filenames when they come from a real account.
+
+The default mpv profile is user-friendly rather than isolated. It still hides
+the upstream dlink from mpv, but local mpv scripts are trusted code and may have
+their own side effects. Use `video_player_profile = "isolated"` when the release
+smoke needs the older no-config/no-scripts guarantee.
 
 ## Packaging Artifacts
 

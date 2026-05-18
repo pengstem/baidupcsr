@@ -141,6 +141,13 @@ pub struct VideoPreviewConfig {
     pub enabled: bool,
     pub chunk_size_bytes: u64,
     pub max_chunks: usize,
+    pub player_profile: VideoPlayerProfile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VideoPlayerProfile {
+    User,
+    Isolated,
 }
 
 impl Default for UiConfig {
@@ -148,8 +155,9 @@ impl Default for UiConfig {
         Self {
             video_preview: VideoPreviewConfig {
                 enabled: true,
-                chunk_size_bytes: 256 * 1024,
-                max_chunks: 4,
+                chunk_size_bytes: 4 * 1024 * 1024,
+                max_chunks: 16,
+                player_profile: VideoPlayerProfile::User,
             },
         }
     }
@@ -300,6 +308,9 @@ fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
             "video_max_chunks" => {
                 config.video_preview.max_chunks = parse_usize(path, value)?;
             }
+            "video_player_profile" => {
+                config.video_preview.player_profile = parse_video_player_profile(path, value)?;
+            }
             _ => {}
         }
     }
@@ -332,6 +343,17 @@ fn parse_usize(path: &Path, value: &str) -> Result<usize, ConfigError> {
     value
         .parse::<usize>()
         .map_err(|_| invalid_ui_config(path, "expected unsigned integer"))
+}
+
+fn parse_video_player_profile(path: &Path, value: &str) -> Result<VideoPlayerProfile, ConfigError> {
+    match value {
+        "user" => Ok(VideoPlayerProfile::User),
+        "isolated" => Ok(VideoPlayerProfile::Isolated),
+        _ => Err(invalid_ui_config(
+            path,
+            "expected video player profile user or isolated",
+        )),
+    }
 }
 
 fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {

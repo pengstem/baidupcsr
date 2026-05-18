@@ -1,6 +1,6 @@
 use baidupcsr_preview::{
-    LoopbackEndpoint, PlayerBackend, PreviewKey, VideoCacheBudget, VideoChunkCache,
-    VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
+    LoopbackEndpoint, MpvLaunchProfile, PlayerBackend, PreviewKey, VideoCacheBudget,
+    VideoChunkCache, VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
     VideoProxyRequest, VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
@@ -46,6 +46,33 @@ fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), Video
     assert!(!args.contains("baidu"));
     assert!(args.contains("--cache-on-disk=no"));
     assert!(!args.contains("--disk-cache=no"));
+    assert!(!args.contains("--no-config"));
+    assert!(!args.contains("--load-scripts=no"));
+    assert!(!args.contains("--osc=no"));
+    assert!(args.contains("--demuxer-readahead-secs=20"));
+    assert!(args.contains("--cache-pause=no"));
+    assert!(args.contains("--no-terminal"));
+    assert!(args.contains("--force-window=yes"));
+    assert!(!args.contains("--vo=null"));
+    assert!(!args.contains("--ao=null"));
+    assert!(!args.contains("--mute=yes"));
+    assert!(!args.contains("--pause"));
+    assert!(args.contains("--idle=yes"));
+    assert_eq!(launch.max_memory_cache_bytes(), 512);
+    assert!(launch.disk_cache_disabled());
+    Ok(())
+}
+
+#[test]
+fn isolated_mpv_profile_disables_user_config_scripts_and_osc() -> Result<(), VideoPreviewError> {
+    let session = session()?;
+
+    let launch =
+        session.player_launch_with_profile(PlayerBackend::Mpv, MpvLaunchProfile::Isolated)?;
+    let args = launch.args().join(" ");
+    assert!(args.contains("127.0.0.1:39177"));
+    assert!(!args.contains("baidu"));
+    assert!(args.contains("--cache-on-disk=no"));
     assert!(args.contains("--no-config"));
     assert!(args.contains("--load-scripts=no"));
     assert!(args.contains("--osc=no"));
