@@ -1,9 +1,9 @@
 use baidupcsr_preview::{
     parse_video_range_header, LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState,
     PlayerBackend, PlayerLogRing, PreviewKey, RequestedVideoRange, VideoCacheBudget,
-    VideoChunkCache, VideoIntervalBuffer, VideoLoopbackServer, VideoPreviewError,
-    VideoPreviewSession, VideoProxyMethod, VideoProxyRequest, VideoProxyResponse, VideoRange,
-    VideoToken, VideoUpstream,
+    VideoChunkCache, VideoGatewayPolicy, VideoIntervalBuffer, VideoLoopbackServer,
+    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
+    VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -11,6 +11,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn key() -> PreviewKey {
     PreviewKey {
@@ -391,12 +393,96 @@ fn loopback_server_reuses_chunk_cache_and_reports_stats() -> Result<(), String> 
     Ok(())
 }
 
+#[test]
+fn loopback_server_prefetches_forward_window_without_exceeding_budget() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = VideoToken::new("tok_loopback_server_0004").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn_with_policy(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 4).map_err(debug)?,
+        VideoGatewayPolicy { prefetch_chunks: 2 },
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    let request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token.as_str()
+    );
+    let response = raw_http(server.endpoint().port(), &request)?;
+
+    assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+    wait_for_fetches(&fetches, 3)?;
+    assert!(server.stats().used_bytes <= 256);
+    assert!(server.stats().prefetch_fetches >= 2);
+    Ok(())
+}
+
+#[test]
+fn loopback_server_serves_prefetched_subrange_from_interval_buffer() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = VideoToken::new("tok_loopback_server_0005").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn_with_policy(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 3).map_err(debug)?,
+        VideoGatewayPolicy { prefetch_chunks: 1 },
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    let first = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token.as_str()
+    );
+    let second = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=80-95\r\n\r\n",
+        token.as_str()
+    );
+
+    let _ = raw_http(server.endpoint().port(), &first)?;
+    wait_for_fetches(&fetches, 2)?;
+    let before = fetches.load(Ordering::Acquire);
+    let response = raw_http(server.endpoint().port(), &second)?;
+
+    assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+    assert_eq!(body(&response).len(), 16);
+    assert_eq!(fetches.load(Ordering::Acquire), before);
+    assert!(server.stats().cache_hits >= 1);
+    Ok(())
+}
+
 fn bytes_for_range(range: VideoRange) -> Result<Vec<u8>, VideoPreviewError> {
     let len = range
         .end_inclusive
         .saturating_sub(range.start)
         .saturating_add(1);
     Ok(vec![b'v'; usize::try_from(len).unwrap_or(usize::MAX)])
+}
+
+fn wait_for_fetches(fetches: &AtomicUsize, expected: usize) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fetches.load(Ordering::Acquire) < expected {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for {expected} fetches, saw {}",
+                fetches.load(Ordering::Acquire)
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn raw_http(port: u16, request: &str) -> Result<String, String> {

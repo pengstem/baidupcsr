@@ -786,6 +786,12 @@ impl VideoIntervalBuffer {
         }
     }
 
+    pub fn contains_range(&self, range: VideoRange) -> bool {
+        self.intervals
+            .iter()
+            .any(|interval| interval.range.contains(range))
+    }
+
     fn remove_exact(&mut self, range: VideoRange) {
         let mut index = 0;
         while index < self.intervals.len() {
@@ -849,11 +855,17 @@ pub struct VideoProxyStats {
     pub used_bytes: u64,
     pub cache_hits: u64,
     pub upstream_fetches: u64,
+    pub prefetch_fetches: u64,
     pub last_range_start: Option<u64>,
     pub last_range_end_inclusive: Option<u64>,
     pub window_start: Option<u64>,
     pub window_end_inclusive: Option<u64>,
     pub last_error: Option<VideoPreviewError>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VideoGatewayPolicy {
+    pub prefetch_chunks: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1145,9 +1157,22 @@ type VideoRangeFetcher =
 
 struct VideoLoopbackState {
     session: VideoPreviewSession,
-    cache: VideoChunkCache,
+    cache: VideoIntervalBuffer,
+    policy: VideoGatewayPolicy,
     stats: VideoProxyStats,
     fetcher: Arc<VideoRangeFetcher>,
+    stop: Arc<AtomicBool>,
+}
+
+struct VideoPrefetchJob {
+    range: VideoRange,
+    prefetch_chunks: usize,
+    chunk_size_bytes: u64,
+    memory_limit_bytes: u64,
+    file_size: u64,
+    fetcher: Arc<VideoRangeFetcher>,
+    state: Arc<Mutex<VideoLoopbackState>>,
+    stop: Arc<AtomicBool>,
 }
 
 pub struct VideoLoopbackServer {
@@ -1169,6 +1194,27 @@ impl VideoLoopbackServer {
     where
         F: Fn(VideoRange) -> Result<Vec<u8>, VideoPreviewError> + Send + Sync + 'static,
     {
+        Self::spawn_with_policy(
+            key,
+            upstream,
+            token,
+            budget,
+            VideoGatewayPolicy::default(),
+            fetcher,
+        )
+    }
+
+    pub fn spawn_with_policy<F>(
+        key: PreviewKey,
+        upstream: VideoUpstream,
+        token: VideoToken,
+        budget: VideoCacheBudget,
+        policy: VideoGatewayPolicy,
+        fetcher: F,
+    ) -> Result<Self, VideoPreviewError>
+    where
+        F: Fn(VideoRange) -> Result<Vec<u8>, VideoPreviewError> + Send + Sync + 'static,
+    {
         let listener = TcpListener::bind((LOOPBACK_HOST, 0))
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
         listener
@@ -1181,13 +1227,15 @@ impl VideoLoopbackServer {
         let endpoint = LoopbackEndpoint::new(port)?;
         let session = VideoPreviewSession::new(key, upstream, token, endpoint.clone(), budget)?;
         let player_url = session.player_url();
+        let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(VideoLoopbackState {
             session,
-            cache: VideoChunkCache::new(budget),
+            cache: VideoIntervalBuffer::new(budget),
+            policy,
             stats: VideoProxyStats::default(),
             fetcher: Arc::new(fetcher),
+            stop: Arc::clone(&stop),
         }));
-        let stop = Arc::new(AtomicBool::new(false));
         let thread_state = Arc::clone(&state);
         let thread_stop = Arc::clone(&stop);
         let handle =
@@ -1423,7 +1471,7 @@ fn video_get_response(
         let mut state = state
             .lock()
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
-        if let Some(bytes) = state.cache.get(range.start).map(<[u8]>::to_vec) {
+        if let Some(bytes) = state.cache.get(range) {
             state.stats.cache_hits = state.stats.cache_hits.saturating_add(1);
             state.stats.last_error = None;
             Some((bytes, state.session.key.size))
@@ -1453,11 +1501,12 @@ fn video_get_response(
                 let mut state = state
                     .lock()
                     .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
-                state.cache.put(range.start, bytes.clone())?;
+                state.cache.put(range, bytes.clone())?;
                 state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
                 state.stats.last_error = None;
                 state.session.key.size
             };
+            spawn_prefetch_after(range, state);
             (bytes, file_size)
         }
     };
@@ -1476,6 +1525,84 @@ fn video_get_response(
         ],
         &bytes,
     ))
+}
+
+fn spawn_prefetch_after(range: VideoRange, state: &Arc<Mutex<VideoLoopbackState>>) {
+    let job = {
+        let Ok(state_guard) = state.lock() else {
+            return;
+        };
+        let prefetch_chunks = state_guard.policy.prefetch_chunks;
+        if prefetch_chunks == 0 {
+            return;
+        }
+        VideoPrefetchJob {
+            range,
+            prefetch_chunks,
+            chunk_size_bytes: state_guard.session.budget.chunk_size_bytes,
+            memory_limit_bytes: state_guard.session.budget.memory_limit_bytes(),
+            file_size: state_guard.session.key.size,
+            fetcher: Arc::clone(&state_guard.fetcher),
+            state: Arc::clone(state),
+            stop: Arc::clone(&state_guard.stop),
+        }
+    };
+
+    thread::spawn(move || {
+        prefetch_forward_window(job);
+    });
+}
+
+fn prefetch_forward_window(job: VideoPrefetchJob) {
+    if job.file_size == 0 || job.chunk_size_bytes == 0 || job.memory_limit_bytes == 0 {
+        return;
+    }
+    let Some(mut start) = job.range.end_inclusive.checked_add(1) else {
+        return;
+    };
+    for _ in 0..job.prefetch_chunks {
+        if job.stop.load(Ordering::Acquire) || start >= job.file_size {
+            break;
+        }
+        let Some(end) = start.checked_add(job.chunk_size_bytes.saturating_sub(1)) else {
+            break;
+        };
+        let prefetch_range = VideoRange {
+            start,
+            end_inclusive: end.min(job.file_size.saturating_sub(1)),
+        };
+        let already_cached = match job.state.lock() {
+            Ok(state) => state.cache.contains_range(prefetch_range),
+            Err(_) => break,
+        };
+        if !already_cached {
+            match (job.fetcher)(prefetch_range) {
+                Ok(bytes) => {
+                    if let Ok(mut state) = job.state.lock() {
+                        if state.cache.put(prefetch_range, bytes).is_ok() {
+                            state.stats.upstream_fetches =
+                                state.stats.upstream_fetches.saturating_add(1);
+                            state.stats.prefetch_fetches =
+                                state.stats.prefetch_fetches.saturating_add(1);
+                            state.stats.last_error = None;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    if let Ok(mut state) = job.state.lock() {
+                        state.stats.last_error = Some(err);
+                    }
+                    break;
+                }
+            }
+        }
+        let Some(next_start) = prefetch_range.end_inclusive.checked_add(1) else {
+            break;
+        };
+        start = next_start;
+    }
 }
 
 fn video_head_response(content_length: u64, accept_ranges: bool) -> Vec<u8> {

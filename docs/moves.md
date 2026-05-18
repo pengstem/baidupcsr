@@ -81,3 +81,4 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - Video gateway Task 1 real tmux smoke: used the local BaiduPCS-Go config, selected a real video, verified the 80x24 TUI shows `playback=playing`, `mpv_profile=user`, and `player_log=none`, confirmed mpv only received a loopback URL, and confirmed exit cleaned up mpv plus the listener.
 - Video gateway Task 2 RED/GREEN: added `VideoIntervalBuffer` so a cached interval can serve overlapping subranges, with LRU eviction bounded by the video memory budget.
 - Video gateway Task 3 RED/GREEN: split explicit video ranges from requested range shapes, accepted open-ended and suffix HTTP Range headers, and resolved suffix ranges against the remote file tail.
+- Video gateway Task 4 RED/GREEN: switched the loopback server to interval buffering, added `VideoGatewayPolicy`, and enabled a background forward prefetch window for CLI video playback without delaying the first response.

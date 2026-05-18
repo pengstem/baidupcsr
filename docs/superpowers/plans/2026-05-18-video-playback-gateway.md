@@ -274,7 +274,7 @@ git commit -m "feat: support mpv range request shapes"
 - Modify: `crates/baidupcsr-preview/tests/stage7_video_preview.rs`
 - Modify: `crates/baidupcsr-cli/src/main.rs`
 
-- [ ] **Step 1: Write failing tests**
+- [x] **Step 1: Write failing tests**
 
 Add a loopback server test where the first request fetches the requested range
 and the next two chunks:
@@ -306,13 +306,13 @@ fn loopback_server_prefetches_forward_window_without_exceeding_budget() -> Resul
 }
 ```
 
-- [ ] **Step 2: Run RED**
+- [x] **Step 2: Run RED**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_prefetches_forward_window_without_exceeding_budget`
 
 Expected: compile failure for missing `spawn_with_policy` and `VideoGatewayPolicy`.
 
-- [ ] **Step 3: Implement policy**
+- [x] **Step 3: Implement policy**
 
 Add:
 
@@ -326,13 +326,13 @@ After serving the requested range, synchronously prefetch the next N chunk-sized
 intervals for the first implementation. Keep it simple and bounded; do not add a
 background prefetch worker in this task.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 Run: `cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_prefetches_forward_window_without_exceeding_budget`
 
 Expected: pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/baidupcsr-preview/src/lib.rs crates/baidupcsr-preview/tests/stage7_video_preview.rs crates/baidupcsr-cli/src/main.rs

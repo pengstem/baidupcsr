@@ -1189,7 +1189,7 @@ impl BrowserRuntime {
         let account_uid = self.account_uid;
         let cancellation_epoch = Arc::clone(&self.video_epoch);
         let dlink_cache = Arc::new(Mutex::new(None::<String>));
-        let server = baidupcsr_preview::VideoLoopbackServer::spawn(
+        let server = baidupcsr_preview::VideoLoopbackServer::spawn_with_policy(
             key,
             match baidupcsr_preview::VideoUpstream::new(VIDEO_UPSTREAM_REDACTED_URL) {
                 Ok(upstream) => upstream,
@@ -1203,6 +1203,7 @@ impl BrowserRuntime {
             },
             token,
             budget,
+            baidupcsr_preview::VideoGatewayPolicy { prefetch_chunks: 2 },
             move |range| {
                 if cancellation_epoch.load(Ordering::Acquire) != token_epoch {
                     return Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession);
@@ -1348,8 +1349,12 @@ impl BrowserRuntime {
                 video_range_label(stats.window_start, stats.window_end_inclusive)
             ),
             format!(
-                "cache={}/{} hits={} upstream={}",
-                stats.used_bytes, memory_limit, stats.cache_hits, stats.upstream_fetches
+                "buffer={}/{} hits={} upstream={} prefetch={}",
+                stats.used_bytes,
+                memory_limit,
+                stats.cache_hits,
+                stats.upstream_fetches,
+                stats.prefetch_fetches
             ),
             format!(
                 "disk=false error={}",
