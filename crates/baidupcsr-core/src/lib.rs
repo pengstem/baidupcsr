@@ -282,6 +282,7 @@ pub struct PagedPreloadPlan {
     pub targets: Vec<PreloadTarget>,
     pub window_start: usize,
     pub window_end: usize,
+    pub considered_entries: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,6 +314,7 @@ impl PagedPreloadPlanner {
                 targets: Vec::new(),
                 window_start: 0,
                 window_end: 0,
+                considered_entries: 0,
             };
         }
         let selected = selected_index.min(entries.len().saturating_sub(1));
@@ -336,6 +338,7 @@ impl PagedPreloadPlanner {
             targets,
             window_start,
             window_end,
+            considered_entries: window_end.saturating_sub(window_start),
         }
     }
 

@@ -1,0 +1,109 @@
+# Release Checklist
+
+Stage 10 release readiness is a gate, not a claim of full BaiduPCS-Go parity.
+
+## Build And Test
+
+Run before tagging or handing a binary to users:
+
+```bash
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo build --release -p baidupcsr-cli
+git diff --check
+```
+
+The workspace release profile uses thin LTO, one codegen unit, and line-table
+debug info.
+
+## Doctor Gate
+
+Run:
+
+```bash
+cargo run -p baidupcsr-cli -- doctor --redact
+```
+
+Verify the output includes:
+
+- `config_path`
+- `ui_config_path`
+- `cache_dir`
+- `config_permission`
+- `video_preview`
+- `mpv`
+- `config: loaded`
+- active UID and credential presence only, never raw token values
+
+If config loading fails, `doctor` must print a repair hint that starts with
+`repair: set BAIDUPCS_GO_CONFIG_DIR`.
+
+## Terminal Matrix
+
+Each release candidate should have a short validation note for:
+
+- local Linux terminal;
+- tmux session;
+- SSH session;
+- narrow 80x24 terminal;
+- one wider terminal where the Preview pane has enough space.
+
+macOS and Windows are release targets only after a maintainer records equivalent
+terminal validation. Until then they are compatibility goals, not verified
+platforms.
+
+## Performance Smoke
+
+Required checks:
+
+- `cargo test -p baidupcsr-core --test stage10_preload_performance`
+- real TUI rapid `j/k` movement in a populated directory;
+- warm start with a populated cache directory;
+- refresh while moving selection;
+- text preview followed by video metadata or strict video preview.
+
+The preload plan must stay bounded to the visible page neighborhood. It must not
+scan or enqueue an entire large directory just because the directory is large.
+
+## Security Smoke
+
+Before release, inspect outputs from `doctor`, TUI status lines, validation
+records, and panic/error paths for these forbidden values:
+
+- raw Cookie;
+- BDUSS;
+- STOKEN;
+- SBOXTKN;
+- access token;
+- dlink;
+- private video token.
+
+`doctor` may print paths and active UID, but credential values must be reduced
+to presence labels. Validation docs must redact private remote paths and
+filenames when they come from a real account.
+
+## Packaging Artifacts
+
+Build:
+
+```bash
+cargo build --release -p baidupcsr-cli
+```
+
+Installable local artifacts:
+
+- binary: `target/release/baidupcsr-cli`;
+- bash completion: `completions/baidupcsr.bash`;
+- man page: `docs/man/baidupcsr-cli.1`.
+
+Static Linux builds are expected to be feasible because HTTP uses rustls, but
+they are only considered verified after:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --target x86_64-unknown-linux-musl -p baidupcsr-cli
+```
+
+Record the result in `docs/validation/` before claiming static packaging
+support.

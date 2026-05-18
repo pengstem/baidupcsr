@@ -2195,13 +2195,46 @@ fn print_doctor(config_dir: Option<PathBuf>) {
     println!("redacted: true");
     let discovery = baidupcsr_config::discovery_input_from_env(config_dir);
     let config_path = baidupcsr_config::discover_config_file(&discovery);
+    let ui_config_path = baidupcsr_config::discover_ui_config_file();
+    let cache_dir = baidupcsr_config::discover_cache_dir();
     println!("config_path: {}", config_path.display());
+    println!("ui_config_path: {}", ui_config_path.display());
+    println!("cache_dir: {}", cache_dir.display());
+    println!(
+        "config_permission: {}",
+        config_permission_label(&config_path)
+    );
+    match baidupcsr_config::load_ui_config_or_default(&ui_config_path) {
+        Ok(config) => {
+            let state = if config.video_preview.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            };
+            println!("video_preview: {state}");
+        }
+        Err(err) => {
+            println!("video_preview: unknown");
+            println!("ui_config_error: {err}");
+        }
+    }
+    println!(
+        "mpv: {}",
+        if program_available("mpv") {
+            "present"
+        } else {
+            "missing"
+        }
+    );
 
     match baidupcsr_config::load_config(&config_path) {
         Ok(config) => print_loaded_config(&config),
         Err(err) => {
             println!("config: not loaded");
             println!("config_error: {err}");
+            println!(
+                "repair: set BAIDUPCS_GO_CONFIG_DIR to your BaiduPCS-Go config directory or run BaiduPCS-Go login first"
+            );
         }
     }
 
@@ -2211,6 +2244,37 @@ fn print_doctor(config_dir: Option<PathBuf>) {
     println!("  - {}", baidupcsr_pcs::crate_name());
     println!("  - {}", baidupcsr_preview::crate_name());
     println!("  - {}", baidupcsr_tui::crate_name());
+}
+
+fn config_permission_label(path: &Path) -> String {
+    match fs::metadata(path) {
+        Ok(metadata) => config_metadata_permission_label(&metadata),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => "missing".to_string(),
+        Err(err) => io_error_label(&err),
+    }
+}
+
+#[cfg(unix)]
+fn config_metadata_permission_label(metadata: &fs::Metadata) -> String {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if metadata.permissions().readonly() {
+        format!("readonly mode={mode:03o}")
+    } else if mode & 0o077 == 0 {
+        format!("owner-only mode={mode:03o}")
+    } else {
+        format!("too-open mode={mode:03o}")
+    }
+}
+
+#[cfg(not(unix))]
+fn config_metadata_permission_label(metadata: &fs::Metadata) -> String {
+    if metadata.permissions().readonly() {
+        "readonly".to_string()
+    } else {
+        "present".to_string()
+    }
 }
 
 fn print_loaded_config(config: &baidupcsr_config::PcsConfig) {

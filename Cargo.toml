@@ -23,3 +23,7 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
