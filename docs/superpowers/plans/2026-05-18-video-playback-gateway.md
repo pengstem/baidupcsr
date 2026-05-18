@@ -345,7 +345,7 @@ git commit -m "feat: prefetch video gateway window"
 - Create: `docs/validation/2026-05-18-video-playback-gateway.md`
 - Modify: `docs/moves.md`
 
-- [ ] **Step 1: Run static verification**
+- [x] **Step 1: Run static verification**
 
 Run:
 
@@ -358,7 +358,7 @@ git diff --check
 
 Expected: all pass.
 
-- [ ] **Step 2: Run tmux smoke**
+- [x] **Step 2: Run tmux smoke**
 
 Run in a dedicated tmux session:
 
@@ -383,11 +383,11 @@ Expected:
   state with player/proxy details;
 - no raw remote path, token, or dlink is written to docs.
 
-- [ ] **Step 3: Write validation record**
+- [x] **Step 3: Write validation record**
 
 Add a redacted summary to `docs/validation/2026-05-18-video-playback-gateway.md`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add docs/validation/2026-05-18-video-playback-gateway.md docs/moves.md

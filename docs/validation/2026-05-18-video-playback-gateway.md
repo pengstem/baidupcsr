@@ -71,11 +71,12 @@ tmux kill-session -t baidupcsr-video-gateway
 - GREEN: open-ended and suffix Range tests passed; stage7 preview tests passed with 17 tests after Task 3.
 - RED: prefetch tests failed because `VideoGatewayPolicy` and `spawn_with_policy` did not exist.
 - GREEN: prefetch tests passed; stage7 preview tests passed with 19 tests after Task 4.
-- Full gate: `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` passed before the live smoke.
+- Full gate: `cargo fmt --all -- --check`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `git diff --check` passed after Task 4.
 - Live tmux smoke: started the TUI with the local BaiduPCS-Go config, navigated to a real video, pressed `p`, and verified the visible 80x24 panel showed `video=loopback seek=true`, `playback=playing`, `mpv_profile=user`, and `player_log=none`.
+- Live gateway smoke after prefetch: first visible request remained `range=0-4194303`, while the buffered window advanced to `window=0-12582911` and `buffer=12582912/67108864 hits=0 upstream=3 prefetch=2`.
 - Live process check: mpv was launched with only a `http://127.0.0.1:<port>/preview/video/<token>` media URL; no dlink was present in process args.
 - Live listener check: the loopback server listened on `127.0.0.1:<port>` under `baidupcsr-cli`.
-- Cleanup: quitting the tmux TUI removed the mpv process and the CLI loopback listener.
+- Cleanup: the named tmux smoke session exited. A separate user-run release process was observed afterward and was not touched.
 - Important output shape: TUI video diagnostics now have `video=loopback seek=true`, `playback=...`, `mpv_profile=...`, `player_log=...`, `listen=...`, `player=...`, `range=...`, `buffer=...`, and `disk=false error=...`.
 - Files inspected: `crates/baidupcsr-preview/src/lib.rs`, `crates/baidupcsr-preview/tests/stage7_video_preview.rs`, `crates/baidupcsr-cli/src/main.rs`.
 
@@ -85,4 +86,4 @@ This record does not include raw Cookie, BDUSS, STOKEN, SBOXTKN, access token, d
 
 ## Conclusion
 
-Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. Task 3 adds open-ended and suffix Range request semantics. Task 4 adds background forward prefetch and interval-buffer serving for prefetched subranges.
+Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. Task 3 adds open-ended and suffix Range request semantics. Task 4 adds background forward prefetch and interval-buffer serving for prefetched subranges. Task 5 confirms the real gateway now advances the buffer beyond the first requested range while keeping the player on loopback-only media URLs.
