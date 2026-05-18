@@ -59,6 +59,7 @@ struct BrowserRuntime {
     download_dir: PathBuf,
     task_manager: baidupcsr_core::TaskManager,
     task_cancellations: HashMap<baidupcsr_core::TaskId, Arc<AtomicBool>>,
+    pending_remote_operation: Option<baidupcsr_core::RemoteOperationPlan>,
     tx: mpsc::Sender<DirectoryLoadResult>,
     rx: mpsc::Receiver<DirectoryLoadResult>,
     preview_tx: mpsc::Sender<PreviewLoadResult>,
@@ -106,6 +107,31 @@ enum TransferTaskEvent {
         id: baidupcsr_core::TaskId,
         message: String,
     },
+    RemoteCompleted {
+        id: baidupcsr_core::TaskId,
+        label: String,
+        affected_dirs: Vec<String>,
+    },
+    RemoteFailed {
+        id: baidupcsr_core::TaskId,
+        message: String,
+    },
+    SearchCompleted {
+        id: baidupcsr_core::TaskId,
+        path: String,
+        keyword: String,
+        result: Result<Vec<baidupcsr_pcs::FileEntry>, String>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParsedRemoteCommand {
+    Operation(baidupcsr_core::RemoteOperationPlan),
+    Search {
+        path: String,
+        keyword: String,
+        recursive: bool,
+    },
 }
 
 impl Drop for ActiveVideoPreview {
@@ -146,6 +172,7 @@ impl BrowserRuntime {
                     download_dir: PathBuf::from("."),
                     task_manager: baidupcsr_core::TaskManager::new(),
                     task_cancellations: HashMap::new(),
+                    pending_remote_operation: None,
                     tx,
                     rx,
                     preview_tx,
@@ -175,6 +202,7 @@ impl BrowserRuntime {
                 download_dir: download_dir_for_config(&config),
                 task_manager: baidupcsr_core::TaskManager::new(),
                 task_cancellations: HashMap::new(),
+                pending_remote_operation: None,
                 tx,
                 rx,
                 preview_tx,
@@ -214,6 +242,7 @@ impl BrowserRuntime {
                 download_dir,
                 task_manager: baidupcsr_core::TaskManager::new(),
                 task_cancellations: HashMap::new(),
+                pending_remote_operation: None,
                 tx,
                 rx,
                 preview_tx,
@@ -239,6 +268,7 @@ impl BrowserRuntime {
                 download_dir,
                 task_manager: baidupcsr_core::TaskManager::new(),
                 task_cancellations: HashMap::new(),
+                pending_remote_operation: None,
                 tx,
                 rx,
                 preview_tx,
@@ -277,6 +307,16 @@ impl BrowserRuntime {
                 self.refresh_task_panel(app);
             }
             baidupcsr_tui::TuiRuntimeEvent::Action(action) => self.handle_action(app, action),
+            baidupcsr_tui::TuiRuntimeEvent::CommandSubmitted(command) => {
+                self.handle_remote_command(app, command);
+            }
+            baidupcsr_tui::TuiRuntimeEvent::ConfirmAccepted => {
+                self.confirm_pending_remote_operation(app);
+            }
+            baidupcsr_tui::TuiRuntimeEvent::ConfirmRejected => {
+                self.pending_remote_operation = None;
+                app.set_notice("operation_cancelled");
+            }
         }
     }
 
@@ -322,10 +362,113 @@ impl BrowserRuntime {
             }
             baidupcsr_tui::KeyAction::Search
             | baidupcsr_tui::KeyAction::Command
+            | baidupcsr_tui::KeyAction::ToggleSelect
             | baidupcsr_tui::KeyAction::Quit
             | baidupcsr_tui::KeyAction::None => {}
         }
         self.refresh_task_panel(app);
+    }
+
+    fn handle_remote_command(&mut self, app: &mut baidupcsr_tui::TuiApp, command: String) {
+        match parse_remote_command(command.as_str(), app) {
+            Ok(ParsedRemoteCommand::Search {
+                path,
+                keyword,
+                recursive,
+            }) => self.start_search_task(app, path, keyword, recursive),
+            Ok(ParsedRemoteCommand::Operation(plan)) if plan.is_destructive() => {
+                self.pending_remote_operation = Some(plan.clone());
+                let mut lines = plan.dry_run_lines().to_vec();
+                lines.push("press y to confirm, n to cancel".to_string());
+                app.begin_confirm(lines);
+            }
+            Ok(ParsedRemoteCommand::Operation(plan)) => {
+                self.start_remote_operation_task(app, plan);
+            }
+            Err(message) => app.set_notice(format!("command_error: {message}")),
+        }
+        self.refresh_task_panel(app);
+    }
+
+    fn confirm_pending_remote_operation(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let Some(plan) = self.pending_remote_operation.take() else {
+            app.set_notice("operation_confirm: no pending operation");
+            return;
+        };
+        self.start_remote_operation_task(app, plan);
+    }
+
+    fn start_remote_operation_task(
+        &mut self,
+        app: &mut baidupcsr_tui::TuiApp,
+        plan: baidupcsr_core::RemoteOperationPlan,
+    ) {
+        let Some(client) = self.client.clone() else {
+            app.set_notice("operation_error: client unavailable");
+            return;
+        };
+        let label = plan.label().to_string();
+        let affected_dirs = plan.affected_dirs().to_vec();
+        let id = self
+            .task_manager
+            .enqueue_remote_operation(label.as_str(), plan.item_count());
+        if self.task_manager.start(id).is_err() {
+            app.set_notice("operation_error: failed to start task");
+            return;
+        }
+
+        let tx = self.task_tx.clone();
+        let notice_label = label.clone();
+        thread::spawn(move || {
+            let event = match execute_remote_operation(&client, &plan) {
+                Ok(()) => TransferTaskEvent::RemoteCompleted {
+                    id,
+                    label,
+                    affected_dirs,
+                },
+                Err(message) => TransferTaskEvent::RemoteFailed { id, message },
+            };
+            let _ = tx.send(event);
+        });
+        app.set_notice(format!(
+            "operation_started: #{} {}",
+            id.value(),
+            notice_label
+        ));
+    }
+
+    fn start_search_task(
+        &mut self,
+        app: &mut baidupcsr_tui::TuiApp,
+        path: String,
+        keyword: String,
+        recursive: bool,
+    ) {
+        let Some(client) = self.client.clone() else {
+            app.set_notice("search_error: client unavailable");
+            return;
+        };
+        let id = self.task_manager.enqueue_remote_operation("search", 1);
+        if self.task_manager.start(id).is_err() {
+            app.set_notice("search_error: failed to start task");
+            return;
+        }
+
+        let tx = self.task_tx.clone();
+        let task_path = path.clone();
+        let task_keyword = keyword.clone();
+        thread::spawn(move || {
+            let result = client
+                .search(task_path.as_str(), task_keyword.as_str(), recursive)
+                .map_err(|err| pcs_error_label(&err));
+            let _ = tx.send(TransferTaskEvent::SearchCompleted {
+                id,
+                path: task_path,
+                keyword: task_keyword,
+                result,
+            });
+        });
+        app.set_notice(format!("search_started: #{} {}", id.value(), keyword));
     }
 
     fn start_directory_load(
@@ -712,6 +855,62 @@ impl BrowserRuntime {
                     self.task_cancellations.remove(&id);
                     app.set_notice(format!("download_cancelled: #{}", id.value()));
                 }
+                TransferTaskEvent::RemoteCompleted {
+                    id,
+                    label,
+                    affected_dirs,
+                } => {
+                    let _ = self.task_manager.complete(id);
+                    app.set_notice(format!("operation_complete: #{} {}", id.value(), label));
+                    self.refresh_related_dirs(app, affected_dirs);
+                }
+                TransferTaskEvent::RemoteFailed { id, message } => {
+                    let _ = self.task_manager.fail(id, message.as_str());
+                    app.set_notice(format!("operation_failed: #{} {}", id.value(), message));
+                }
+                TransferTaskEvent::SearchCompleted {
+                    id,
+                    path,
+                    keyword,
+                    result,
+                } => match result {
+                    Ok(entries) => {
+                        let count = entries.len();
+                        let _ = self.task_manager.complete(id);
+                        app.set_entries(entries);
+                        app.set_notice(format!(
+                            "search_complete: #{} {} matches for {} in {}",
+                            id.value(),
+                            count,
+                            keyword,
+                            path
+                        ));
+                        self.update_preview_for_selection(app);
+                    }
+                    Err(message) => {
+                        let _ = self.task_manager.fail(id, message.as_str());
+                        app.set_notice(format!("search_failed: #{} {}", id.value(), message));
+                    }
+                },
+            }
+        }
+    }
+
+    fn refresh_related_dirs(&mut self, app: &mut baidupcsr_tui::TuiApp, dirs: Vec<String>) {
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let mut refreshed_current = false;
+        for dir in dirs {
+            if dir == app.path() {
+                if !refreshed_current {
+                    refreshed_current = true;
+                    let preferred = selected_path_for_refresh(app);
+                    self.start_directory_load(app, dir, preferred);
+                }
+            } else {
+                let generation = self.cache.begin_refresh(dir.as_str());
+                self.spawn_directory_load(client.clone(), dir, generation);
             }
         }
     }
@@ -1268,6 +1467,240 @@ fn selected_path_for_refresh(app: &baidupcsr_tui::TuiApp) -> Option<String> {
     app.selected_entry().map(|entry| entry.path.clone())
 }
 
+fn parse_remote_command(
+    input: &str,
+    app: &baidupcsr_tui::TuiApp,
+) -> Result<ParsedRemoteCommand, String> {
+    let mut parts = input.split_whitespace();
+    let Some(command) = parts.next() else {
+        return Err("empty command".to_string());
+    };
+    let args: Vec<&str> = parts.collect();
+
+    match command {
+        "mkdir" => {
+            let path = args
+                .first()
+                .ok_or_else(|| "mkdir requires a path".to_string())?;
+            Ok(ParsedRemoteCommand::Operation(
+                baidupcsr_core::RemoteOperationPlan::mkdir(resolve_remote_path(app.path(), path))?,
+            ))
+        }
+        "rename" | "ren" => {
+            let target_name = args
+                .first()
+                .ok_or_else(|| "rename requires a new name".to_string())?;
+            let (from, to) = if args.len() >= 2 {
+                (
+                    resolve_remote_path(app.path(), target_name),
+                    resolve_remote_path(app.path(), args[1]),
+                )
+            } else {
+                let entry = app
+                    .selected_entry()
+                    .ok_or_else(|| "rename requires a selected entry".to_string())?;
+                let to = if target_name.starts_with('/') {
+                    normalize_remote_command_path(target_name)
+                } else {
+                    join_remote_path(
+                        remote_parent_path(entry.path.as_str()).as_str(),
+                        target_name,
+                    )
+                };
+                (entry.path.clone(), to)
+            };
+            Ok(ParsedRemoteCommand::Operation(
+                baidupcsr_core::RemoteOperationPlan::rename(from, to)?,
+            ))
+        }
+        "copy" | "cp" => {
+            let target_dir = args
+                .last()
+                .ok_or_else(|| "copy requires a target directory".to_string())?;
+            let pairs = command_target_paths_or_args(app, &args)?
+                .into_iter()
+                .map(|path| baidupcsr_core::RemotePathPair {
+                    to: join_remote_path(
+                        resolve_remote_path(app.path(), target_dir).as_str(),
+                        remote_file_name(path.as_str()).as_str(),
+                    ),
+                    from: path,
+                })
+                .collect();
+            Ok(ParsedRemoteCommand::Operation(
+                baidupcsr_core::RemoteOperationPlan::copy(pairs)?,
+            ))
+        }
+        "move" | "mv" => {
+            let target_dir = args
+                .last()
+                .ok_or_else(|| "move requires a target directory".to_string())?;
+            let pairs = command_target_paths_or_args(app, &args)?
+                .into_iter()
+                .map(|path| baidupcsr_core::RemotePathPair {
+                    to: join_remote_path(
+                        resolve_remote_path(app.path(), target_dir).as_str(),
+                        remote_file_name(path.as_str()).as_str(),
+                    ),
+                    from: path,
+                })
+                .collect();
+            Ok(ParsedRemoteCommand::Operation(
+                baidupcsr_core::RemoteOperationPlan::move_paths(pairs)?,
+            ))
+        }
+        "rm" | "delete" => Ok(ParsedRemoteCommand::Operation(
+            baidupcsr_core::RemoteOperationPlan::delete(if args.is_empty() {
+                command_target_paths(app)?
+            } else {
+                args.iter()
+                    .map(|path| resolve_remote_path(app.path(), path))
+                    .collect()
+            })?,
+        )),
+        "search" => {
+            let mut recursive = false;
+            let mut words = Vec::new();
+            for arg in args {
+                if arg == "-r" {
+                    recursive = true;
+                } else {
+                    words.push(arg);
+                }
+            }
+            let keyword = words.join(" ");
+            if keyword.is_empty() {
+                return Err("search requires a keyword".to_string());
+            }
+            Ok(ParsedRemoteCommand::Search {
+                path: app.path().to_string(),
+                keyword,
+                recursive,
+            })
+        }
+        _ => Err(format!("unknown command: {command}")),
+    }
+}
+
+fn command_target_paths(app: &baidupcsr_tui::TuiApp) -> Result<Vec<String>, String> {
+    if !app.selected_paths().is_empty() {
+        return Ok(app.selected_paths().to_vec());
+    }
+    app.selected_entry()
+        .map(|entry| vec![entry.path.clone()])
+        .ok_or_else(|| "command requires a selected entry".to_string())
+}
+
+fn command_target_paths_or_args(
+    app: &baidupcsr_tui::TuiApp,
+    args: &[&str],
+) -> Result<Vec<String>, String> {
+    if args.len() <= 1 {
+        return command_target_paths(app);
+    }
+    Ok(args[..args.len() - 1]
+        .iter()
+        .map(|path| resolve_remote_path(app.path(), path))
+        .collect())
+}
+
+fn execute_remote_operation(
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    plan: &baidupcsr_core::RemoteOperationPlan,
+) -> Result<(), String> {
+    match plan.kind() {
+        baidupcsr_core::RemoteOperationKind::Mkdir { path } => {
+            client.mkdir(path).map_err(|err| pcs_error_label(&err))
+        }
+        baidupcsr_core::RemoteOperationKind::Delete { paths } => client
+            .delete_paths(paths)
+            .map_err(|err| pcs_error_label(&err)),
+        baidupcsr_core::RemoteOperationKind::Rename { from, to } => {
+            let pair = baidupcsr_pcs::FileOperationPair {
+                from: from.clone(),
+                to: to.clone(),
+            };
+            client
+                .move_paths(&[pair])
+                .map_err(|err| pcs_error_label(&err))
+        }
+        baidupcsr_core::RemoteOperationKind::Copy { pairs } => {
+            let pairs = pcs_operation_pairs(pairs);
+            client
+                .copy_paths(&pairs)
+                .map_err(|err| pcs_error_label(&err))
+        }
+        baidupcsr_core::RemoteOperationKind::Move { pairs } => {
+            let pairs = pcs_operation_pairs(pairs);
+            client
+                .move_paths(&pairs)
+                .map_err(|err| pcs_error_label(&err))
+        }
+    }
+}
+
+fn pcs_operation_pairs(
+    pairs: &[baidupcsr_core::RemotePathPair],
+) -> Vec<baidupcsr_pcs::FileOperationPair> {
+    pairs
+        .iter()
+        .map(|pair| baidupcsr_pcs::FileOperationPair {
+            from: pair.from.clone(),
+            to: pair.to.clone(),
+        })
+        .collect()
+}
+
+fn resolve_remote_path(current_dir: &str, path: &str) -> String {
+    if path.starts_with('/') {
+        normalize_remote_command_path(path)
+    } else {
+        join_remote_path(current_dir, path)
+    }
+}
+
+fn join_remote_path(dir: &str, name: &str) -> String {
+    let dir = normalize_remote_command_path(dir);
+    let name = name.trim_matches('/');
+    if dir == "/" {
+        format!("/{name}")
+    } else {
+        format!("{dir}/{name}")
+    }
+}
+
+fn normalize_remote_command_path(path: &str) -> String {
+    let mut path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    while path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    path
+}
+
+fn remote_parent_path(path: &str) -> String {
+    let path = path.trim_end_matches('/');
+    if path.is_empty() || path == "/" {
+        return "/".to_string();
+    }
+    match path.rfind('/') {
+        Some(0) | None => "/".to_string(),
+        Some(index) => path[..index].to_string(),
+    }
+}
+
+fn remote_file_name(path: &str) -> String {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("remote")
+        .to_string()
+}
+
 fn sanitize_download_file_name(file_name: &str) -> String {
     let sanitized: String = file_name
         .chars()
@@ -1294,6 +1727,7 @@ fn task_summary_line(task: &baidupcsr_core::TaskSnapshot) -> String {
         baidupcsr_core::TaskKind::Upload { local_path, .. } => {
             ("upload", file_name_label(local_path))
         }
+        baidupcsr_core::TaskKind::RemoteOperation { label, .. } => ("remote", label.to_string()),
     };
     let total = task
         .progress
@@ -1532,9 +1966,9 @@ mod tests {
     use super::{
         bduss_from_user, build_pcs_client, download_target_path,
         fetch_first_successful_dlink_range, is_video_entry, list_remote_directory,
-        pan_user_agent_for_config, partial_download_path, preview_key_for_entry,
-        selected_path_for_refresh, task_summary_line, tui_preview_kind, video_budget_from_config,
-        DlinkRangeAttempt,
+        pan_user_agent_for_config, parse_remote_command, partial_download_path,
+        preview_key_for_entry, selected_path_for_refresh, task_summary_line, tui_preview_kind,
+        video_budget_from_config, DlinkRangeAttempt, ParsedRemoteCommand,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -1566,6 +2000,30 @@ mod tests {
             baidupcsr_pcs::PcsError::Parse { message, .. } => format!("parse:{message}"),
             baidupcsr_pcs::PcsError::Network { .. } => "network".to_string(),
             baidupcsr_pcs::PcsError::Remote { code, .. } => format!("remote_code={code}"),
+        }
+    }
+
+    fn expect_operation(
+        command: ParsedRemoteCommand,
+    ) -> Result<baidupcsr_core::RemoteOperationPlan, String> {
+        match command {
+            ParsedRemoteCommand::Operation(plan) => Ok(plan),
+            ParsedRemoteCommand::Search { .. } => {
+                Err("command parsed as search, expected operation".to_string())
+            }
+        }
+    }
+
+    fn expect_search(command: ParsedRemoteCommand) -> Result<(String, String, bool), String> {
+        match command {
+            ParsedRemoteCommand::Search {
+                path,
+                keyword,
+                recursive,
+            } => Ok((path, keyword, recursive)),
+            ParsedRemoteCommand::Operation(_) => {
+                Err("command parsed as operation, expected search".to_string())
+            }
         }
     }
 
@@ -1692,6 +2150,131 @@ mod tests {
             selected_path_for_refresh(&app),
             Some("/docs/second.md".to_string())
         );
+    }
+
+    #[test]
+    fn remote_command_mkdir_resolves_relative_path_under_current_directory() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let plan = expect_operation(parse_remote_command("mkdir reports", &app)?)?;
+
+        assert_eq!(plan.dry_run_lines()[0], "mkdir /docs/reports");
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_rename_targets_selected_entry_parent() -> Result<(), String> {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![file(1, 12)]);
+
+        let plan = expect_operation(parse_remote_command("rename renamed.md", &app)?)?;
+
+        assert_eq!(
+            plan.dry_run_lines()[0],
+            "rename /docs/notes.md -> /docs/renamed.md"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_rename_accepts_explicit_from_to() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let plan = expect_operation(parse_remote_command("rename old.md new.md", &app)?)?;
+
+        assert_eq!(
+            plan.dry_run_lines()[0],
+            "rename /docs/old.md -> /docs/new.md"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_copy_uses_multi_selection_when_present() -> Result<(), String> {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![
+            file(1, 12),
+            FileEntry {
+                fs_id: 2,
+                path: "/docs/second.md".to_string(),
+                server_filename: "second.md".to_string(),
+                ..file(2, 34)
+            },
+        ]);
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char(' '));
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char('j'));
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char(' '));
+
+        let plan = expect_operation(parse_remote_command("copy /backup", &app)?)?;
+
+        assert_eq!(
+            plan.dry_run_lines(),
+            &[
+                "copy 2 remote entries".to_string(),
+                "/docs/notes.md -> /backup/notes.md".to_string(),
+                "/docs/second.md -> /backup/second.md".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_delete_requires_operation_plan_from_selection() -> Result<(), String> {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![file(1, 12)]);
+
+        let plan = expect_operation(parse_remote_command("rm", &app)?)?;
+
+        assert!(plan.is_destructive());
+        assert_eq!(plan.dry_run_lines()[0], "delete 1 remote entries");
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_delete_accepts_explicit_paths() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let plan = expect_operation(parse_remote_command("rm a.md nested/b.md", &app)?)?;
+
+        assert_eq!(
+            plan.dry_run_lines(),
+            &[
+                "delete 2 remote entries".to_string(),
+                "/docs/a.md".to_string(),
+                "/docs/nested/b.md".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_move_accepts_explicit_sources_and_target_directory() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let plan = expect_operation(parse_remote_command("move a.md b.md /archive", &app)?)?;
+
+        assert_eq!(
+            plan.dry_run_lines(),
+            &[
+                "move 2 remote entries".to_string(),
+                "/docs/a.md -> /archive/a.md".to_string(),
+                "/docs/b.md -> /archive/b.md".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_search_parses_recursive_flag() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let (path, keyword, recursive) =
+            expect_search(parse_remote_command("search -r notes", &app)?)?;
+
+        assert_eq!(path, "/docs");
+        assert_eq!(keyword, "notes");
+        assert!(recursive);
+        Ok(())
     }
 
     #[test]

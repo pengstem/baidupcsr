@@ -217,3 +217,19 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
     assert!(screen.contains("disk=false"));
     assert!(screen.contains("line one"));
 }
+
+#[test]
+fn ratatui_render_prioritizes_confirm_prompt_in_tasks_panel() {
+    let mut app = TuiApp::new("/docs");
+    app.set_task_lines(vec!["#7 remote done 0/? search".to_string()]);
+    app.begin_confirm(vec![
+        "delete 2 remote entries".to_string(),
+        "/docs/a.txt".to_string(),
+        "press y to confirm, n to cancel".to_string(),
+    ]);
+
+    let screen = draw_to_text(&app, None);
+
+    assert!(screen.contains("delete 2 remote entries"));
+    assert!(screen.contains("press y to confirm"));
+}

@@ -40,6 +40,8 @@ impl AppMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyEvent {
     Char(char),
+    Enter,
+    Backspace,
     Esc,
 }
 
@@ -55,14 +57,18 @@ pub enum KeyAction {
     Preview,
     Download,
     CancelTask,
+    ToggleSelect,
     Quit,
     None,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TuiRuntimeEvent {
     Tick,
     Action(KeyAction),
+    CommandSubmitted(String),
+    ConfirmAccepted,
+    ConfirmRejected,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -100,8 +106,10 @@ impl KeyMap {
             KeyEvent::Char('p') => KeyAction::Preview,
             KeyEvent::Char('d') => KeyAction::Download,
             KeyEvent::Char('x') => KeyAction::CancelTask,
+            KeyEvent::Char(' ') => KeyAction::ToggleSelect,
             KeyEvent::Char('q') => KeyAction::Quit,
             KeyEvent::Esc => KeyAction::None,
+            KeyEvent::Enter | KeyEvent::Backspace => KeyAction::None,
             KeyEvent::Char(_) => KeyAction::None,
         }
     }
@@ -121,6 +129,9 @@ pub struct TuiApp {
     preview_lines: Vec<String>,
     preview_budget: PreviewBudget,
     task_lines: Vec<String>,
+    command_input: String,
+    selected_paths: Vec<String>,
+    confirm_lines: Vec<String>,
 }
 
 impl TuiApp {
@@ -138,6 +149,9 @@ impl TuiApp {
             preview_lines: Vec::new(),
             preview_budget: default_preview_budget(),
             task_lines: Vec::new(),
+            command_input: String::new(),
+            selected_paths: Vec::new(),
+            confirm_lines: Vec::new(),
         }
     }
 
@@ -220,6 +234,11 @@ impl TuiApp {
         self.task_lines = lines;
     }
 
+    pub fn begin_confirm(&mut self, lines: Vec<String>) {
+        self.mode = AppMode::Confirm;
+        self.confirm_lines = lines;
+    }
+
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
     }
@@ -272,28 +291,21 @@ impl TuiApp {
     }
 
     pub fn handle_key(&mut self, event: KeyEvent) {
-        if event == KeyEvent::Esc {
-            self.mode = AppMode::Normal;
-            return;
-        }
+        let _ = self.handle_key_event(event);
+    }
 
-        if self.mode != AppMode::Normal {
-            return;
-        }
-
-        match DEFAULT_KEYMAP.action_for(event) {
-            KeyAction::Down => self.move_down(),
-            KeyAction::Up => self.move_up(),
-            KeyAction::Search => self.mode = AppMode::Search,
-            KeyAction::Command => self.mode = AppMode::Command,
-            KeyAction::Back
-            | KeyAction::Enter
-            | KeyAction::Refresh
-            | KeyAction::Preview
-            | KeyAction::Download
-            | KeyAction::CancelTask
-            | KeyAction::Quit
-            | KeyAction::None => {}
+    pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match self.mode {
+            AppMode::Normal => self.handle_normal_key(event),
+            AppMode::Command => self.handle_command_key(event, None),
+            AppMode::Search => self.handle_command_key(event, Some("search")),
+            AppMode::Confirm => self.handle_confirm_key(event),
+            AppMode::TaskFocus => {
+                if event == KeyEvent::Esc {
+                    self.mode = AppMode::Normal;
+                }
+                None
+            }
         }
     }
 
@@ -338,6 +350,18 @@ impl TuiApp {
 
     pub fn task_lines(&self) -> &[String] {
         &self.task_lines
+    }
+
+    pub fn command_input(&self) -> &str {
+        &self.command_input
+    }
+
+    pub fn selected_paths(&self) -> &[String] {
+        &self.selected_paths
+    }
+
+    pub fn confirm_lines(&self) -> &[String] {
+        &self.confirm_lines
     }
 
     pub const fn preview_budget(&self) -> PreviewBudget {
@@ -387,6 +411,105 @@ impl TuiApp {
         if let Some(index) = self.selected_index {
             self.selected_index = Some(index.saturating_sub(1));
         }
+    }
+
+    fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        if event == KeyEvent::Esc {
+            self.mode = AppMode::Normal;
+            return None;
+        }
+
+        match DEFAULT_KEYMAP.action_for(event) {
+            KeyAction::Down => self.move_down(),
+            KeyAction::Up => self.move_up(),
+            KeyAction::Search => {
+                self.mode = AppMode::Search;
+                self.command_input.clear();
+            }
+            KeyAction::Command => {
+                self.mode = AppMode::Command;
+                self.command_input.clear();
+            }
+            KeyAction::ToggleSelect => self.toggle_selected_path(),
+            KeyAction::Back
+            | KeyAction::Enter
+            | KeyAction::Refresh
+            | KeyAction::Preview
+            | KeyAction::Download
+            | KeyAction::CancelTask
+            | KeyAction::Quit => {
+                return Some(TuiRuntimeEvent::Action(DEFAULT_KEYMAP.action_for(event)));
+            }
+            KeyAction::None => {}
+        }
+        None
+    }
+
+    fn handle_command_key(
+        &mut self,
+        event: KeyEvent,
+        submit_prefix: Option<&str>,
+    ) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                self.command_input.clear();
+                None
+            }
+            KeyEvent::Backspace => {
+                self.command_input.pop();
+                None
+            }
+            KeyEvent::Enter => {
+                let input = self.command_input.trim().to_string();
+                self.command_input.clear();
+                self.mode = AppMode::Normal;
+                if input.is_empty() {
+                    None
+                } else if let Some(prefix) = submit_prefix {
+                    Some(TuiRuntimeEvent::CommandSubmitted(format!(
+                        "{prefix} {input}"
+                    )))
+                } else {
+                    Some(TuiRuntimeEvent::CommandSubmitted(input))
+                }
+            }
+            KeyEvent::Char(ch) => {
+                self.command_input.push(ch);
+                None
+            }
+        }
+    }
+
+    fn handle_confirm_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Char('y') | KeyEvent::Char('Y') => {
+                self.mode = AppMode::Normal;
+                self.confirm_lines.clear();
+                Some(TuiRuntimeEvent::ConfirmAccepted)
+            }
+            KeyEvent::Char('n') | KeyEvent::Char('N') | KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                self.confirm_lines.clear();
+                Some(TuiRuntimeEvent::ConfirmRejected)
+            }
+            KeyEvent::Enter | KeyEvent::Backspace | KeyEvent::Char(_) => None,
+        }
+    }
+
+    fn toggle_selected_path(&mut self) {
+        let Some(path) = self.selected_entry().map(|entry| entry.path.clone()) else {
+            return;
+        };
+        if let Some(index) = self.selected_paths.iter().position(|item| item == &path) {
+            self.selected_paths.remove(index);
+        } else {
+            self.selected_paths.push(path);
+        }
+    }
+
+    fn path_is_marked(&self, path: &str) -> bool {
+        self.selected_paths.iter().any(|item| item == path)
     }
 
     fn set_entries_with_selection(
@@ -527,16 +650,12 @@ where
             let Some(tui_key) = map_crossterm_key(key.code) else {
                 continue;
             };
-            let mode_before = app.mode();
-            let action = DEFAULT_KEYMAP.action_for(tui_key);
-            if DEFAULT_KEYMAP.action_for(tui_key) == KeyAction::Quit
-                && mode_before == AppMode::Normal
-            {
+            let runtime_event = app.handle_key_event(tui_key);
+            if runtime_event == Some(TuiRuntimeEvent::Action(KeyAction::Quit)) {
                 break;
             }
-            app.handle_key(tui_key);
-            if mode_before == AppMode::Normal {
-                handler(app, TuiRuntimeEvent::Action(action));
+            if let Some(runtime_event) = runtime_event {
+                handler(app, runtime_event);
             }
         }
     }
@@ -547,6 +666,8 @@ where
 fn map_crossterm_key(code: KeyCode) -> Option<KeyEvent> {
     match code {
         KeyCode::Char(value) => Some(KeyEvent::Char(value)),
+        KeyCode::Enter => Some(KeyEvent::Enter),
+        KeyCode::Backspace => Some(KeyEvent::Backspace),
         KeyCode::Esc => Some(KeyEvent::Esc),
         _ => None,
     }
@@ -594,7 +715,13 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
         .map(|(relative_index, entry)| {
             let index = range.start + relative_index;
             let selected = app.selected_index() == Some(index);
-            let marker = if selected { ">" } else { " " };
+            let marker = if selected {
+                ">"
+            } else if app.path_is_marked(entry.path.as_str()) {
+                "*"
+            } else {
+                " "
+            };
             let suffix = if entry.is_dir { "/" } else { "" };
             let size = file_size_label(entry);
             let name_width = inner_width
@@ -695,12 +822,33 @@ fn default_preview_budget() -> PreviewBudget {
 }
 
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
+    if !app.confirm_lines.is_empty() {
+        let mut lines = Vec::new();
+        if let Some(summary) = app.confirm_lines.first() {
+            lines.push(Line::raw(summary.to_string()));
+        }
+        if let Some(prompt) = app.confirm_lines.last() {
+            if app.confirm_lines.first() != Some(prompt) {
+                lines.push(Line::raw(prompt.to_string()));
+            }
+        }
+        return Paragraph::new(lines).block(Block::bordered().title("Tasks"));
+    }
+
     let mut lines = vec![Line::raw(format!(
         "request={} cache_age={} background={}",
         app.request_state.label(),
         app.cache_age_label(),
         app.background_tasks,
     ))];
+    if !app.command_input.is_empty() || matches!(app.mode, AppMode::Command | AppMode::Search) {
+        let prompt = if app.mode == AppMode::Search {
+            "/"
+        } else {
+            ":"
+        };
+        lines.push(Line::raw(format!("{prompt}{}", app.command_input)));
+    }
     for line in app.task_lines.iter().take(3) {
         lines.push(Line::raw(line.to_string()));
     }
@@ -712,7 +860,7 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(Line::raw(format!(
-        "Status {}  keys j/k h/l / : r d/x p q",
+        "Status {}  keys j/k h/l space / : r d/x p q",
         app.status_line()
     )))
     .style(Style::new().fg(Color::Black).bg(Color::Gray))
