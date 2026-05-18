@@ -11,6 +11,7 @@ pub const CONFIG_FILE_NAME: &str = "pcs_config.json";
 pub const ENV_CONFIG_DIR: &str = "BAIDUPCS_GO_CONFIG_DIR";
 pub const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
 pub const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
+pub const ENV_CACHE_DIR: &str = "BAIDUPCSR_CACHE_DIR";
 
 pub const fn crate_name() -> &'static str {
     "baidupcsr-config"
@@ -146,7 +147,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             video_preview: VideoPreviewConfig {
-                enabled: false,
+                enabled: true,
                 chunk_size_bytes: 256 * 1024,
                 max_chunks: 4,
             },
@@ -242,6 +243,21 @@ pub fn discover_ui_config_file() -> PathBuf {
                 .join(UI_CONFIG_FILE_NAME)
         })
         .unwrap_or_else(|| PathBuf::from(UI_CONFIG_FILE_NAME))
+}
+
+pub fn discover_cache_dir() -> PathBuf {
+    if let Some(path) = env::var_os(ENV_CACHE_DIR).map(PathBuf::from) {
+        return path;
+    }
+
+    if let Some(path) = env::var_os("XDG_CACHE_HOME").map(PathBuf::from) {
+        return path.join("baidupcsr");
+    }
+
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|path| path.join(".cache").join("baidupcsr"))
+        .unwrap_or_else(|| PathBuf::from(".baidupcsr-cache"))
 }
 
 pub fn load_ui_config_or_default(path: &Path) -> Result<UiConfig, ConfigError> {

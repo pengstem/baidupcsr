@@ -90,6 +90,8 @@ name = "baidupcsr-core"
 version = "0.1.0"
 dependencies = [
  "baidupcsr-pcs",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

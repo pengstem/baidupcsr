@@ -50,8 +50,9 @@ fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), Video
     assert!(args.contains("--load-scripts=no"));
     assert!(args.contains("--osc=no"));
     assert!(args.contains("--no-terminal"));
-    assert!(args.contains("--pause"));
-    assert!(args.contains("--keep-open=yes"));
+    assert!(args.contains("--force-window=yes"));
+    assert!(!args.contains("--vo=null"));
+    assert!(!args.contains("--pause"));
     assert!(args.contains("--idle=yes"));
     assert_eq!(launch.max_memory_cache_bytes(), 512);
     assert!(launch.disk_cache_disabled());

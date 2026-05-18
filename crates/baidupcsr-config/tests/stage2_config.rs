@@ -106,10 +106,10 @@ fn load_config_rejects_invalid_json_shape() {
 }
 
 #[test]
-fn ui_config_default_keeps_video_preview_disabled() {
+fn ui_config_default_enables_strict_video_preview_after_explicit_keypress() {
     let config = UiConfig::default();
 
-    assert!(!config.video_preview.enabled);
+    assert!(config.video_preview.enabled);
     assert_eq!(config.video_preview.chunk_size_bytes, 256 * 1024);
     assert_eq!(config.video_preview.max_chunks, 4);
 }

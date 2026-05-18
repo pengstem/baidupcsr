@@ -373,7 +373,7 @@ Stage 7 完成后：
 任务：
 
 - 引入 `ratatui` 0.30 主 crate，使用 crossterm 默认后端。
-- 实现 `render_app`，至少绘制 Session、Locations、Files、Preview、Tasks、Status 区域。
+- 实现 `render_app`，至少绘制 Session、Context、Files、Preview、Tasks、Status 区域。
 - Preview 面板把预算拆成可读字段，不能在窄 pane 里被整行截断。
 - CLI 默认入口和 `tui` 子命令启动真实 terminal UI，而不是普通文本 shell。
 - TUI 启动必须读取 BaiduPCS-Go active user 和 workdir，并用真实只读 PCS list 填充文件列表；运行时不允许用 demo/mock 文件替代远端数据。
@@ -485,6 +485,34 @@ Stage 7 完成后：
 - 常用文件管理操作能在 TUI 内完成。
 - 破坏性操作不因误按单键直接执行。
 - 操作后目录缓存一致。
+
+### Stage 9.5: TUI 质量、预览覆盖与缓存补课
+
+目标：补上当前体验债务。这个阶段挡在发布打磨前面；没有通过本阶段，不进入 Stage 10。
+
+必须修正的问题：
+
+- Preview 不能只围着视频转：文本、目录、图片、PDF、压缩包、未知二进制都要有明确的 preview model。暂时不能真实渲染的类型也必须显示有用 metadata、预算、原因和后续动作，而不是空面板。
+- 左侧栏不能放无意义占位：取消 `workdir/recent/favorites` 这种假信息，改成真实上下文，例如父目录、当前路径、选中项、已标记数量、缓存来源、预加载队列和可用快捷动作。
+- 右侧 Preview 面板要利用空间：默认显示选中项详情、类型、大小、mtime、fs_id、路径、缓存命中/来源、可执行动作；文本/图片/视频等再追加内容预览。
+- 目录缓存要持久化到 cache 目录：内存 stale-while-revalidate 仍保留，但最近访问目录应写入 `$XDG_CACHE_HOME/baidupcsr` 或 `$HOME/.cache/baidupcsr`，下次启动先显示磁盘缓存，再后台刷新。
+- 做分页预加载：参考 yazi 的 paged preload 思路，只预加载当前可见页附近的目录和轻量 preview，不对整个大目录扫射。预加载必须可取消、限并发、限预算。
+- 视频预览失败要可诊断：UI 必须区分 sidecar kill switch、未找到播放器、播放器启动失败、播放器立即退出、上游 Range 失败、loopback 端口失败。默认播放后端不能用 `--vo=null` 导致用户以为“打不开”；严格模式仍不能暴露 dlink 或写磁盘缓存。
+- UI 观感是验收项：颜色、留白、边框、选中态、状态栏、任务栏和窄终端布局要作为测试/截图 smoke 的一部分，不能只靠 bordered debug panel。
+
+参考 yazi 的对齐点：
+
+- `Folder`/`Files` 持有 cursor、offset、revision/ticket，异步结果不能污染新状态。
+- Preloaders 是分页的：只预加载当前屏幕附近的条目，避免大目录中无意义地拉取全部资源。
+- Preview/preload 任务是 discardable：快速移动时旧任务直接丢弃，不继续占用 UI 路径。
+- Preview 支持多类型，不能让右栏只在视频场景才有价值。
+
+验收：
+
+- 有 RED/GREEN 测试覆盖：非视频 preview model、无占位左栏、右侧详情密度、磁盘目录缓存读写、分页预加载计划、视频播放诊断、基础视觉回归。
+- 真实 tmux smoke 使用本机 BaiduPCS-Go 配置，不 mock：冷启动能先读磁盘 cache；切换目录不会白屏；移动到目录附近能触发有限预加载；文本/图片/目录/视频条目都有可读 preview。
+- 视频 smoke 必须记录用户可见播放策略：如果严格播放开启，播放器命令只包含 loopback URL，且 UI 能显示播放器状态；如果播放关闭或播放器不可用，UI 给出明确修复建议。
+- `docs/validation/` 记录必须打码，不写原始远端路径、文件名、token、dlink、Cookie。
 
 ### Stage 10: 打磨、发布与迁移
 

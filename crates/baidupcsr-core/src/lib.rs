@@ -1,6 +1,11 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fmt, fs, io,
+    path::{Path, PathBuf},
+};
 
 use baidupcsr_pcs::FileEntry;
+use serde::{Deserialize, Serialize};
 
 pub const fn crate_name() -> &'static str {
     "baidupcsr-core"
@@ -152,6 +157,237 @@ impl DirectoryCache {
             changes: Vec::new(),
         }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct DirectoryCacheStore {
+    root: PathBuf,
+}
+
+#[derive(Debug)]
+pub enum DirectoryCacheStoreError {
+    Io(io::Error),
+    Json(serde_json::Error),
+}
+
+impl fmt::Display for DirectoryCacheStoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(err) => write!(f, "directory cache io error: {err}"),
+            Self::Json(err) => write!(f, "directory cache json error: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for DirectoryCacheStoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(err) => Some(err),
+            Self::Json(err) => Some(err),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CachedDirectorySnapshot {
+    pub account_uid: u64,
+    pub path: String,
+    pub saved_at_unix_seconds: u64,
+    pub entries: Vec<FileEntry>,
+}
+
+impl DirectoryCacheStore {
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn write_snapshot(
+        &self,
+        account_uid: u64,
+        path: &str,
+        entries: Vec<FileEntry>,
+        saved_at_unix_seconds: u64,
+    ) -> Result<(), DirectoryCacheStoreError> {
+        fs::create_dir_all(&self.root).map_err(DirectoryCacheStoreError::Io)?;
+        let snapshot = CachedDirectorySnapshot {
+            account_uid,
+            path: path.to_string(),
+            saved_at_unix_seconds,
+            entries,
+        };
+        let data = serde_json::to_vec(&snapshot).map_err(DirectoryCacheStoreError::Json)?;
+        let target = self.snapshot_path(account_uid, path);
+        let temporary = target.with_extension("json.tmp");
+        fs::write(&temporary, data).map_err(DirectoryCacheStoreError::Io)?;
+        fs::rename(&temporary, target).map_err(DirectoryCacheStoreError::Io)
+    }
+
+    pub fn read_snapshot(
+        &self,
+        account_uid: u64,
+        path: &str,
+    ) -> Result<Option<CachedDirectorySnapshot>, DirectoryCacheStoreError> {
+        let target = self.snapshot_path(account_uid, path);
+        let data = match fs::read(target) {
+            Ok(data) => data,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(DirectoryCacheStoreError::Io(err)),
+        };
+        let snapshot: CachedDirectorySnapshot =
+            serde_json::from_slice(&data).map_err(DirectoryCacheStoreError::Json)?;
+        if snapshot.account_uid == account_uid && snapshot.path == path {
+            Ok(Some(snapshot))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn snapshot_path(&self, account_uid: u64, path: &str) -> PathBuf {
+        self.root.join(format!(
+            "dir-{account_uid}-{:016x}.json",
+            stable_path_hash(path)
+        ))
+    }
+}
+
+fn stable_path_hash(path: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum PreloadKind {
+    Directory,
+    Preview,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PreloadTarget {
+    pub path: String,
+    pub kind: PreloadKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PagedPreloadPlan {
+    pub targets: Vec<PreloadTarget>,
+    pub window_start: usize,
+    pub window_end: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PagedPreloadPlanner {
+    visible_rows: usize,
+    page_radius: usize,
+    max_directories: usize,
+    max_previews: usize,
+}
+
+impl PagedPreloadPlanner {
+    pub const fn new(
+        visible_rows: usize,
+        page_radius: usize,
+        max_directories: usize,
+        max_previews: usize,
+    ) -> Self {
+        Self {
+            visible_rows,
+            page_radius,
+            max_directories,
+            max_previews,
+        }
+    }
+
+    pub fn plan(&self, entries: &[FileEntry], selected_index: usize) -> PagedPreloadPlan {
+        if entries.is_empty() || self.visible_rows == 0 {
+            return PagedPreloadPlan {
+                targets: Vec::new(),
+                window_start: 0,
+                window_end: 0,
+            };
+        }
+        let selected = selected_index.min(entries.len().saturating_sub(1));
+        let page_start = selected / self.visible_rows * self.visible_rows;
+        let page_end = page_start
+            .saturating_add(self.visible_rows)
+            .min(entries.len());
+        let window_start = page_start.saturating_sub(self.page_radius * self.visible_rows);
+        let window_end = page_end
+            .saturating_add(self.page_radius * self.visible_rows)
+            .min(entries.len());
+
+        let mut targets = Vec::new();
+        self.push_targets(entries, page_start, page_end, &mut targets);
+        if targets.len() < self.max_directories.saturating_add(self.max_previews) {
+            self.push_targets(entries, window_start, page_start, &mut targets);
+            self.push_targets(entries, page_end, window_end, &mut targets);
+        }
+
+        PagedPreloadPlan {
+            targets,
+            window_start,
+            window_end,
+        }
+    }
+
+    fn push_targets(
+        &self,
+        entries: &[FileEntry],
+        start: usize,
+        end: usize,
+        targets: &mut Vec<PreloadTarget>,
+    ) {
+        let mut directories = targets
+            .iter()
+            .filter(|target| target.kind == PreloadKind::Directory)
+            .count();
+        let mut previews = targets
+            .iter()
+            .filter(|target| target.kind == PreloadKind::Preview)
+            .count();
+
+        for entry in &entries[start..end] {
+            if entry.is_dir {
+                if directories >= self.max_directories {
+                    continue;
+                }
+                let target = PreloadTarget {
+                    path: entry.path.clone(),
+                    kind: PreloadKind::Directory,
+                };
+                if !targets.contains(&target) {
+                    targets.push(target);
+                    directories += 1;
+                }
+            } else if previews < self.max_previews && is_light_preview_candidate(entry) {
+                let target = PreloadTarget {
+                    path: entry.path.clone(),
+                    kind: PreloadKind::Preview,
+                };
+                if !targets.contains(&target) {
+                    targets.push(target);
+                    previews += 1;
+                }
+            }
+        }
+    }
+}
+
+fn is_light_preview_candidate(entry: &FileEntry) -> bool {
+    let name = entry.server_filename.to_ascii_lowercase();
+    matches!(
+        name.rsplit_once('.').map(|(_, ext)| ext),
+        Some("txt" | "md" | "json" | "toml" | "yaml" | "yml" | "png" | "jpg" | "jpeg")
+    )
 }
 
 #[derive(Clone, Debug)]

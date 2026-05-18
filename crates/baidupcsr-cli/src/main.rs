@@ -9,7 +9,7 @@ use std::sync::{
     mpsc, Arc, Mutex,
 };
 use std::thread;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const PREVIEW_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
@@ -49,8 +49,11 @@ struct BrowserRuntime {
     account_uid: u64,
     account_bduss: Option<String>,
     cache: baidupcsr_core::DirectoryCache,
-    loaded_at: HashMap<String, Instant>,
+    cache_store: baidupcsr_core::DirectoryCacheStore,
+    loaded_at: HashMap<String, SystemTime>,
+    cache_sources: HashMap<String, baidupcsr_tui::CacheSource>,
     selection_memory: HashMap<String, String>,
+    preload_planner: baidupcsr_core::PagedPreloadPlanner,
     preview_manager: baidupcsr_preview::PreviewManager,
     preview_epoch: Arc<AtomicU64>,
     video_config: baidupcsr_config::VideoPreviewConfig,
@@ -79,8 +82,25 @@ struct DirectoryLoadResult {
 
 struct PreviewLoadResult {
     request: baidupcsr_preview::PreviewRequest,
+    kind: PreviewFetchKind,
     title: String,
     result: Result<Vec<u8>, String>,
+}
+
+struct PreviewLoadJob {
+    client: baidupcsr_pcs::BlockingPcsClient,
+    path: String,
+    title: String,
+    request: baidupcsr_preview::PreviewRequest,
+    kind: PreviewFetchKind,
+    fetch_bytes: u64,
+    preview_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreviewFetchKind {
+    Text,
+    ImageMetadata,
 }
 
 struct ActiveVideoPreview {
@@ -150,6 +170,9 @@ impl BrowserRuntime {
         let ui_config_path = baidupcsr_config::discover_ui_config_file();
         let ui_config = baidupcsr_config::load_ui_config_or_default(&ui_config_path)
             .unwrap_or_else(|_| baidupcsr_config::UiConfig::default());
+        let cache_store =
+            baidupcsr_core::DirectoryCacheStore::new(baidupcsr_config::discover_cache_dir());
+        let preload_planner = baidupcsr_core::PagedPreloadPlanner::new(18, 1, 4, 4);
         let discovery = baidupcsr_config::discovery_input_from_env(None);
         let config_path = baidupcsr_config::discover_config_file(&discovery);
         let config = match baidupcsr_config::load_config(&config_path) {
@@ -160,8 +183,11 @@ impl BrowserRuntime {
                     account_uid: 0,
                     account_bduss: None,
                     cache: baidupcsr_core::DirectoryCache::new(),
+                    cache_store: cache_store.clone(),
                     loaded_at: HashMap::new(),
+                    cache_sources: HashMap::new(),
                     selection_memory: HashMap::new(),
+                    preload_planner,
                     preview_manager: baidupcsr_preview::PreviewManager::new(
                         PREVIEW_MEMORY_LIMIT_BYTES,
                     ),
@@ -192,8 +218,11 @@ impl BrowserRuntime {
                 account_uid: 0,
                 account_bduss: None,
                 cache: baidupcsr_core::DirectoryCache::new(),
+                cache_store: cache_store.clone(),
                 loaded_at: HashMap::new(),
+                cache_sources: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preload_planner,
                 preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
                 preview_epoch: Arc::new(AtomicU64::new(0)),
                 video_config: ui_config.video_preview,
@@ -232,8 +261,11 @@ impl BrowserRuntime {
                 account_uid: user.uid,
                 account_bduss,
                 cache: baidupcsr_core::DirectoryCache::new(),
+                cache_store: cache_store.clone(),
                 loaded_at: HashMap::new(),
+                cache_sources: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preload_planner,
                 preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
                 preview_epoch: Arc::new(AtomicU64::new(0)),
                 video_config: ui_config.video_preview,
@@ -258,8 +290,11 @@ impl BrowserRuntime {
                 account_uid: user.uid,
                 account_bduss,
                 cache: baidupcsr_core::DirectoryCache::new(),
+                cache_store,
                 loaded_at: HashMap::new(),
+                cache_sources: HashMap::new(),
                 selection_memory: HashMap::new(),
+                preload_planner,
                 preview_manager: baidupcsr_preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
                 preview_epoch: Arc::new(AtomicU64::new(0)),
                 video_config: ui_config.video_preview,
@@ -348,8 +383,8 @@ impl BrowserRuntime {
                 self.start_directory_load(app, app.path().to_string(), preferred);
             }
             baidupcsr_tui::KeyAction::Up | baidupcsr_tui::KeyAction::Down => {
-                self.prefetch_selected_directory(app);
                 self.update_preview_for_selection(app);
+                self.prefetch_visible_page(app);
             }
             baidupcsr_tui::KeyAction::Preview => {
                 self.start_video_preview(app);
@@ -478,8 +513,10 @@ impl BrowserRuntime {
         preferred_selection_path: Option<String>,
     ) {
         self.stop_active_video();
+        self.hydrate_directory_cache_from_disk(path.as_str());
         let view = self.cache.enter_directory(path.as_str());
         let cache_age = self.cache_age_seconds(path.as_str());
+        app.set_cache_source(self.cache_source_for_path(path.as_str()));
         let preferred = preferred_selection_path
             .as_deref()
             .or_else(|| self.selection_memory.get(path.as_str()).map(String::as_str));
@@ -500,23 +537,103 @@ impl BrowserRuntime {
 
         self.spawn_directory_load(client, path, view.generation);
         app.set_background_tasks(self.inflight);
+        self.prefetch_visible_page(app);
     }
 
-    fn prefetch_selected_directory(&mut self, app: &mut baidupcsr_tui::TuiApp) {
-        let Some(path) = app.selected_directory_path() else {
+    fn prefetch_visible_page(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let selected = app.selected_index().unwrap_or(0);
+        let plan = self.preload_planner.plan(app.entries(), selected);
+        let directories = plan
+            .targets
+            .iter()
+            .filter(|target| target.kind == baidupcsr_core::PreloadKind::Directory)
+            .count();
+        let previews = plan
+            .targets
+            .iter()
+            .filter(|target| target.kind == baidupcsr_core::PreloadKind::Preview)
+            .count();
+        app.set_preload_lines(vec![
+            format!("queued dirs={directories} previews={previews}"),
+            format!("window={}..{}", plan.window_start, plan.window_end),
+        ]);
+
+        for target in plan.targets {
+            match target.kind {
+                baidupcsr_core::PreloadKind::Directory => {
+                    self.prefetch_directory_path(app, target.path);
+                }
+                baidupcsr_core::PreloadKind::Preview => {
+                    self.prefetch_preview_path(app, target.path.as_str());
+                }
+            }
+        }
+    }
+
+    fn prefetch_directory_path(&mut self, app: &mut baidupcsr_tui::TuiApp, path: String) {
+        self.hydrate_directory_cache_from_disk(path.as_str());
+        let source = self.cache_source_for_path(path.as_str());
+        let status = self.cache.snapshot(path.as_str()).status;
+        if status == baidupcsr_core::DirectoryStatus::Refreshing {
             return;
-        };
-        let Some(client) = self.client.clone() else {
-            return;
-        };
-        if self.cache.snapshot(path.as_str()).status == baidupcsr_core::DirectoryStatus::Refreshing
+        }
+        if status == baidupcsr_core::DirectoryStatus::Fresh
+            && source == baidupcsr_tui::CacheSource::Network
         {
             return;
         }
-
+        let Some(client) = self.client.clone() else {
+            return;
+        };
         let generation = self.cache.begin_refresh(path.as_str());
         self.spawn_directory_load(client, path, generation);
         app.set_background_tasks(self.inflight);
+    }
+
+    fn prefetch_preview_path(&mut self, app: &mut baidupcsr_tui::TuiApp, path: &str) {
+        let Some(entry) = app
+            .entries()
+            .iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+        else {
+            return;
+        };
+        if entry.is_dir {
+            return;
+        }
+        let size = nonnegative_size(entry.size);
+        let plan = baidupcsr_preview::PreviewPlan::for_entry(
+            entry.server_filename.as_str(),
+            entry.is_dir,
+            size,
+            PREVIEW_MEMORY_LIMIT_BYTES,
+        );
+        if plan.action != baidupcsr_preview::PreviewAction::FetchText {
+            return;
+        }
+        let key = preview_key_for_entry(self.account_uid, &entry);
+        if self.preview_manager.get(&key).is_some() {
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            return;
+        };
+        let request = self.preview_manager.start_request(key);
+        let fetch_bytes = size.min(TEXT_PREVIEW_FETCH_BYTES);
+        if fetch_bytes == 0 {
+            return;
+        }
+        let preview_epoch = self.preview_epoch.load(Ordering::Acquire);
+        self.spawn_preview_load(PreviewLoadJob {
+            client,
+            path: entry.path,
+            title: entry.server_filename,
+            request,
+            kind: PreviewFetchKind::Text,
+            fetch_bytes,
+            preview_epoch,
+        });
     }
 
     fn spawn_directory_load(
@@ -543,11 +660,15 @@ impl BrowserRuntime {
             let path = result.path;
             match result.result {
                 Ok(entries) => {
+                    let entries_for_store = entries.clone();
                     let refresh =
                         self.cache
                             .finish_refresh(path.as_str(), result.generation, entries);
                     if refresh.applied {
-                        self.loaded_at.insert(path.clone(), Instant::now());
+                        self.loaded_at.insert(path.clone(), SystemTime::now());
+                        self.cache_sources
+                            .insert(path.clone(), baidupcsr_tui::CacheSource::Network);
+                        self.persist_directory_cache(path.as_str(), entries_for_store);
                         if app.path() == path {
                             let view = self.cache.snapshot(path.as_str());
                             let preferred =
@@ -558,7 +679,9 @@ impl BrowserRuntime {
                                 self.cache_age_seconds(path.as_str()),
                                 preferred,
                             );
+                            app.set_cache_source(self.cache_source_for_path(path.as_str()));
                             self.update_preview_for_selection(app);
+                            self.prefetch_visible_page(app);
                         }
                     }
                 }
@@ -577,6 +700,7 @@ impl BrowserRuntime {
                             message,
                             preferred,
                         );
+                        app.set_cache_source(self.cache_source_for_path(path.as_str()));
                     }
                 }
             }
@@ -628,16 +752,31 @@ impl BrowserRuntime {
             return;
         }
 
-        if plan.action == baidupcsr_preview::PreviewAction::MetadataOnly {
-            app.finish_preview_metadata(
-                entry.server_filename.as_str(),
-                tui_preview_kind(plan.kind),
-                plan.reason,
-                budget,
-            );
-            return;
+        match plan.action {
+            baidupcsr_preview::PreviewAction::MetadataOnly => {
+                app.finish_preview_metadata(
+                    entry.server_filename.as_str(),
+                    tui_preview_kind(plan.kind),
+                    plan.reason,
+                    budget,
+                );
+            }
+            baidupcsr_preview::PreviewAction::FetchText => {
+                self.start_text_preview_load(app, entry, size, preview_epoch);
+            }
+            baidupcsr_preview::PreviewAction::FetchImageMetadata => {
+                self.start_image_metadata_preview_load(app, entry, size, preview_epoch);
+            }
         }
+    }
 
+    fn start_text_preview_load(
+        &mut self,
+        app: &mut baidupcsr_tui::TuiApp,
+        entry: baidupcsr_pcs::FileEntry,
+        size: u64,
+        preview_epoch: u64,
+    ) {
         let key = preview_key_for_entry(self.account_uid, &entry);
         if let Some(text) = self.preview_manager.get(&key) {
             app.finish_preview_text(
@@ -668,39 +807,76 @@ impl BrowserRuntime {
             return;
         }
 
-        self.spawn_preview_load(
+        self.spawn_preview_load(PreviewLoadJob {
             client,
-            entry.path,
-            entry.server_filename,
+            path: entry.path,
+            title: entry.server_filename,
             request,
+            kind: PreviewFetchKind::Text,
             fetch_bytes,
             preview_epoch,
-        );
+        });
         app.set_background_tasks(self.inflight);
     }
 
-    fn spawn_preview_load(
+    fn start_image_metadata_preview_load(
         &mut self,
-        client: baidupcsr_pcs::BlockingPcsClient,
-        path: String,
-        title: String,
-        request: baidupcsr_preview::PreviewRequest,
-        fetch_bytes: u64,
+        app: &mut baidupcsr_tui::TuiApp,
+        entry: baidupcsr_pcs::FileEntry,
+        size: u64,
         preview_epoch: u64,
     ) {
+        let Some(client) = self.client.clone() else {
+            app.finish_preview_error(entry.server_filename.as_str(), "client unavailable");
+            return;
+        };
+        let key = preview_key_for_entry(self.account_uid, &entry);
+        let request = self.preview_manager.start_request(key);
+        app.begin_preview(entry.server_filename.as_str(), "loading image metadata");
+        let fetch_bytes = size.min(TEXT_PREVIEW_FETCH_BYTES);
+        if fetch_bytes == 0 {
+            app.finish_preview_image_metadata(
+                entry.server_filename.as_str(),
+                vec!["image=empty".to_string()],
+                baidupcsr_tui::PreviewBudget {
+                    kind: baidupcsr_tui::PreviewKind::Image,
+                    fetched_bytes: 0,
+                    memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
+                    truncated: false,
+                    disk_backed: false,
+                },
+            );
+            return;
+        }
+
+        self.spawn_preview_load(PreviewLoadJob {
+            client,
+            path: entry.path,
+            title: entry.server_filename,
+            request,
+            kind: PreviewFetchKind::ImageMetadata,
+            fetch_bytes,
+            preview_epoch,
+        });
+        app.set_background_tasks(self.inflight);
+    }
+
+    fn spawn_preview_load(&mut self, job: PreviewLoadJob) {
         self.inflight = self.inflight.saturating_add(1);
         let tx = self.preview_tx.clone();
         let cancellation_epoch = Arc::clone(&self.preview_epoch);
         thread::spawn(move || {
-            let range = baidupcsr_pcs::ByteRange::prefix(fetch_bytes);
-            let result = client
-                .download_range_with_cancel(path.as_str(), range, || {
-                    cancellation_epoch.load(Ordering::Acquire) != preview_epoch
+            let range = baidupcsr_pcs::ByteRange::prefix(job.fetch_bytes);
+            let result = job
+                .client
+                .download_range_with_cancel(job.path.as_str(), range, || {
+                    cancellation_epoch.load(Ordering::Acquire) != job.preview_epoch
                 })
                 .map_err(|err| format!("preview_error: {err}"));
             let _ = tx.send(PreviewLoadResult {
-                request,
-                title,
+                request: job.request,
+                kind: job.kind,
+                title: job.title,
                 result,
             });
         });
@@ -710,7 +886,7 @@ impl BrowserRuntime {
         while let Ok(result) = self.preview_rx.try_recv() {
             self.inflight = self.inflight.saturating_sub(1);
             match result.result {
-                Ok(bytes) => {
+                Ok(bytes) if result.kind == PreviewFetchKind::Text => {
                     let key = result.request.key();
                     let update = self
                         .preview_manager
@@ -725,6 +901,26 @@ impl BrowserRuntime {
                                 preview_budget_from_status(text.status),
                             );
                         }
+                    }
+                }
+                Ok(bytes) => {
+                    let key = result.request.key();
+                    if self.preview_manager.request_state(result.request)
+                        == baidupcsr_preview::RequestState::Applied
+                        && self.selected_preview_key(app) == Some(key)
+                    {
+                        let metadata = baidupcsr_preview::parse_image_metadata(&bytes);
+                        app.finish_preview_image_metadata(
+                            result.title.as_str(),
+                            image_preview_lines(metadata),
+                            baidupcsr_tui::PreviewBudget {
+                                kind: baidupcsr_tui::PreviewKind::Image,
+                                fetched_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                                memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
+                                truncated: false,
+                                disk_backed: false,
+                            },
+                        );
                     }
                 }
                 Err(message) => {
@@ -1061,6 +1257,16 @@ impl BrowserRuntime {
                 return;
             }
         };
+        if !program_available(launch.program()) {
+            app.finish_preview_error(
+                entry.server_filename.as_str(),
+                format!(
+                    "video_player_missing: {} not found on PATH",
+                    launch.program()
+                ),
+            );
+            return;
+        }
         let child = Command::new(launch.program())
             .args(launch.args())
             .stdin(Stdio::null())
@@ -1156,6 +1362,7 @@ impl BrowserRuntime {
 
     fn refresh_current_cache_age(&self, app: &mut baidupcsr_tui::TuiApp) {
         app.set_cache_age_seconds(self.cache_age_seconds(app.path()));
+        app.set_cache_source(self.cache_source_for_path(app.path()));
     }
 
     fn refresh_task_panel(&self, app: &mut baidupcsr_tui::TuiApp) {
@@ -1174,7 +1381,42 @@ impl BrowserRuntime {
     fn cache_age_seconds(&self, path: &str) -> Option<u64> {
         self.loaded_at
             .get(path)
-            .map(|loaded_at| loaded_at.elapsed().as_secs())
+            .and_then(|loaded_at| SystemTime::now().duration_since(*loaded_at).ok())
+            .map(|duration| duration.as_secs())
+    }
+
+    fn cache_source_for_path(&self, path: &str) -> baidupcsr_tui::CacheSource {
+        self.cache_sources
+            .get(path)
+            .copied()
+            .unwrap_or(baidupcsr_tui::CacheSource::None)
+    }
+
+    fn hydrate_directory_cache_from_disk(&mut self, path: &str) {
+        if self.cache.snapshot(path).status != baidupcsr_core::DirectoryStatus::Empty {
+            return;
+        }
+        let snapshot = match self.cache_store.read_snapshot(self.account_uid, path) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) | Err(_) => return,
+        };
+        self.loaded_at.insert(
+            path.to_string(),
+            UNIX_EPOCH + Duration::from_secs(snapshot.saved_at_unix_seconds),
+        );
+        self.cache_sources
+            .insert(path.to_string(), baidupcsr_tui::CacheSource::Disk);
+        self.cache.seed(path, snapshot.entries);
+    }
+
+    fn persist_directory_cache(&self, path: &str, entries: Vec<baidupcsr_pcs::FileEntry>) {
+        let store = self.cache_store.clone();
+        let path = path.to_string();
+        let account_uid = self.account_uid;
+        let saved_at = unix_timestamp_now();
+        thread::spawn(move || {
+            let _ = store.write_snapshot(account_uid, path.as_str(), entries, saved_at);
+        });
     }
 }
 
@@ -1446,6 +1688,38 @@ fn video_error_label(error: Option<&baidupcsr_preview::VideoPreviewError>) -> St
     error
         .map(|error| format!("{error:?}"))
         .unwrap_or_else(|| "none".to_string())
+}
+
+fn image_preview_lines(metadata: baidupcsr_preview::ImagePreviewMetadata) -> Vec<String> {
+    let format = match metadata.format {
+        baidupcsr_preview::ImagePreviewFormat::Png => "png",
+        baidupcsr_preview::ImagePreviewFormat::Jpeg => "jpeg",
+        baidupcsr_preview::ImagePreviewFormat::Unknown => "unknown",
+    };
+    let dimensions = match (metadata.width, metadata.height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => "unknown".to_string(),
+    };
+    vec![
+        format!("image={format}"),
+        format!("dimensions={dimensions}"),
+        "terminal=metadata".to_string(),
+        format!("disk={}", metadata.disk_backed),
+    ]
+}
+
+fn program_available(program: &str) -> bool {
+    if program.contains(std::path::MAIN_SEPARATOR) {
+        return Path::new(program).is_file();
+    }
+    env::var_os("PATH")
+        .map(|paths| {
+            env::split_paths(&paths).any(|dir| {
+                let candidate = dir.join(program);
+                candidate.is_file()
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn download_target_path(download_dir: &Path, file_name: &str) -> PathBuf {
@@ -1770,6 +2044,13 @@ fn task_state_label(state: baidupcsr_core::TaskState) -> &'static str {
     }
 }
 
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
 fn generate_video_token(
     epoch: u64,
 ) -> Result<baidupcsr_preview::VideoToken, baidupcsr_preview::VideoPreviewError> {
@@ -1826,6 +2107,9 @@ fn tui_preview_kind(kind: baidupcsr_preview::PreviewKind) -> baidupcsr_tui::Prev
     match kind {
         baidupcsr_preview::PreviewKind::Text => baidupcsr_tui::PreviewKind::Text,
         baidupcsr_preview::PreviewKind::Image => baidupcsr_tui::PreviewKind::Image,
+        baidupcsr_preview::PreviewKind::Pdf => baidupcsr_tui::PreviewKind::Pdf,
+        baidupcsr_preview::PreviewKind::Archive => baidupcsr_tui::PreviewKind::Archive,
+        baidupcsr_preview::PreviewKind::Directory => baidupcsr_tui::PreviewKind::Directory,
         baidupcsr_preview::PreviewKind::Metadata => baidupcsr_tui::PreviewKind::Metadata,
         baidupcsr_preview::PreviewKind::Video => baidupcsr_tui::PreviewKind::Video,
     }
@@ -2312,10 +2596,26 @@ mod tests {
     }
 
     #[test]
-    fn preview_kind_mapping_preserves_text_and_metadata_boundaries() {
+    fn preview_kind_mapping_preserves_all_preview_boundaries() {
         assert_eq!(
             tui_preview_kind(baidupcsr_preview::PreviewKind::Text),
             baidupcsr_tui::PreviewKind::Text
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Image),
+            baidupcsr_tui::PreviewKind::Image
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Pdf),
+            baidupcsr_tui::PreviewKind::Pdf
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Archive),
+            baidupcsr_tui::PreviewKind::Archive
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Directory),
+            baidupcsr_tui::PreviewKind::Directory
         );
         assert_eq!(
             tui_preview_kind(baidupcsr_preview::PreviewKind::Metadata),

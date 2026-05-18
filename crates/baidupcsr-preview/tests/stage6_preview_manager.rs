@@ -87,7 +87,7 @@ fn preview_plan_fetches_small_text_files_only() {
 #[test]
 fn preview_plan_uses_metadata_for_directories_binary_and_oversized_files() {
     let directory = PreviewPlan::for_entry("docs", true, 0, 16 * 1024 * 1024);
-    let binary = PreviewPlan::for_entry("photo.heic", false, 1024, 16 * 1024 * 1024);
+    let binary = PreviewPlan::for_entry("program.bin", false, 1024, 16 * 1024 * 1024);
     let huge_text = PreviewPlan::for_entry("huge.log", false, 32 * 1024 * 1024, 16 * 1024 * 1024);
 
     assert_eq!(directory.action, PreviewAction::MetadataOnly);

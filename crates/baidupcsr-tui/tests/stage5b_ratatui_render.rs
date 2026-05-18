@@ -96,7 +96,7 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
     );
 
     assert!(screen.contains("baidupcsr"));
-    assert!(screen.contains("Locations"));
+    assert!(screen.contains("Context"));
     assert!(screen.contains("Files"));
     assert!(screen.contains("Preview"));
     assert!(screen.contains("> apps/"));

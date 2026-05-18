@@ -686,7 +686,7 @@ impl OrderDirection {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileEntry {
     pub fs_id: i64,
     #[serde(default)]
@@ -703,9 +703,19 @@ pub struct FileEntry {
     pub block_list: Vec<String>,
     #[serde(default)]
     pub size: i64,
-    #[serde(default, rename = "isdir", deserialize_with = "int_to_bool")]
+    #[serde(
+        default,
+        rename = "isdir",
+        deserialize_with = "int_to_bool",
+        serialize_with = "bool_to_int"
+    )]
     pub is_dir: bool,
-    #[serde(default, rename = "ifhassubdir", deserialize_with = "int_to_bool")]
+    #[serde(
+        default,
+        rename = "ifhassubdir",
+        deserialize_with = "int_to_bool",
+        serialize_with = "bool_to_int"
+    )]
     pub has_subdir: bool,
 }
 
@@ -930,6 +940,13 @@ where
 {
     let value = i64::deserialize(deserializer)?;
     Ok(value != 0)
+}
+
+fn bool_to_int<S>(value: &bool, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_i64(if *value { 1 } else { 0 })
 }
 
 fn scheme(https: bool) -> &'static str {

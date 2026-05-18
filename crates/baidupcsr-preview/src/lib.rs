@@ -27,6 +27,9 @@ pub struct PreviewKey {
 pub enum PreviewKind {
     Text,
     Image,
+    Pdf,
+    Archive,
+    Directory,
     Metadata,
     Video,
 }
@@ -34,6 +37,7 @@ pub enum PreviewKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewAction {
     FetchText,
+    FetchImageMetadata,
     MetadataOnly,
 }
 
@@ -52,12 +56,23 @@ impl PreviewPlan {
         memory_limit_bytes: u64,
     ) -> Self {
         if is_dir {
-            return Self::metadata(PreviewKind::Metadata, "directory metadata only");
+            return Self::metadata(PreviewKind::Directory, "directory metadata only");
         }
 
         match preview_kind_from_name(file_name) {
             PreviewKind::Video => {
                 Self::metadata(PreviewKind::Video, "video preview requires explicit action")
+            }
+            PreviewKind::Image => {
+                if size_bytes > memory_limit_bytes {
+                    Self::metadata(PreviewKind::Image, "image exceeds preview memory budget")
+                } else {
+                    Self {
+                        kind: PreviewKind::Image,
+                        action: PreviewAction::FetchImageMetadata,
+                        reason: "image header preview within memory budget".to_string(),
+                    }
+                }
             }
             PreviewKind::Text => Self {
                 kind: if size_bytes > memory_limit_bytes {
@@ -77,6 +92,10 @@ impl PreviewPlan {
                 }
                 .to_string(),
             },
+            PreviewKind::Pdf => Self::metadata(PreviewKind::Pdf, "pdf metadata preview only"),
+            PreviewKind::Archive => {
+                Self::metadata(PreviewKind::Archive, "archive metadata preview only")
+            }
             kind => Self::metadata(kind, "binary or unsupported preview type"),
         }
     }
@@ -107,11 +126,116 @@ pub fn preview_kind_from_name(file_name: &str) -> PreviewKind {
     match extension.to_ascii_lowercase().as_str() {
         "txt" | "md" | "markdown" | "rs" | "toml" | "json" | "yaml" | "yml" | "log" | "c"
         | "cc" | "cpp" | "h" | "hpp" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "css"
-        | "xml" | "csv" | "ini" | "conf" | "sh" | "bash" | "zsh" | "fish" => PreviewKind::Text,
+        | "xml" | "csv" | "ini" | "conf" | "sh" | "bash" | "zsh" | "fish" | "srt" | "ass"
+        | "vtt" => PreviewKind::Text,
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "avif" => PreviewKind::Image,
+        "pdf" => PreviewKind::Pdf,
+        "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" => PreviewKind::Archive,
         "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "flv" => PreviewKind::Video,
         _ => PreviewKind::Metadata,
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImagePreviewFormat {
+    Png,
+    Jpeg,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImagePreviewMetadata {
+    pub format: ImagePreviewFormat,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub disk_backed: bool,
+}
+
+pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
+    if let Some((width, height)) = parse_png_dimensions(bytes) {
+        return ImagePreviewMetadata {
+            format: ImagePreviewFormat::Png,
+            width: Some(width),
+            height: Some(height),
+            disk_backed: false,
+        };
+    }
+    if let Some((width, height)) = parse_jpeg_dimensions(bytes) {
+        return ImagePreviewMetadata {
+            format: ImagePreviewFormat::Jpeg,
+            width: Some(width),
+            height: Some(height),
+            disk_backed: false,
+        };
+    }
+
+    ImagePreviewMetadata {
+        format: ImagePreviewFormat::Unknown,
+        width: None,
+        height: None,
+        disk_backed: false,
+    }
+}
+
+fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
+        return None;
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
+    Some((width, height))
+}
+
+fn parse_jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() < 4
+        || bytes.first().copied() != Some(0xff)
+        || bytes.get(1).copied() != Some(0xd8)
+    {
+        return None;
+    }
+
+    let mut cursor = 2;
+    while cursor + 8 < bytes.len() {
+        if bytes.get(cursor).copied() != Some(0xff) {
+            cursor += 1;
+            continue;
+        }
+        let marker = bytes.get(cursor + 1).copied()?;
+        cursor += 2;
+        if marker == 0xd8 || marker == 0xd9 {
+            continue;
+        }
+        let length = u16::from_be_bytes(bytes.get(cursor..cursor + 2)?.try_into().ok()?);
+        let length = usize::from(length);
+        if length < 2 || cursor + length > bytes.len() {
+            return None;
+        }
+        if matches!(
+            marker,
+            0xc0 | 0xc1
+                | 0xc2
+                | 0xc3
+                | 0xc5
+                | 0xc6
+                | 0xc7
+                | 0xc9
+                | 0xca
+                | 0xcb
+                | 0xcd
+                | 0xce
+                | 0xcf
+        ) {
+            if length < 7 {
+                return None;
+            }
+            let height = u16::from_be_bytes(bytes.get(cursor + 3..cursor + 5)?.try_into().ok()?);
+            let width = u16::from_be_bytes(bytes.get(cursor + 5..cursor + 7)?.try_into().ok()?);
+            return Some((u32::from(width), u32::from(height)));
+        }
+        cursor += length;
+    }
+    None
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,6 +297,14 @@ impl PreviewManager {
             .saturating_add(1);
         self.generations.insert(key, generation);
         PreviewRequest { key, generation }
+    }
+
+    pub fn request_state(&self, request: PreviewRequest) -> RequestState {
+        if self.generations.get(&request.key).copied() == Some(request.generation) {
+            RequestState::Applied
+        } else {
+            RequestState::Stale
+        }
     }
 
     pub fn finish_text_request(&mut self, request: PreviewRequest, bytes: &[u8]) -> PreviewUpdate {
@@ -679,11 +811,9 @@ impl VideoPreviewSession {
                     "--cache=yes".to_string(),
                     format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
                     "--demuxer-max-back-bytes=0".to_string(),
-                    "--force-window=no".to_string(),
-                    "--vo=null".to_string(),
+                    "--force-window=yes".to_string(),
                     "--ao=null".to_string(),
-                    "--pause".to_string(),
-                    "--keep-open=yes".to_string(),
+                    "--mute=yes".to_string(),
                     "--idle=yes".to_string(),
                     "--really-quiet".to_string(),
                     "--no-ytdl".to_string(),

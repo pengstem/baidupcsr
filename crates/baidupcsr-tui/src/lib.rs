@@ -91,6 +91,25 @@ impl DirectoryRequestState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheSource {
+    None,
+    Memory,
+    Disk,
+    Network,
+}
+
+impl CacheSource {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Memory => "memory",
+            Self::Disk => "disk",
+            Self::Network => "network",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KeyMap;
 
 impl KeyMap {
@@ -125,10 +144,12 @@ pub struct TuiApp {
     notice: Option<String>,
     request_state: DirectoryRequestState,
     cache_age_seconds: Option<u64>,
+    cache_source: CacheSource,
     preview_title: String,
     preview_lines: Vec<String>,
     preview_budget: PreviewBudget,
     task_lines: Vec<String>,
+    preload_lines: Vec<String>,
     command_input: String,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
@@ -145,10 +166,12 @@ impl TuiApp {
             notice: None,
             request_state: DirectoryRequestState::Idle,
             cache_age_seconds: None,
+            cache_source: CacheSource::None,
             preview_title: String::new(),
             preview_lines: Vec::new(),
             preview_budget: default_preview_budget(),
             task_lines: Vec::new(),
+            preload_lines: Vec::new(),
             command_input: String::new(),
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
@@ -234,6 +257,10 @@ impl TuiApp {
         self.task_lines = lines;
     }
 
+    pub fn set_preload_lines(&mut self, lines: Vec<String>) {
+        self.preload_lines = lines;
+    }
+
     pub fn begin_confirm(&mut self, lines: Vec<String>) {
         self.mode = AppMode::Confirm;
         self.confirm_lines = lines;
@@ -249,6 +276,10 @@ impl TuiApp {
 
     pub fn set_cache_age_seconds(&mut self, value: Option<u64>) {
         self.cache_age_seconds = value;
+    }
+
+    pub fn set_cache_source(&mut self, source: CacheSource) {
+        self.cache_source = source;
     }
 
     pub fn begin_preview(&mut self, title: &str, message: &str) {
@@ -286,6 +317,20 @@ impl TuiApp {
         self.preview_lines = lines;
         self.preview_budget = PreviewBudget {
             kind: PreviewKind::Video,
+            ..budget
+        };
+    }
+
+    pub fn finish_preview_image_metadata(
+        &mut self,
+        title: &str,
+        lines: Vec<String>,
+        budget: PreviewBudget,
+    ) {
+        self.preview_title = title.to_string();
+        self.preview_lines = lines;
+        self.preview_budget = PreviewBudget {
+            kind: PreviewKind::Image,
             ..budget
         };
     }
@@ -352,6 +397,10 @@ impl TuiApp {
         &self.task_lines
     }
 
+    pub fn preload_lines(&self) -> &[String] {
+        &self.preload_lines
+    }
+
     pub fn command_input(&self) -> &str {
         &self.command_input
     }
@@ -366,6 +415,10 @@ impl TuiApp {
 
     pub const fn preview_budget(&self) -> PreviewBudget {
         self.preview_budget
+    }
+
+    pub const fn cache_source(&self) -> CacheSource {
+        self.cache_source
     }
 
     pub fn notice(&self) -> Option<&str> {
@@ -420,8 +473,14 @@ impl TuiApp {
         }
 
         match DEFAULT_KEYMAP.action_for(event) {
-            KeyAction::Down => self.move_down(),
-            KeyAction::Up => self.move_up(),
+            KeyAction::Down => {
+                self.move_down();
+                return Some(TuiRuntimeEvent::Action(KeyAction::Down));
+            }
+            KeyAction::Up => {
+                self.move_up();
+                return Some(TuiRuntimeEvent::Action(KeyAction::Up));
+            }
             KeyAction::Search => {
                 self.mode = AppMode::Search;
                 self.command_input.clear();
@@ -529,6 +588,10 @@ impl TuiApp {
             .map(|seconds| format!("{seconds}s"))
             .unwrap_or_else(|| "none".to_string())
     }
+
+    fn cache_label(&self) -> String {
+        format!("cache={}", self.cache_source.label())
+    }
 }
 
 fn normalize_path(path: &str) -> String {
@@ -592,7 +655,7 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
                 Constraint::Min(28),
             ])
             .areas(body);
-        frame.render_widget(locations_widget(app), locations);
+        frame.render_widget(context_widget(app), locations);
         frame.render_widget(files_widget(app, files), files);
         frame.render_widget(preview_widget(app, preview), preview_area);
     } else if body.width >= 56 {
@@ -690,19 +753,37 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
     .block(Block::bordered().title("Session"))
 }
 
-fn locations_widget(app: &TuiApp) -> Paragraph<'_> {
-    Paragraph::new(vec![
-        Line::raw("workdir"),
-        Line::raw(app.path()),
-        Line::raw(""),
-        Line::raw("recent"),
-        Line::raw("/"),
-        Line::raw(""),
-        Line::raw("favorites"),
-        Line::raw(app.path()),
-    ])
-    .block(Block::bordered().title("Locations"))
-    .wrap(Wrap { trim: true })
+fn context_widget(app: &TuiApp) -> Paragraph<'_> {
+    let parent = TuiApp::parent_path(app.path()).unwrap_or_else(|| "/".to_string());
+    let selected = app
+        .selected_entry()
+        .map(|entry| entry.server_filename.as_str())
+        .unwrap_or("none");
+    let mut lines = vec![
+        Line::raw("parent"),
+        Line::raw(truncate_cells(parent.as_str(), 20)),
+        Line::raw("current"),
+        Line::raw(truncate_cells(app.path(), 20)),
+        Line::raw("selected"),
+        Line::raw(truncate_cells(selected, 20)),
+        Line::raw(format!("marked={}", app.selected_paths().len())),
+        Line::raw(app.cache_label()),
+        Line::raw(format!("cache_age={}", app.cache_age_label())),
+    ];
+    if !app.preload_lines().is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("preload"));
+        lines.extend(
+            app.preload_lines()
+                .iter()
+                .take(3)
+                .map(|line| Line::raw(truncate_cells(line, 20))),
+        );
+    }
+
+    Paragraph::new(lines)
+        .block(Block::bordered().title("Context"))
+        .wrap(Wrap { trim: true })
 }
 
 fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
@@ -771,44 +852,56 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
     } else {
         app.preview_title.as_str()
     };
-    let kind = selected
-        .map(|entry| if entry.is_dir { "directory" } else { "file" })
-        .unwrap_or("none");
     let budget = preview.unwrap_or(app.preview_budget);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("selected=", Style::new().fg(Color::DarkGray)),
-            Span::raw(truncate_cells(title, 24)),
-        ]),
-        Line::from(vec![
-            Span::styled("kind=", Style::new().fg(Color::DarkGray)),
-            Span::raw(kind.to_string()),
-        ]),
-        Line::from(vec![
-            Span::styled("path=", Style::new().fg(Color::DarkGray)),
-            Span::raw(truncate_cells(
-                selected
-                    .map(|entry| entry.path.as_str())
-                    .unwrap_or_else(|| app.path()),
-                24,
-            )),
-        ]),
+    let mut lines = selected
+        .map(|entry| preview_detail_lines(entry, app.cache_source()))
+        .unwrap_or_else(|| {
+            vec![
+                Line::raw(format!("name={}", truncate_cells(title, 24))),
+                Line::raw("type=none"),
+                Line::raw(app.cache_label()),
+            ]
+        });
+    lines.extend([
         Line::raw(""),
-        Line::raw(format!("preview={}", budget.kind.label())),
-        Line::raw(format!("fetched={}", budget.fetched_bytes)),
+        Line::raw(format!(
+            "preview={} fetched={}",
+            budget.kind.label(),
+            budget.fetched_bytes
+        )),
         Line::raw(format!("limit={}", budget.memory_limit_bytes)),
-        Line::raw(format!("truncated={}", budget.truncated)),
-        Line::raw(format!("disk={}", budget.disk_backed)),
+        Line::raw(format!(
+            "truncated={} disk={}",
+            budget.truncated, budget.disk_backed
+        )),
         Line::raw(""),
-    ];
-    for line in app.preview_lines.iter().take(6) {
+    ]);
+    for line in app.preview_lines.iter().take(8) {
         lines.push(Line::raw(line.to_string()));
     }
 
     Paragraph::new(lines)
         .block(Block::bordered().title("Preview"))
         .wrap(Wrap { trim: true })
+}
+
+fn preview_detail_lines(entry: &FileEntry, source: CacheSource) -> Vec<Line<'static>> {
+    let item_type = if entry.is_dir { "directory" } else { "file" };
+    vec![
+        Line::raw(format!(
+            "name={}",
+            truncate_cells(entry.server_filename.as_str(), 28)
+        )),
+        Line::raw(format!("type={item_type} cache={}", source.label())),
+        Line::raw(format!(
+            "size={} mtime={}",
+            file_size_label(entry),
+            entry.mtime
+        )),
+        Line::raw(format!("fs_id={}", entry.fs_id)),
+        Line::raw(format!("path={}", truncate_cells(entry.path.as_str(), 28))),
+    ]
 }
 
 fn default_preview_budget() -> PreviewBudget {
@@ -919,6 +1012,9 @@ fn truncate_cells(value: &str, max_width: usize) -> String {
 pub enum PreviewKind {
     Text,
     Image,
+    Pdf,
+    Archive,
+    Directory,
     Metadata,
     Video,
 }
@@ -928,6 +1024,9 @@ impl PreviewKind {
         match self {
             Self::Text => "text",
             Self::Image => "image",
+            Self::Pdf => "pdf",
+            Self::Archive => "archive",
+            Self::Directory => "directory",
             Self::Metadata => "metadata",
             Self::Video => "video",
         }
