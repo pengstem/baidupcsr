@@ -9,7 +9,7 @@ use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -150,7 +150,9 @@ fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), Video
     assert!(args.contains("--demuxer-readahead-secs=20"));
     assert!(args.contains("--cache-pause=no"));
     assert!(args.contains("--no-terminal"));
-    assert!(args.contains("--force-window=yes"));
+    assert!(args.contains("--force-window=immediate"));
+    assert!(args.contains("--msg-level=all=warn"));
+    assert!(!args.contains("--really-quiet"));
     assert!(!args.contains("--vo=null"));
     assert!(!args.contains("--ao=null"));
     assert!(!args.contains("--mute=yes"));
@@ -175,7 +177,9 @@ fn isolated_mpv_profile_disables_user_config_scripts_and_osc() -> Result<(), Vid
     assert!(args.contains("--load-scripts=no"));
     assert!(args.contains("--osc=no"));
     assert!(args.contains("--no-terminal"));
-    assert!(args.contains("--force-window=yes"));
+    assert!(args.contains("--force-window=immediate"));
+    assert!(args.contains("--msg-level=all=warn"));
+    assert!(!args.contains("--really-quiet"));
     assert!(!args.contains("--vo=null"));
     assert!(!args.contains("--pause"));
     assert!(args.contains("--idle=yes"));
@@ -394,6 +398,64 @@ fn loopback_server_reuses_chunk_cache_and_reports_stats() -> Result<(), String> 
 }
 
 #[test]
+fn loopback_server_handles_helper_request_while_fetch_is_blocked() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let fetches_for_server = Arc::clone(&fetches);
+    let gate_for_server = Arc::clone(&gate);
+    let token = VideoToken::new("tok_loopback_server_0006").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 2).map_err(debug)?,
+        move |range| {
+            if fetches_for_server.fetch_add(1, Ordering::AcqRel) == 0 {
+                let (lock, cvar) = &*gate_for_server;
+                let mut released = lock
+                    .lock()
+                    .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                while !*released {
+                    released = cvar
+                        .wait(released)
+                        .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                }
+            }
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    let first_request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token.as_str()
+    );
+    let head_request = format!(
+        "HEAD /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+        token.as_str()
+    );
+    let port = server.endpoint().port();
+    let first = thread::spawn(move || raw_http(port, &first_request));
+
+    wait_for_fetches(&fetches, 1)?;
+    let head = raw_http_with_timeout(port, &head_request, Duration::from_millis(200));
+
+    {
+        let (lock, cvar) = &*gate;
+        let mut released = lock.lock().map_err(|err| err.to_string())?;
+        *released = true;
+        cvar.notify_all();
+    }
+
+    let first = first
+        .join()
+        .map_err(|_| "first request thread panicked".to_string())??;
+    assert!(first.starts_with("HTTP/1.1 206 Partial Content"));
+    assert!(head?.starts_with("HTTP/1.1 200 OK"));
+    Ok(())
+}
+
+#[test]
 fn loopback_server_prefetches_forward_window_without_exceeding_budget() -> Result<(), String> {
     let fetches = Arc::new(AtomicUsize::new(0));
     let fetches_for_server = Arc::clone(&fetches);
@@ -463,6 +525,44 @@ fn loopback_server_serves_prefetched_subrange_from_interval_buffer() -> Result<(
     Ok(())
 }
 
+#[test]
+fn loopback_server_does_not_prefetch_far_seek_thumbnail_requests() -> Result<(), String> {
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = VideoToken::new("tok_loopback_server_0007").map_err(debug)?;
+    let server = VideoLoopbackServer::spawn_with_policy(
+        key(),
+        VideoUpstream::new("https://d.pcs.baidu.com/file/private-video?secret=1").map_err(debug)?,
+        token.clone(),
+        VideoCacheBudget::new(64, 4).map_err(debug)?,
+        VideoGatewayPolicy { prefetch_chunks: 2 },
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            bytes_for_range(range)
+        },
+    )
+    .map_err(debug)?;
+
+    let first = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token.as_str()
+    );
+    let far_seek = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=512-575\r\n\r\n",
+        token.as_str()
+    );
+
+    let _ = raw_http(server.endpoint().port(), &first)?;
+    wait_for_fetches(&fetches, 3)?;
+    let before = fetches.load(Ordering::Acquire);
+    let response = raw_http(server.endpoint().port(), &far_seek)?;
+    thread::sleep(Duration::from_millis(100));
+
+    assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+    assert_eq!(fetches.load(Ordering::Acquire), before + 1);
+    Ok(())
+}
+
 fn bytes_for_range(range: VideoRange) -> Result<Vec<u8>, VideoPreviewError> {
     let len = range
         .end_inclusive
@@ -486,7 +586,14 @@ fn wait_for_fetches(fetches: &AtomicUsize, expected: usize) -> Result<(), String
 }
 
 fn raw_http(port: u16, request: &str) -> Result<String, String> {
+    raw_http_with_timeout(port, request, Duration::from_secs(5))
+}
+
+fn raw_http_with_timeout(port: u16, request: &str, timeout: Duration) -> Result<String, String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|err| err.to_string())?;
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| err.to_string())?;
     stream
         .write_all(request.as_bytes())
         .map_err(|err| err.to_string())?;

@@ -34,6 +34,9 @@ cargo test -p baidupcsr-preview --test stage7_video_preview range_parser_accepts
 cargo test -p baidupcsr-preview --test stage7_video_preview suffix_proxy_range_resolves_against_file_tail
 cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_prefetches_forward_window_without_exceeding_budget
 cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_serves_prefetched_subrange_from_interval_buffer
+cargo test -p baidupcsr-preview --test stage7_video_preview video_session_exposes_only_loopback_token_url_to_player
+cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_handles_helper_request_while_fetch_is_blocked
+cargo test -p baidupcsr-preview --test stage7_video_preview loopback_server_does_not_prefetch_far_seek_thumbnail_requests
 ```
 
 Full gate commands to run before commit:
@@ -53,6 +56,7 @@ tmux send-keys -t baidupcsr-video-gateway '<navigation to a real video>' Enter
 tmux send-keys -t baidupcsr-video-gateway p
 tmux capture-pane -pt baidupcsr-video-gateway
 pgrep -af 'mpv|baidupcsr-cli tui|target/debug/baidupcsr-cli'
+wmctrl -l
 tmux send-keys -t baidupcsr-video-gateway q
 tmux kill-session -t baidupcsr-video-gateway
 ```
@@ -76,6 +80,16 @@ tmux kill-session -t baidupcsr-video-gateway
 - Live gateway smoke after prefetch: first visible request remained `range=0-4194303`, while the buffered window advanced to `window=0-12582911` and `buffer=12582912/67108864 hits=0 upstream=3 prefetch=2`.
 - Live process check: mpv was launched with only a `http://127.0.0.1:<port>/preview/video/<token>` media URL; no dlink was present in process args.
 - Live listener check: the loopback server listened on `127.0.0.1:<port>` under `baidupcsr-cli`.
+- Validation correction: the earlier smoke was insufficient because it only checked process args and the loopback listener. It did not prove a visible mpv window existed.
+- RED: the player-launch contract still used `--force-window=yes` plus `--really-quiet`, which could hide player-side failure and did not force an immediate window.
+- GREEN: player-launch tests now require `--force-window=immediate`, `--msg-level=all=warn`, no `--really-quiet`, and loopback-only player media URLs.
+- RED: a blocked video fetch could occupy the single loopback accept path, so mpv helper requests from user scripts could wait behind the active fetch.
+- GREEN: the loopback server now handles each accepted connection in its own worker thread; the regression test proves a HEAD helper request succeeds while another GET is blocked in the fetcher.
+- RED: far seek or thumbnail-style Range requests could start forward prefetch, creating a request storm unrelated to the user's current playback position.
+- GREEN: forward prefetch now only starts for the first stream request or requests near the existing buffered window; far seek/thumbnail requests fetch only their requested range.
+- Live release smoke: after `cargo clean --release` and `cargo build --release -p baidupcsr-cli`, a release TUI tmux session loaded the local BaiduPCS-Go config, selected a real remote video, and pressed `p`.
+- Live window check: `wmctrl -l` reported a visible mpv window after the TUI launch. This is the required window-level check that was missing from the earlier process-only validation.
+- Live decode probe: a terminal mpv probe against the same redacted loopback URL identified the video stream as HEVC, found audio and subtitle tracks, and created a GPU video output. A bounded timeout ended the probe; the output did not show an early EOF from the gateway.
 - Cleanup: the named tmux smoke session exited. A separate user-run release process was observed afterward and was not touched.
 - Important output shape: TUI video diagnostics now have `video=loopback seek=true`, `playback=...`, `mpv_profile=...`, `player_log=...`, `listen=...`, `player=...`, `range=...`, `buffer=...`, and `disk=false error=...`.
 - Files inspected: `crates/baidupcsr-preview/src/lib.rs`, `crates/baidupcsr-preview/tests/stage7_video_preview.rs`, `crates/baidupcsr-cli/src/main.rs`.
@@ -86,4 +100,4 @@ This record does not include raw Cookie, BDUSS, STOKEN, SBOXTKN, access token, d
 
 ## Conclusion
 
-Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. Task 3 adds open-ended and suffix Range request semantics. Task 4 adds background forward prefetch and interval-buffer serving for prefetched subranges. Task 5 confirms the real gateway now advances the buffer beyond the first requested range while keeping the player on loopback-only media URLs.
+Task 1 passes unit, render, full workspace, clippy, diff, and live tmux validation. Task 2 adds the interval-buffer contract. Task 3 adds open-ended and suffix Range request semantics. Task 4 adds background forward prefetch and interval-buffer serving for prefetched subranges. Task 5 confirms the real gateway now advances the buffer beyond the first requested range while keeping the player on loopback-only media URLs. The follow-up MPV window regression fix raises live validation from process-level checks to window-level and decode-level checks.

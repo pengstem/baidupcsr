@@ -1118,14 +1118,14 @@ impl VideoPreviewSession {
                 args.extend([
                     format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
                     "--demuxer-max-back-bytes=0".to_string(),
-                    "--force-window=yes".to_string(),
+                    "--force-window=immediate".to_string(),
                 ]);
                 if profile == MpvLaunchProfile::Isolated {
                     args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
                 }
                 args.extend([
                     "--idle=yes".to_string(),
-                    "--really-quiet".to_string(),
+                    "--msg-level=all=warn".to_string(),
                     "--no-ytdl".to_string(),
                     self.player_url(),
                 ]);
@@ -1318,7 +1318,8 @@ fn serve_video_loopback(
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _addr)) => {
-                handle_video_connection(stream, &state);
+                let state = Arc::clone(&state);
+                thread::spawn(move || handle_video_connection(stream, &state));
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
@@ -1467,16 +1468,16 @@ fn video_get_response(
         state.stats.last_range_end_inclusive = Some(range.end_inclusive);
     }
 
-    let cached = {
+    let (cached, window_before) = {
         let mut state = state
             .lock()
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
         if let Some(bytes) = state.cache.get(range) {
             state.stats.cache_hits = state.stats.cache_hits.saturating_add(1);
             state.stats.last_error = None;
-            Some((bytes, state.session.key.size))
+            (Some((bytes, state.session.key.size)), None)
         } else {
-            None
+            (None, state.cache.window())
         }
     };
     let (bytes, file_size) = match cached {
@@ -1506,7 +1507,7 @@ fn video_get_response(
                 state.stats.last_error = None;
                 state.session.key.size
             };
-            spawn_prefetch_after(range, state);
+            spawn_prefetch_after(range, window_before, state);
             (bytes, file_size)
         }
     };
@@ -1527,13 +1528,24 @@ fn video_get_response(
     ))
 }
 
-fn spawn_prefetch_after(range: VideoRange, state: &Arc<Mutex<VideoLoopbackState>>) {
+fn spawn_prefetch_after(
+    range: VideoRange,
+    window_before: Option<VideoRange>,
+    state: &Arc<Mutex<VideoLoopbackState>>,
+) {
     let job = {
         let Ok(state_guard) = state.lock() else {
             return;
         };
         let prefetch_chunks = state_guard.policy.prefetch_chunks;
         if prefetch_chunks == 0 {
+            return;
+        }
+        if !should_prefetch_after(
+            range,
+            window_before,
+            state_guard.session.budget.chunk_size_bytes,
+        ) {
             return;
         }
         VideoPrefetchJob {
@@ -1551,6 +1563,23 @@ fn spawn_prefetch_after(range: VideoRange, state: &Arc<Mutex<VideoLoopbackState>
     thread::spawn(move || {
         prefetch_forward_window(job);
     });
+}
+
+fn should_prefetch_after(
+    range: VideoRange,
+    window_before: Option<VideoRange>,
+    chunk_size_bytes: u64,
+) -> bool {
+    match window_before {
+        None => range.start == 0,
+        Some(window) => {
+            range.start
+                <= window
+                    .end_inclusive
+                    .saturating_add(chunk_size_bytes)
+                    .saturating_add(1)
+        }
+    }
 }
 
 fn prefetch_forward_window(job: VideoPrefetchJob) {
