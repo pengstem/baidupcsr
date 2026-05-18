@@ -142,7 +142,11 @@ fn ratatui_render_scrolls_long_lists_and_highlights_selected_row() {
 
     assert!(screen.contains("item-18.txt"));
     assert!(!screen.contains("item-00.txt"));
-    assert!(line_with_text_has_bg(&buffer, "item-18.txt", Color::Blue));
+    assert!(line_with_text_has_bg(
+        &buffer,
+        "item-18.txt",
+        Color::Rgb(14, 116, 144)
+    ));
 }
 
 #[test]

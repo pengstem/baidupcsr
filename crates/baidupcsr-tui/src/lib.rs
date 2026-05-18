@@ -22,6 +22,21 @@ pub const fn crate_name() -> &'static str {
 
 pub const DEFAULT_KEYMAP: KeyMap = KeyMap;
 
+const THEME_BG: Color = Color::Rgb(15, 23, 42);
+const THEME_PANEL: Color = Color::Rgb(15, 23, 42);
+const THEME_BORDER: Color = Color::Rgb(51, 65, 85);
+const THEME_BORDER_ACTIVE: Color = Color::Rgb(34, 211, 238);
+const THEME_TEXT: Color = Color::Rgb(226, 232, 240);
+const THEME_STATUS_TEXT: Color = Color::Rgb(203, 213, 225);
+const THEME_MUTED: Color = Color::Rgb(148, 163, 184);
+const THEME_DIM: Color = Color::Rgb(100, 116, 139);
+const THEME_ACCENT: Color = Color::Rgb(94, 234, 212);
+const THEME_SELECTED: Color = Color::Rgb(14, 116, 144);
+const THEME_DIRECTORY: Color = Color::Rgb(125, 211, 252);
+const THEME_WARNING: Color = Color::Rgb(250, 204, 21);
+const THEME_SUCCESS: Color = Color::Rgb(52, 211, 153);
+const THEME_ERROR: Color = Color::Rgb(248, 113, 113);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppMode {
     Normal,
@@ -784,6 +799,8 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
 }
 
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
+    frame.render_widget(Block::new().style(surface_style()), frame.area());
+
     let [header, body, tasks, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -925,22 +942,113 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
+fn surface_style() -> Style {
+    Style::new().fg(THEME_TEXT).bg(THEME_BG)
+}
+
+fn content_style() -> Style {
+    Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
+}
+
+fn meta_label_style() -> Style {
+    Style::new().fg(THEME_MUTED).bg(THEME_PANEL)
+}
+
+fn meta_value_style() -> Style {
+    Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
+}
+
+fn input_style() -> Style {
+    Style::new()
+        .fg(THEME_ACCENT)
+        .bg(THEME_PANEL)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn preload_style() -> Style {
+    Style::new().fg(THEME_DIRECTORY).bg(THEME_PANEL)
+}
+
+fn notice_style() -> Style {
+    Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
+}
+
+fn warning_style() -> Style {
+    Style::new()
+        .fg(THEME_WARNING)
+        .bg(THEME_PANEL)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn confirm_style() -> Style {
+    Style::new()
+        .fg(THEME_ERROR)
+        .bg(THEME_PANEL)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn title_style(active: bool) -> Style {
+    let color = if active {
+        THEME_ACCENT
+    } else {
+        THEME_DIRECTORY
+    };
+    Style::new()
+        .fg(color)
+        .bg(THEME_BG)
+        .add_modifier(Modifier::BOLD)
+}
+
+fn themed_block(title: impl Into<String>, active: bool) -> Block<'static> {
+    let border = if active {
+        THEME_BORDER_ACTIVE
+    } else {
+        THEME_BORDER
+    };
+    Block::bordered()
+        .style(surface_style())
+        .border_style(Style::new().fg(border).bg(THEME_BG))
+        .title(Line::from(Span::styled(title.into(), title_style(active))))
+}
+
+fn detail_line(label: &'static str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(label, meta_label_style()),
+        Span::styled(" ", surface_style()),
+        Span::styled(value, meta_value_style()),
+    ])
+}
+
+fn content_line(value: impl Into<String>) -> Line<'static> {
+    Line::raw(value.into()).style(content_style())
+}
+
+fn help_section_line(value: &'static str) -> Line<'static> {
+    Line::raw(value).style(
+        Style::new()
+            .fg(THEME_ACCENT)
+            .bg(THEME_PANEL)
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
 fn help_widget() -> Paragraph<'static> {
     Paragraph::new(vec![
-        Line::raw("Navigation"),
-        Line::raw("  j/k or Up/Down     move selection"),
-        Line::raw("  h/l or Left/Right  parent / enter directory"),
-        Line::raw("  /  search          :  command"),
-        Line::raw(""),
-        Line::raw("Actions"),
-        Line::raw("  space mark         r refresh"),
-        Line::raw("  d download         x cancel task"),
-        Line::raw("  p preview video    q quit"),
-        Line::raw(""),
-        Line::raw("Mouse"),
-        Line::raw("  click selects      wheel scrolls"),
+        help_section_line("Navigation"),
+        content_line("  j/k or Up/Down     move selection"),
+        content_line("  h/l or Left/Right  parent / enter directory"),
+        content_line("  /  search          :  command"),
+        Line::raw("").style(surface_style()),
+        help_section_line("Actions"),
+        content_line("  space mark         r refresh"),
+        content_line("  d download         x cancel task"),
+        content_line("  p preview video    q quit"),
+        Line::raw("").style(surface_style()),
+        help_section_line("Mouse"),
+        content_line("  click selects      wheel scrolls"),
     ])
-    .block(Block::bordered().title("Shortcuts"))
+    .block(themed_block("Shortcuts", true))
+    .style(surface_style())
     .wrap(Wrap { trim: true })
 }
 
@@ -948,17 +1056,24 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(Line::from(vec![
         Span::styled(
             "baidupcsr",
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::new()
+                .fg(THEME_ACCENT)
+                .bg(THEME_BG)
+                .add_modifier(Modifier::BOLD),
         ),
-        Span::raw("  "),
-        Span::styled(app.path(), Style::new().fg(Color::White)),
-        Span::raw("  "),
+        Span::styled("  ", surface_style()),
+        Span::styled(app.path(), Style::new().fg(THEME_TEXT).bg(THEME_BG)),
+        Span::styled("  ", surface_style()),
         Span::styled(
             app.request_state.label(),
-            Style::new().fg(request_state_color(app.request_state)),
+            Style::new()
+                .fg(request_state_color(app.request_state))
+                .bg(THEME_BG)
+                .add_modifier(Modifier::BOLD),
         ),
     ]))
-    .block(Block::bordered().title("Session"))
+    .block(themed_block("Session", true))
+    .style(surface_style())
 }
 
 fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
@@ -989,32 +1104,47 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             let name = truncate_cells(&format!("{}{}", entry.server_filename, suffix), name_width);
             let base_style = if selected {
                 Style::new()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
+                    .fg(THEME_TEXT)
+                    .bg(THEME_SELECTED)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::new()
+                surface_style()
             };
             let name_style = if selected {
                 base_style
             } else if entry.is_dir {
-                Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::new()
+                    .fg(THEME_DIRECTORY)
+                    .bg(THEME_PANEL)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::new().fg(Color::White)
+                Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
+            };
+            let marker_style = if selected {
+                base_style
+            } else {
+                Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
+            };
+            let size_style = if selected {
+                Style::new().fg(THEME_TEXT).bg(THEME_SELECTED)
+            } else {
+                Style::new().fg(THEME_DIM).bg(THEME_PANEL)
             };
             ListItem::new(Line::from(vec![
-                Span::styled(marker, Style::new().fg(Color::Yellow)),
-                Span::raw(" "),
+                Span::styled(marker, marker_style),
+                Span::styled(" ", base_style),
                 Span::styled(name, name_style),
-                Span::raw("  "),
-                Span::styled(size, Style::new().fg(Color::DarkGray)),
+                Span::styled("  ", base_style),
+                Span::styled(size, size_style),
             ]))
             .style(base_style)
         })
         .collect();
 
     let title = format!("Files {} items", app.entries().len());
-    List::new(items).block(Block::bordered().title(title))
+    List::new(items)
+        .block(themed_block(title, true))
+        .style(surface_style())
 }
 
 fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_> {
@@ -1033,35 +1163,41 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
         .map(|entry| preview_detail_lines(entry, app.cache_source(), budget))
         .unwrap_or_else(|| {
             vec![
-                Line::raw(format!("Name: {}", middle_truncate_cells(title, 48))),
-                Line::raw("Kind: none"),
-                Line::raw(format!("Cache: {}", app.cache_source().label())),
+                detail_line("Name:", middle_truncate_cells(title, 48)),
+                detail_line("Kind:", "none".to_string()),
+                detail_line("Cache:", app.cache_source().label().to_string()),
             ]
         });
-    lines.push(Line::raw(""));
+    lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
         for line in app.preview_lines.iter().take(10) {
-            lines.push(Line::raw(line.to_string()));
+            lines.push(content_line(line.to_string()));
         }
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(format!(
-            "Memory: fetched {} / {} · disk {}",
-            budget.fetched_bytes, budget.memory_limit_bytes, budget.disk_backed
-        )));
+        lines.push(Line::raw("").style(surface_style()));
+        lines.push(
+            Line::raw(format!(
+                "Memory: fetched {} / {} · disk {}",
+                budget.fetched_bytes, budget.memory_limit_bytes, budget.disk_backed
+            ))
+            .style(meta_value_style()),
+        );
     } else if budget.kind == PreviewKind::Text && !app.preview_lines.is_empty() {
         lines.truncate(3);
-        lines.push(Line::raw(""));
-        lines.push(Line::raw(format!(
-            "Preview: text · fetched {}",
-            budget.fetched_bytes
-        )));
-        lines.push(Line::raw(format!(
-            "Memory: limit {} · disk {}",
-            budget.memory_limit_bytes, budget.disk_backed
-        )));
-        lines.push(Line::raw(""));
+        lines.push(Line::raw("").style(surface_style()));
+        lines.push(
+            Line::raw(format!("Preview: text · fetched {}", budget.fetched_bytes))
+                .style(meta_value_style()),
+        );
+        lines.push(
+            Line::raw(format!(
+                "Memory: limit {} · disk {}",
+                budget.memory_limit_bytes, budget.disk_backed
+            ))
+            .style(meta_value_style()),
+        );
+        lines.push(Line::raw("").style(surface_style()));
         for line in app.preview_lines.iter().take(10) {
-            lines.push(Line::raw(line.to_string()));
+            lines.push(content_line(line.to_string()));
         }
     } else {
         lines.extend([
@@ -1069,21 +1205,24 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
                 "Preview: {} · fetched {}",
                 budget.kind.label(),
                 budget.fetched_bytes
-            )),
+            ))
+            .style(meta_value_style()),
             Line::raw(format!(
                 "Memory: limit {} · disk {}",
                 budget.memory_limit_bytes, budget.disk_backed
-            )),
-            Line::raw(format!("Truncated: {}", budget.truncated)),
-            Line::raw(""),
+            ))
+            .style(meta_value_style()),
+            Line::raw(format!("Truncated: {}", budget.truncated)).style(meta_value_style()),
+            Line::raw("").style(surface_style()),
         ]);
         for line in app.preview_lines.iter().take(8) {
-            lines.push(Line::raw(line.to_string()));
+            lines.push(content_line(line.to_string()));
         }
     }
 
     Paragraph::new(lines)
-        .block(Block::bordered().title("Preview"))
+        .block(themed_block("Preview", true))
+        .style(surface_style())
         .wrap(Wrap { trim: true })
 }
 
@@ -1094,22 +1233,18 @@ fn preview_detail_lines(
 ) -> Vec<Line<'static>> {
     let item_type = if entry.is_dir { "directory" } else { "file" };
     vec![
-        Line::raw(format!(
-            "Name: {}",
-            middle_truncate_cells(entry.server_filename.as_str(), 52)
-        )),
-        Line::raw(format!("Kind: {item_type} · {}", budget.kind.label())),
-        Line::raw(format!("Cache: {}", source.label())),
-        Line::raw(format!(
-            "Size: {} · Modified: {}",
-            file_size_label(entry),
-            entry.mtime
-        )),
-        Line::raw(format!("ID: {}", entry.fs_id)),
-        Line::raw(format!(
-            "Path: {}",
-            middle_truncate_cells(entry.path.as_str(), 56)
-        )),
+        detail_line(
+            "Name:",
+            middle_truncate_cells(entry.server_filename.as_str(), 52),
+        ),
+        detail_line("Kind:", format!("{item_type} · {}", budget.kind.label())),
+        detail_line("Cache:", source.label().to_string()),
+        detail_line(
+            "Size:",
+            format!("{} · Modified: {}", file_size_label(entry), entry.mtime),
+        ),
+        detail_line("ID:", entry.fs_id.to_string()),
+        detail_line("Path:", middle_truncate_cells(entry.path.as_str(), 56)),
     ]
 }
 
@@ -1127,52 +1262,63 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     if !app.confirm_lines.is_empty() {
         let mut lines = Vec::new();
         if let Some(summary) = app.confirm_lines.first() {
-            lines.push(Line::raw(summary.to_string()));
+            lines.push(Line::raw(summary.to_string()).style(confirm_style()));
         }
         if let Some(prompt) = app.confirm_lines.last() {
             if app.confirm_lines.first() != Some(prompt) {
-                lines.push(Line::raw(prompt.to_string()));
+                lines.push(Line::raw(prompt.to_string()).style(warning_style()));
             }
         }
-        return Paragraph::new(lines).block(Block::bordered().title("Tasks"));
+        return Paragraph::new(lines)
+            .block(themed_block("Tasks", false))
+            .style(surface_style());
     }
 
-    let mut lines = vec![Line::raw(format!(
-        "request={} cache_age={} background={}",
-        app.request_state.label(),
-        app.cache_age_label(),
-        app.background_tasks,
-    ))];
+    let mut lines = vec![Line::from(vec![
+        Span::styled("request=", meta_label_style()),
+        Span::styled(
+            app.request_state.label(),
+            Style::new()
+                .fg(request_state_color(app.request_state))
+                .bg(THEME_BG),
+        ),
+        Span::styled("  cache_age=", meta_label_style()),
+        Span::styled(app.cache_age_label(), meta_value_style()),
+        Span::styled("  background=", meta_label_style()),
+        Span::styled(app.background_tasks.to_string(), meta_value_style()),
+    ])];
     if !app.command_input.is_empty() || matches!(app.mode, AppMode::Command | AppMode::Search) {
         let prompt = if app.mode == AppMode::Search {
             "/"
         } else {
             ":"
         };
-        lines.push(Line::raw(format!("{prompt}{}", app.command_input)));
+        lines.push(Line::raw(format!("{prompt}{}", app.command_input)).style(input_style()));
     }
     for line in app.preload_lines.iter().take(2) {
-        lines.push(Line::raw(format!("preload {line}")));
+        lines.push(Line::raw(format!("preload {line}")).style(preload_style()));
     }
     for line in app.task_lines.iter().take(3) {
-        lines.push(Line::raw(line.to_string()));
+        lines.push(Line::raw(line.to_string()).style(content_style()));
     }
     if let Some(notice) = app.notice() {
-        lines.push(Line::raw(notice.to_string()));
+        lines.push(Line::raw(notice.to_string()).style(notice_style()));
     }
-    Paragraph::new(lines).block(Block::bordered().title("Tasks"))
+    Paragraph::new(lines)
+        .block(themed_block("Tasks", false))
+        .style(surface_style())
 }
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(Line::raw(format!("Status {}", app.status_line())))
-        .style(Style::new().fg(Color::Black).bg(Color::Gray))
+        .style(Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG))
 }
 
 fn request_state_color(state: DirectoryRequestState) -> Color {
     match state {
-        DirectoryRequestState::Idle => Color::Green,
-        DirectoryRequestState::Loading | DirectoryRequestState::Refreshing => Color::Yellow,
-        DirectoryRequestState::Failed => Color::Red,
+        DirectoryRequestState::Idle => THEME_SUCCESS,
+        DirectoryRequestState::Loading | DirectoryRequestState::Refreshing => THEME_WARNING,
+        DirectoryRequestState::Failed => THEME_ERROR,
     }
 }
 
