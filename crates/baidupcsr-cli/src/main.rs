@@ -383,7 +383,9 @@ impl BrowserRuntime {
                 let preferred = app.selected_entry().map(|entry| entry.path.clone());
                 self.start_directory_load(app, app.path().to_string(), preferred);
             }
-            baidupcsr_tui::KeyAction::Up | baidupcsr_tui::KeyAction::Down => {
+            baidupcsr_tui::KeyAction::Up
+            | baidupcsr_tui::KeyAction::Down
+            | baidupcsr_tui::KeyAction::Select => {
                 self.update_preview_for_selection(app);
                 self.prefetch_visible_page(app);
             }
@@ -2183,6 +2185,10 @@ fn tui_preview_kind(kind: baidupcsr_preview::PreviewKind) -> baidupcsr_tui::Prev
         baidupcsr_preview::PreviewKind::Image => baidupcsr_tui::PreviewKind::Image,
         baidupcsr_preview::PreviewKind::Pdf => baidupcsr_tui::PreviewKind::Pdf,
         baidupcsr_preview::PreviewKind::Archive => baidupcsr_tui::PreviewKind::Archive,
+        baidupcsr_preview::PreviewKind::Audio => baidupcsr_tui::PreviewKind::Audio,
+        baidupcsr_preview::PreviewKind::Document => baidupcsr_tui::PreviewKind::Document,
+        baidupcsr_preview::PreviewKind::Ebook => baidupcsr_tui::PreviewKind::Ebook,
+        baidupcsr_preview::PreviewKind::Font => baidupcsr_tui::PreviewKind::Font,
         baidupcsr_preview::PreviewKind::Directory => baidupcsr_tui::PreviewKind::Directory,
         baidupcsr_preview::PreviewKind::Metadata => baidupcsr_tui::PreviewKind::Metadata,
         baidupcsr_preview::PreviewKind::Video => baidupcsr_tui::PreviewKind::Video,
@@ -2773,6 +2779,22 @@ mod tests {
         assert_eq!(
             tui_preview_kind(baidupcsr_preview::PreviewKind::Archive),
             baidupcsr_tui::PreviewKind::Archive
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Audio),
+            baidupcsr_tui::PreviewKind::Audio
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Document),
+            baidupcsr_tui::PreviewKind::Document
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Ebook),
+            baidupcsr_tui::PreviewKind::Ebook
+        );
+        assert_eq!(
+            tui_preview_kind(baidupcsr_preview::PreviewKind::Font),
+            baidupcsr_tui::PreviewKind::Font
         );
         assert_eq!(
             tui_preview_kind(baidupcsr_preview::PreviewKind::Directory),

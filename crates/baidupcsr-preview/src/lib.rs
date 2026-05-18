@@ -29,6 +29,10 @@ pub enum PreviewKind {
     Image,
     Pdf,
     Archive,
+    Audio,
+    Document,
+    Ebook,
+    Font,
     Directory,
     Metadata,
     Video,
@@ -96,6 +100,12 @@ impl PreviewPlan {
             PreviewKind::Archive => {
                 Self::metadata(PreviewKind::Archive, "archive metadata preview only")
             }
+            PreviewKind::Audio => Self::metadata(PreviewKind::Audio, "audio metadata preview only"),
+            PreviewKind::Document => {
+                Self::metadata(PreviewKind::Document, "document metadata preview only")
+            }
+            PreviewKind::Ebook => Self::metadata(PreviewKind::Ebook, "ebook metadata preview only"),
+            PreviewKind::Font => Self::metadata(PreviewKind::Font, "font metadata preview only"),
             kind => Self::metadata(kind, "binary or unsupported preview type"),
         }
     }
@@ -119,6 +129,14 @@ pub struct PreviewStatus {
 }
 
 pub fn preview_kind_from_name(file_name: &str) -> PreviewKind {
+    let lower_name = file_name.to_ascii_lowercase();
+    if matches!(
+        lower_name.as_str(),
+        "sha256sums" | "sha256sum" | "sha512sums" | "md5sums" | "checksums"
+    ) {
+        return PreviewKind::Text;
+    }
+
     let Some(extension) = file_name.rsplit_once('.').map(|(_, extension)| extension) else {
         return PreviewKind::Metadata;
     };
@@ -127,10 +145,19 @@ pub fn preview_kind_from_name(file_name: &str) -> PreviewKind {
         "txt" | "md" | "markdown" | "rs" | "toml" | "json" | "yaml" | "yml" | "log" | "c"
         | "cc" | "cpp" | "h" | "hpp" | "py" | "js" | "ts" | "tsx" | "jsx" | "html" | "css"
         | "xml" | "csv" | "ini" | "conf" | "sh" | "bash" | "zsh" | "fish" | "srt" | "ass"
-        | "vtt" => PreviewKind::Text,
+        | "vtt" | "torrent" | "m3u" | "m3u8" | "pls" | "cue" | "sfv" | "sha256" | "sha512"
+        | "md5" => PreviewKind::Text,
         "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "heic" | "avif" => PreviewKind::Image,
         "pdf" => PreviewKind::Pdf,
         "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "7z" | "rar" => PreviewKind::Archive,
+        "mp3" | "flac" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "ape" | "wma" | "alac" => {
+            PreviewKind::Audio
+        }
+        "doc" | "docx" | "ppt" | "pptx" | "xls" | "xlsx" | "odt" | "ods" | "odp" | "rtf" => {
+            PreviewKind::Document
+        }
+        "epub" | "mobi" | "azw3" | "fb2" => PreviewKind::Ebook,
+        "ttf" | "otf" | "woff" | "woff2" => PreviewKind::Font,
         "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "flv" => PreviewKind::Video,
         _ => PreviewKind::Metadata,
     }

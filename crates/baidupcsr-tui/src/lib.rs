@@ -1,10 +1,16 @@
 use baidupcsr_pcs::FileEntry;
 use ratatui::{
-    crossterm::event::{self, Event as CrosstermEvent, KeyCode},
+    crossterm::{
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode,
+            MouseButton, MouseEventKind,
+        },
+        execute,
+    },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 use std::{cmp::Ordering, io, ops::Range, time::Duration};
@@ -43,6 +49,10 @@ pub enum KeyEvent {
     Enter,
     Backspace,
     Esc,
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,8 +68,25 @@ pub enum KeyAction {
     Download,
     CancelTask,
     ToggleSelect,
+    Select,
     Quit,
     None,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseInputKind {
+    LeftClick,
+    DoubleClick,
+    ScrollUp,
+    ScrollDown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MouseInput {
+    pub kind: MouseInputKind,
+    pub column: u16,
+    pub row: u16,
+    pub area: Rect,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,6 +146,10 @@ impl KeyMap {
             KeyEvent::Char('k') => KeyAction::Up,
             KeyEvent::Char('h') => KeyAction::Back,
             KeyEvent::Char('l') => KeyAction::Enter,
+            KeyEvent::Down => KeyAction::Down,
+            KeyEvent::Up => KeyAction::Up,
+            KeyEvent::Left => KeyAction::Back,
+            KeyEvent::Right => KeyAction::Enter,
             KeyEvent::Char('/') => KeyAction::Search,
             KeyEvent::Char(':') => KeyAction::Command,
             KeyEvent::Char('r') => KeyAction::Refresh,
@@ -153,6 +184,7 @@ pub struct TuiApp {
     command_input: String,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
+    help_visible: bool,
 }
 
 impl TuiApp {
@@ -175,6 +207,7 @@ impl TuiApp {
             command_input: String::new(),
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
+            help_visible: false,
         }
     }
 
@@ -339,7 +372,59 @@ impl TuiApp {
         let _ = self.handle_key_event(event);
     }
 
+    pub fn handle_mouse_event(&mut self, input: MouseInput) -> Option<TuiRuntimeEvent> {
+        if self.help_visible {
+            if matches!(
+                input.kind,
+                MouseInputKind::LeftClick | MouseInputKind::DoubleClick
+            ) {
+                self.help_visible = false;
+            }
+            return None;
+        }
+
+        match input.kind {
+            MouseInputKind::ScrollUp => {
+                self.move_up();
+                Some(TuiRuntimeEvent::Action(KeyAction::Up))
+            }
+            MouseInputKind::ScrollDown => {
+                self.move_down();
+                Some(TuiRuntimeEvent::Action(KeyAction::Down))
+            }
+            MouseInputKind::LeftClick | MouseInputKind::DoubleClick => {
+                let layout = tui_layout(input.area);
+                let files_inner = inner_rect(layout.files);
+                if !rect_contains(files_inner, input.column, input.row) {
+                    return None;
+                }
+
+                let row_offset = usize::from(input.row.saturating_sub(files_inner.y));
+                let range = self.visible_entry_range(usize::from(files_inner.height));
+                let index = range.start.saturating_add(row_offset);
+                if index >= self.entries.len() {
+                    return None;
+                }
+                self.selected_index = Some(index);
+                if input.kind == MouseInputKind::DoubleClick
+                    && self.selected_entry().is_some_and(|entry| entry.is_dir)
+                {
+                    Some(TuiRuntimeEvent::Action(KeyAction::Enter))
+                } else {
+                    Some(TuiRuntimeEvent::Action(KeyAction::Select))
+                }
+            }
+        }
+    }
+
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        if self.help_visible {
+            if matches!(event, KeyEvent::Char('?') | KeyEvent::Esc) {
+                self.help_visible = false;
+            }
+            return None;
+        }
+
         match self.mode {
             AppMode::Normal => self.handle_normal_key(event),
             AppMode::Command => self.handle_command_key(event, None),
@@ -360,6 +445,10 @@ impl TuiApp {
 
     pub const fn mode(&self) -> AppMode {
         self.mode
+    }
+
+    pub const fn help_visible(&self) -> bool {
+        self.help_visible
     }
 
     pub const fn request_state(&self) -> DirectoryRequestState {
@@ -467,6 +556,11 @@ impl TuiApp {
     }
 
     fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        if event == KeyEvent::Char('?') {
+            self.help_visible = true;
+            return None;
+        }
+
         if event == KeyEvent::Esc {
             self.mode = AppMode::Normal;
             return None;
@@ -496,6 +590,7 @@ impl TuiApp {
             | KeyAction::Preview
             | KeyAction::Download
             | KeyAction::CancelTask
+            | KeyAction::Select
             | KeyAction::Quit => {
                 return Some(TuiRuntimeEvent::Action(DEFAULT_KEYMAP.action_for(event)));
             }
@@ -537,6 +632,7 @@ impl TuiApp {
                 self.command_input.push(ch);
                 None
             }
+            KeyEvent::Up | KeyEvent::Down | KeyEvent::Left | KeyEvent::Right => None,
         }
     }
 
@@ -552,7 +648,13 @@ impl TuiApp {
                 self.confirm_lines.clear();
                 Some(TuiRuntimeEvent::ConfirmRejected)
             }
-            KeyEvent::Enter | KeyEvent::Backspace | KeyEvent::Char(_) => None,
+            KeyEvent::Enter
+            | KeyEvent::Backspace
+            | KeyEvent::Char(_)
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right => None,
         }
     }
 
@@ -587,10 +689,6 @@ impl TuiApp {
         self.cache_age_seconds
             .map(|seconds| format!("{seconds}s"))
             .unwrap_or_else(|| "none".to_string())
-    }
-
-    fn cache_label(&self) -> String {
-        format!("cache={}", self.cache_source.label())
     }
 }
 
@@ -634,6 +732,57 @@ fn visible_range(total: usize, selected: usize, rows: usize) -> Range<usize> {
     start..start.saturating_add(rows)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TuiLayout {
+    files: Rect,
+    preview: Rect,
+}
+
+fn tui_layout(area: Rect) -> TuiLayout {
+    let [_header, body, _tasks, _status] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(4),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+
+    if body.width >= 88 {
+        let [files, preview] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(48), Constraint::Min(42)])
+            .areas(body);
+        TuiLayout { files, preview }
+    } else if body.width >= 56 {
+        let [files, preview] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
+            .areas(body);
+        TuiLayout { files, preview }
+    } else {
+        let [files, preview] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+            .areas(body);
+        TuiLayout { files, preview }
+    }
+}
+
+fn inner_rect(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
+}
+
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
     let [header, body, tasks, status] = Layout::default()
         .direction(Direction::Vertical)
@@ -647,15 +796,10 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
 
     frame.render_widget(header_widget(app), header);
     if body.width >= 88 {
-        let [locations, files, preview_area] = Layout::default()
+        let [files, preview_area] = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Length(22),
-                Constraint::Percentage(45),
-                Constraint::Min(28),
-            ])
+            .constraints([Constraint::Percentage(48), Constraint::Min(42)])
             .areas(body);
-        frame.render_widget(context_widget(app), locations);
         frame.render_widget(files_widget(app, files), files);
         frame.render_widget(preview_widget(app, preview), preview_area);
     } else if body.width >= 56 {
@@ -675,6 +819,11 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     }
     frame.render_widget(tasks_widget(app), tasks);
     frame.render_widget(status_widget(app), status);
+    if app.help_visible() {
+        let area = centered_rect(frame.area(), 58, 16);
+        frame.render_widget(Clear, area);
+        frame.render_widget(help_widget(), area);
+    }
 }
 
 pub fn run_terminal_app(app: TuiApp) -> io::Result<()> {
@@ -687,9 +836,11 @@ where
 {
     let mut app = app;
     let mut terminal = ratatui::init();
+    execute!(io::stdout(), EnableMouseCapture)?;
     let result = run_terminal_loop(&mut terminal, &mut app, &mut handler);
+    let disable_mouse = execute!(io::stdout(), DisableMouseCapture);
     ratatui::restore();
-    result
+    result.and(disable_mouse)
 }
 
 fn run_terminal_loop<F>(
@@ -707,13 +858,27 @@ where
         })?;
 
         if event::poll(Duration::from_millis(100))? {
-            let CrosstermEvent::Key(key) = event::read()? else {
-                continue;
+            let runtime_event = match event::read()? {
+                CrosstermEvent::Key(key) => {
+                    let Some(tui_key) = map_crossterm_key(key.code) else {
+                        continue;
+                    };
+                    app.handle_key_event(tui_key)
+                }
+                CrosstermEvent::Mouse(mouse) => {
+                    let Some(kind) = map_crossterm_mouse_kind(mouse.kind) else {
+                        continue;
+                    };
+                    let size = terminal.size()?;
+                    app.handle_mouse_event(MouseInput {
+                        kind,
+                        column: mouse.column,
+                        row: mouse.row,
+                        area: Rect::new(0, 0, size.width, size.height),
+                    })
+                }
+                _ => continue,
             };
-            let Some(tui_key) = map_crossterm_key(key.code) else {
-                continue;
-            };
-            let runtime_event = app.handle_key_event(tui_key);
             if runtime_event == Some(TuiRuntimeEvent::Action(KeyAction::Quit)) {
                 break;
             }
@@ -726,14 +891,57 @@ where
     Ok(())
 }
 
+fn map_crossterm_mouse_kind(kind: MouseEventKind) -> Option<MouseInputKind> {
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => Some(MouseInputKind::LeftClick),
+        MouseEventKind::ScrollUp => Some(MouseInputKind::ScrollUp),
+        MouseEventKind::ScrollDown => Some(MouseInputKind::ScrollDown),
+        _ => None,
+    }
+}
+
 fn map_crossterm_key(code: KeyCode) -> Option<KeyEvent> {
     match code {
         KeyCode::Char(value) => Some(KeyEvent::Char(value)),
         KeyCode::Enter => Some(KeyEvent::Enter),
         KeyCode::Backspace => Some(KeyEvent::Backspace),
         KeyCode::Esc => Some(KeyEvent::Esc),
+        KeyCode::Up => Some(KeyEvent::Up),
+        KeyCode::Down => Some(KeyEvent::Down),
+        KeyCode::Left => Some(KeyEvent::Left),
+        KeyCode::Right => Some(KeyEvent::Right),
         _ => None,
     }
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn help_widget() -> Paragraph<'static> {
+    Paragraph::new(vec![
+        Line::raw("Navigation"),
+        Line::raw("  j/k or Up/Down     move selection"),
+        Line::raw("  h/l or Left/Right  parent / enter directory"),
+        Line::raw("  /  search          :  command"),
+        Line::raw(""),
+        Line::raw("Actions"),
+        Line::raw("  space mark         r refresh"),
+        Line::raw("  d download         x cancel task"),
+        Line::raw("  p preview video    q quit"),
+        Line::raw(""),
+        Line::raw("Mouse"),
+        Line::raw("  click selects      wheel scrolls"),
+    ])
+    .block(Block::bordered().title("Shortcuts"))
+    .wrap(Wrap { trim: true })
 }
 
 fn header_widget(app: &TuiApp) -> Paragraph<'_> {
@@ -751,39 +959,6 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
         ),
     ]))
     .block(Block::bordered().title("Session"))
-}
-
-fn context_widget(app: &TuiApp) -> Paragraph<'_> {
-    let parent = TuiApp::parent_path(app.path()).unwrap_or_else(|| "/".to_string());
-    let selected = app
-        .selected_entry()
-        .map(|entry| entry.server_filename.as_str())
-        .unwrap_or("none");
-    let mut lines = vec![
-        Line::raw("parent"),
-        Line::raw(truncate_cells(parent.as_str(), 20)),
-        Line::raw("current"),
-        Line::raw(truncate_cells(app.path(), 20)),
-        Line::raw("selected"),
-        Line::raw(truncate_cells(selected, 20)),
-        Line::raw(format!("marked={}", app.selected_paths().len())),
-        Line::raw(app.cache_label()),
-        Line::raw(format!("cache_age={}", app.cache_age_label())),
-    ];
-    if !app.preload_lines().is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(Line::raw("preload"));
-        lines.extend(
-            app.preload_lines()
-                .iter()
-                .take(3)
-                .map(|line| Line::raw(truncate_cells(line, 20))),
-        );
-    }
-
-    Paragraph::new(lines)
-        .block(Block::bordered().title("Context"))
-        .wrap(Wrap { trim: true })
 }
 
 fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
@@ -855,30 +1030,56 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
     let budget = preview.unwrap_or(app.preview_budget);
 
     let mut lines = selected
-        .map(|entry| preview_detail_lines(entry, app.cache_source()))
+        .map(|entry| preview_detail_lines(entry, app.cache_source(), budget))
         .unwrap_or_else(|| {
             vec![
-                Line::raw(format!("name={}", truncate_cells(title, 24))),
-                Line::raw("type=none"),
-                Line::raw(app.cache_label()),
+                Line::raw(format!("Name: {}", middle_truncate_cells(title, 48))),
+                Line::raw("Kind: none"),
+                Line::raw(format!("Cache: {}", app.cache_source().label())),
             ]
         });
-    lines.extend([
-        Line::raw(""),
-        Line::raw(format!(
-            "preview={} fetched={}",
-            budget.kind.label(),
+    lines.push(Line::raw(""));
+    if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
+        for line in app.preview_lines.iter().take(10) {
+            lines.push(Line::raw(line.to_string()));
+        }
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!(
+            "Memory: fetched {} / {} · disk {}",
+            budget.fetched_bytes, budget.memory_limit_bytes, budget.disk_backed
+        )));
+    } else if budget.kind == PreviewKind::Text && !app.preview_lines.is_empty() {
+        lines.truncate(3);
+        lines.push(Line::raw(""));
+        lines.push(Line::raw(format!(
+            "Preview: text · fetched {}",
             budget.fetched_bytes
-        )),
-        Line::raw(format!("limit={}", budget.memory_limit_bytes)),
-        Line::raw(format!(
-            "truncated={} disk={}",
-            budget.truncated, budget.disk_backed
-        )),
-        Line::raw(""),
-    ]);
-    for line in app.preview_lines.iter().take(8) {
-        lines.push(Line::raw(line.to_string()));
+        )));
+        lines.push(Line::raw(format!(
+            "Memory: limit {} · disk {}",
+            budget.memory_limit_bytes, budget.disk_backed
+        )));
+        lines.push(Line::raw(""));
+        for line in app.preview_lines.iter().take(10) {
+            lines.push(Line::raw(line.to_string()));
+        }
+    } else {
+        lines.extend([
+            Line::raw(format!(
+                "Preview: {} · fetched {}",
+                budget.kind.label(),
+                budget.fetched_bytes
+            )),
+            Line::raw(format!(
+                "Memory: limit {} · disk {}",
+                budget.memory_limit_bytes, budget.disk_backed
+            )),
+            Line::raw(format!("Truncated: {}", budget.truncated)),
+            Line::raw(""),
+        ]);
+        for line in app.preview_lines.iter().take(8) {
+            lines.push(Line::raw(line.to_string()));
+        }
     }
 
     Paragraph::new(lines)
@@ -886,21 +1087,29 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
         .wrap(Wrap { trim: true })
 }
 
-fn preview_detail_lines(entry: &FileEntry, source: CacheSource) -> Vec<Line<'static>> {
+fn preview_detail_lines(
+    entry: &FileEntry,
+    source: CacheSource,
+    budget: PreviewBudget,
+) -> Vec<Line<'static>> {
     let item_type = if entry.is_dir { "directory" } else { "file" };
     vec![
         Line::raw(format!(
-            "name={}",
-            truncate_cells(entry.server_filename.as_str(), 28)
+            "Name: {}",
+            middle_truncate_cells(entry.server_filename.as_str(), 52)
         )),
-        Line::raw(format!("type={item_type} cache={}", source.label())),
+        Line::raw(format!("Kind: {item_type} · {}", budget.kind.label())),
+        Line::raw(format!("Cache: {}", source.label())),
         Line::raw(format!(
-            "size={} mtime={}",
+            "Size: {} · Modified: {}",
             file_size_label(entry),
             entry.mtime
         )),
-        Line::raw(format!("fs_id={}", entry.fs_id)),
-        Line::raw(format!("path={}", truncate_cells(entry.path.as_str(), 28))),
+        Line::raw(format!("ID: {}", entry.fs_id)),
+        Line::raw(format!(
+            "Path: {}",
+            middle_truncate_cells(entry.path.as_str(), 56)
+        )),
     ]
 }
 
@@ -942,6 +1151,9 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
         };
         lines.push(Line::raw(format!("{prompt}{}", app.command_input)));
     }
+    for line in app.preload_lines.iter().take(2) {
+        lines.push(Line::raw(format!("preload {line}")));
+    }
     for line in app.task_lines.iter().take(3) {
         lines.push(Line::raw(line.to_string()));
     }
@@ -952,11 +1164,8 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 }
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
-    Paragraph::new(Line::raw(format!(
-        "Status {}  keys j/k h/l space / : r d/x p q",
-        app.status_line()
-    )))
-    .style(Style::new().fg(Color::Black).bg(Color::Gray))
+    Paragraph::new(Line::raw(format!("Status {}", app.status_line())))
+        .style(Style::new().fg(Color::Black).bg(Color::Gray))
 }
 
 fn request_state_color(state: DirectoryRequestState) -> Color {
@@ -1008,12 +1217,52 @@ fn truncate_cells(value: &str, max_width: usize) -> String {
     output
 }
 
+fn middle_truncate_cells(value: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(value) <= max_width {
+        return value.to_string();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let left_budget = (max_width - 3) / 2;
+    let right_budget = max_width - 3 - left_budget;
+    let mut left = String::new();
+    let mut left_width = 0;
+    for ch in value.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if left_width + width > left_budget {
+            break;
+        }
+        left.push(ch);
+        left_width += width;
+    }
+
+    let mut right_chars = Vec::new();
+    let mut right_width = 0;
+    for ch in value.chars().rev() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if right_width + width > right_budget {
+            break;
+        }
+        right_chars.push(ch);
+        right_width += width;
+    }
+    right_chars.reverse();
+
+    format!("{left}...{}", right_chars.into_iter().collect::<String>())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PreviewKind {
     Text,
     Image,
     Pdf,
     Archive,
+    Audio,
+    Document,
+    Ebook,
+    Font,
     Directory,
     Metadata,
     Video,
@@ -1026,6 +1275,10 @@ impl PreviewKind {
             Self::Image => "image",
             Self::Pdf => "pdf",
             Self::Archive => "archive",
+            Self::Audio => "audio",
+            Self::Document => "document",
+            Self::Ebook => "ebook",
+            Self::Font => "font",
             Self::Directory => "directory",
             Self::Metadata => "metadata",
             Self::Video => "video",

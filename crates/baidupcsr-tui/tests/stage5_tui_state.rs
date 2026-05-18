@@ -1,7 +1,7 @@
 use baidupcsr_pcs::FileEntry;
 use baidupcsr_tui::{
     AppMode, DirectoryRequestState, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp,
-    DEFAULT_KEYMAP,
+    TuiRuntimeEvent, DEFAULT_KEYMAP,
 };
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
@@ -66,6 +66,25 @@ fn default_keymap_exposes_vim_navigation() {
 }
 
 #[test]
+fn question_mark_toggles_hidden_help_overlay() {
+    let mut app = TuiApp::new("/docs");
+
+    assert!(!app.help_visible());
+    assert_eq!(app.handle_key_event(KeyEvent::Char('?')), None);
+    assert!(app.help_visible());
+    assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
+    assert!(!app.help_visible());
+}
+
+#[test]
+fn arrow_keys_mirror_vim_navigation_actions() {
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Down), KeyAction::Down);
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Up), KeyAction::Up);
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Left), KeyAction::Back);
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Right), KeyAction::Enter);
+}
+
+#[test]
 fn normal_mode_navigation_keeps_selection_in_bounds() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![file(1, "/docs/a.txt"), file(2, "/docs/b.txt")]);
@@ -77,6 +96,43 @@ fn normal_mode_navigation_keeps_selection_in_bounds() {
     app.handle_key(KeyEvent::Char('k'));
     app.handle_key(KeyEvent::Char('k'));
     assert_eq!(app.selected_index(), Some(0));
+}
+
+#[test]
+fn mouse_click_selects_visible_file_row() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![
+        file(1, "/docs/a.txt"),
+        file(2, "/docs/b.txt"),
+        file(3, "/docs/c.txt"),
+    ]);
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 24,
+        row: 5,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    });
+
+    assert_eq!(app.selected_index(), Some(1));
+    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+}
+
+#[test]
+fn mouse_wheel_moves_selection_like_keyboard_navigation() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/a.txt"), file(2, "/docs/b.txt")]);
+
+    assert_eq!(
+        app.handle_mouse_event(baidupcsr_tui::MouseInput {
+            kind: baidupcsr_tui::MouseInputKind::ScrollDown,
+            column: 24,
+            row: 5,
+            area: ratatui::layout::Rect::new(0, 0, 96, 24),
+        }),
+        Some(TuiRuntimeEvent::Action(KeyAction::Down))
+    );
+    assert_eq!(app.selected_index(), Some(1));
 }
 
 #[test]

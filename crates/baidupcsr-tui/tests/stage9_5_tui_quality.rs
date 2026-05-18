@@ -53,7 +53,7 @@ fn infallible<T>(result: Result<T, Infallible>) -> T {
 }
 
 #[test]
-fn wide_layout_uses_real_context_instead_of_placeholder_locations() {
+fn wide_layout_uses_focused_browser_instead_of_context_rail() {
     let mut app = TuiApp::new("/remote/current");
     app.set_entries(vec![
         file(1, "/remote/current/photos", 0, true),
@@ -67,15 +67,49 @@ fn wide_layout_uses_real_context_instead_of_placeholder_locations() {
 
     let screen = draw(&app, 108, 24);
 
-    assert!(screen.contains("Context"));
-    assert!(screen.contains("parent"));
-    assert!(screen.contains("/remote"));
-    assert!(screen.contains("selected"));
+    assert!(!screen.contains("Context"));
+    assert!(!screen.contains("parent"));
+    assert!(screen.contains("/remote/current"));
     assert!(screen.contains("photos"));
-    assert!(screen.contains("cache=disk"));
+    assert!(screen.contains("Cache: disk"));
     assert!(screen.contains("queued dirs=2"));
     assert!(!screen.contains("Locations"));
     assert!(!screen.contains("favorites"));
+}
+
+#[test]
+fn focused_browser_wide_layout_removes_context_rail() {
+    let mut app = TuiApp::new("/remote/current");
+    app.set_entries(vec![
+        file(1, "/remote/current/photos", 0, true),
+        file(2, "/remote/current/readme.md", 2048, false),
+    ]);
+
+    let screen = draw(&app, 108, 24);
+
+    assert!(screen.contains("/remote/current"));
+    assert!(screen.contains("Files"));
+    assert!(screen.contains("Preview"));
+    assert!(!screen.contains("Context"));
+    assert!(!screen.contains("Locations"));
+    assert!(!screen.contains("keys j/k"));
+}
+
+#[test]
+fn preview_panel_wraps_long_name_without_losing_suffix() {
+    let mut app = TuiApp::new("/videos");
+    app.set_entries(vec![file(
+        1,
+        "/videos/A.Knight.of.the.Seven.Kingdoms.S01E01.2160p.MAX.WEB-DL.mkv",
+        5_830_i64 * 1024 * 1024,
+        false,
+    )]);
+
+    let screen = draw(&app, 108, 24);
+
+    assert!(screen.contains("A.Knight"));
+    assert!(screen.contains(".mkv"));
+    assert!(!screen.contains("name=A.Knight"));
 }
 
 #[test]
@@ -100,11 +134,11 @@ fn preview_panel_uses_empty_space_for_selected_file_details() {
 
     let screen = draw(&app, 108, 24);
 
-    assert!(screen.contains("name=photo.png"));
-    assert!(screen.contains("type=file"));
-    assert!(screen.contains("size=8KiB"));
-    assert!(screen.contains("mtime=1700000000"));
-    assert!(screen.contains("fs_id=7"));
+    assert!(screen.contains("Name: photo.png"));
+    assert!(screen.contains("Kind: file"));
+    assert!(screen.contains("Size: 8KiB"));
+    assert!(screen.contains("Modified: 1700000000"));
+    assert!(screen.contains("ID: 7"));
     assert!(screen.contains("image=png"));
     assert!(screen.contains("dimensions=320x240"));
 }

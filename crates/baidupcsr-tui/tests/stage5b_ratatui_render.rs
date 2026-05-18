@@ -96,16 +96,16 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
     );
 
     assert!(screen.contains("baidupcsr"));
-    assert!(screen.contains("Context"));
+    assert!(!screen.contains("Context"));
     assert!(screen.contains("Files"));
     assert!(screen.contains("Preview"));
     assert!(screen.contains("> apps/"));
     assert!(screen.contains("demo.txt"));
-    assert!(screen.contains("preview=text"));
-    assert!(screen.contains("fetched=128"));
-    assert!(screen.contains("limit=16777216"));
-    assert!(screen.contains("truncated=false"));
-    assert!(screen.contains("disk=false"));
+    assert!(screen.contains("Preview: text"));
+    assert!(screen.contains("fetched 128"));
+    assert!(screen.contains("limit 16777216"));
+    assert!(screen.contains("Truncated: false"));
+    assert!(screen.contains("disk false"));
     assert!(screen.contains("mode=NORMAL path=/apps request=idle cache_age=none tasks=1"));
 }
 
@@ -160,7 +160,7 @@ fn ratatui_render_truncates_long_wide_names_without_breaking_layout() {
 
     assert!(screen.contains("一 个"));
     assert!(screen.contains("..."));
-    assert!(!screen.contains("with-a-long-tail.txt"));
+    assert!(screen.contains("with-a-long-tail.txt"));
     assert!(screen.contains("Preview"));
     assert!(screen.contains("Status"));
 }
@@ -185,8 +185,24 @@ fn ratatui_render_draws_text_preview_content() {
 
     assert!(screen.contains("hello"));
     assert!(screen.contains("world"));
-    assert!(screen.contains("preview=text"));
-    assert!(screen.contains("disk=false"));
+    assert!(screen.contains("Preview: text"));
+    assert!(screen.contains("disk false"));
+}
+
+#[test]
+fn help_overlay_is_hidden_until_question_mark() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/readme.md", 1024, false)]);
+
+    let normal = draw_to_text(&app, None);
+    assert!(!normal.contains("Shortcuts"));
+    assert!(!normal.contains("Mouse"));
+
+    app.handle_key(baidupcsr_tui::KeyEvent::Char('?'));
+    let help = draw_to_text(&app, None);
+    assert!(help.contains("Shortcuts"));
+    assert!(help.contains("j/k"));
+    assert!(help.contains("Mouse"));
 }
 
 #[test]
@@ -241,9 +257,9 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
 
     let screen = buffer_to_text(&draw_buffer(&app, None, 80, 24));
 
-    assert!(screen.contains("preview=text"));
-    assert!(screen.contains("fetched=96"));
-    assert!(screen.contains("disk=false"));
+    assert!(screen.contains("Preview: text"));
+    assert!(screen.contains("fetched 96"));
+    assert!(screen.contains("disk false"));
     assert!(screen.contains("line one"));
 }
 
