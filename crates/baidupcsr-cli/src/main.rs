@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::env;
-use std::fs::File;
-use std::io::Read;
-use std::path::PathBuf;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
@@ -13,6 +13,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const PREVIEW_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
+const DOWNLOAD_CHUNK_BYTES: u64 = 1024 * 1024;
+const ENV_DOWNLOAD_DIR: &str = "BAIDUPCSR_DOWNLOAD_DIR";
 const VIDEO_UPSTREAM_REDACTED_URL: &str = "https://pcs.baidu.com/rest/2.0/pcs/file";
 
 fn main() -> ExitCode {
@@ -54,10 +56,15 @@ struct BrowserRuntime {
     video_config: baidupcsr_config::VideoPreviewConfig,
     video_epoch: Arc<AtomicU64>,
     active_video: Option<ActiveVideoPreview>,
+    download_dir: PathBuf,
+    task_manager: baidupcsr_core::TaskManager,
+    task_cancellations: HashMap<baidupcsr_core::TaskId, Arc<AtomicBool>>,
     tx: mpsc::Sender<DirectoryLoadResult>,
     rx: mpsc::Receiver<DirectoryLoadResult>,
     preview_tx: mpsc::Sender<PreviewLoadResult>,
     preview_rx: mpsc::Receiver<PreviewLoadResult>,
+    task_tx: mpsc::Sender<TransferTaskEvent>,
+    task_rx: mpsc::Receiver<TransferTaskEvent>,
     inflight: usize,
     initial_path: String,
     startup_notice: Option<String>,
@@ -82,6 +89,25 @@ struct ActiveVideoPreview {
     player: Child,
 }
 
+enum TransferTaskEvent {
+    Progress {
+        id: baidupcsr_core::TaskId,
+        bytes_done: u64,
+        elapsed_seconds: u64,
+    },
+    Completed {
+        id: baidupcsr_core::TaskId,
+    },
+    Failed {
+        id: baidupcsr_core::TaskId,
+        message: String,
+    },
+    Cancelled {
+        id: baidupcsr_core::TaskId,
+        message: String,
+    },
+}
+
 impl Drop for ActiveVideoPreview {
     fn drop(&mut self) {
         let _ = self.player.kill();
@@ -94,6 +120,7 @@ impl BrowserRuntime {
     fn from_config() -> Self {
         let (tx, rx) = mpsc::channel();
         let (preview_tx, preview_rx) = mpsc::channel();
+        let (task_tx, task_rx) = mpsc::channel();
         let ui_config_path = baidupcsr_config::discover_ui_config_file();
         let ui_config = baidupcsr_config::load_ui_config_or_default(&ui_config_path)
             .unwrap_or_else(|_| baidupcsr_config::UiConfig::default());
@@ -116,10 +143,15 @@ impl BrowserRuntime {
                     video_config: ui_config.video_preview,
                     video_epoch: Arc::new(AtomicU64::new(0)),
                     active_video: None,
+                    download_dir: PathBuf::from("."),
+                    task_manager: baidupcsr_core::TaskManager::new(),
+                    task_cancellations: HashMap::new(),
                     tx,
                     rx,
                     preview_tx,
                     preview_rx,
+                    task_tx,
+                    task_rx,
                     inflight: 0,
                     initial_path: "/".to_string(),
                     startup_notice: Some(format!("config_error: {err}")),
@@ -140,10 +172,15 @@ impl BrowserRuntime {
                 video_config: ui_config.video_preview,
                 video_epoch: Arc::new(AtomicU64::new(0)),
                 active_video: None,
+                download_dir: download_dir_for_config(&config),
+                task_manager: baidupcsr_core::TaskManager::new(),
+                task_cancellations: HashMap::new(),
                 tx,
                 rx,
                 preview_tx,
                 preview_rx,
+                task_tx,
+                task_rx,
                 inflight: 0,
                 initial_path: "/".to_string(),
                 startup_notice: Some("active_user: missing".to_string()),
@@ -159,6 +196,7 @@ impl BrowserRuntime {
         let client =
             build_pcs_client(&config, user).map_err(|message| format!("auth_error: {message}"));
         let account_bduss = bduss_from_user(user);
+        let download_dir = download_dir_for_config(&config);
 
         match client {
             Ok(client) => Self {
@@ -173,10 +211,15 @@ impl BrowserRuntime {
                 video_config: ui_config.video_preview,
                 video_epoch: Arc::new(AtomicU64::new(0)),
                 active_video: None,
+                download_dir,
+                task_manager: baidupcsr_core::TaskManager::new(),
+                task_cancellations: HashMap::new(),
                 tx,
                 rx,
                 preview_tx,
                 preview_rx,
+                task_tx,
+                task_rx,
                 inflight: 0,
                 initial_path,
                 startup_notice: None,
@@ -193,10 +236,15 @@ impl BrowserRuntime {
                 video_config: ui_config.video_preview,
                 video_epoch: Arc::new(AtomicU64::new(0)),
                 active_video: None,
+                download_dir,
+                task_manager: baidupcsr_core::TaskManager::new(),
+                task_cancellations: HashMap::new(),
                 tx,
                 rx,
                 preview_tx,
                 preview_rx,
+                task_tx,
+                task_rx,
                 inflight: 0,
                 initial_path,
                 startup_notice: Some(message),
@@ -223,8 +271,10 @@ impl BrowserRuntime {
             baidupcsr_tui::TuiRuntimeEvent::Tick => {
                 self.drain_directory_results(app);
                 self.drain_preview_results(app);
+                self.drain_transfer_task_events(app);
                 self.refresh_active_video_preview(app);
                 self.refresh_current_cache_age(app);
+                self.refresh_task_panel(app);
             }
             baidupcsr_tui::TuiRuntimeEvent::Action(action) => self.handle_action(app, action),
         }
@@ -264,11 +314,18 @@ impl BrowserRuntime {
             baidupcsr_tui::KeyAction::Preview => {
                 self.start_video_preview(app);
             }
+            baidupcsr_tui::KeyAction::Download => {
+                self.start_download_task(app);
+            }
+            baidupcsr_tui::KeyAction::CancelTask => {
+                self.cancel_latest_task(app);
+            }
             baidupcsr_tui::KeyAction::Search
             | baidupcsr_tui::KeyAction::Command
             | baidupcsr_tui::KeyAction::Quit
             | baidupcsr_tui::KeyAction::None => {}
         }
+        self.refresh_task_panel(app);
     }
 
     fn start_directory_load(
@@ -537,6 +594,128 @@ impl BrowserRuntime {
         app.set_background_tasks(self.inflight);
     }
 
+    fn start_download_task(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let Some(entry) = app.selected_entry().cloned() else {
+            app.set_notice("download: no selected entry");
+            return;
+        };
+        if entry.is_dir {
+            app.set_notice("download: directories are not downloadable in this stage");
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            app.set_notice("download_error: client unavailable");
+            return;
+        };
+        let Some(account_bduss) = self.account_bduss.clone() else {
+            app.set_notice("download_auth_error: missing BDUSS");
+            return;
+        };
+        if self.account_uid == 0 {
+            app.set_notice("download_auth_error: missing uid");
+            return;
+        }
+
+        let size = nonnegative_size(entry.size);
+        let target = download_target_path(&self.download_dir, entry.server_filename.as_str());
+        let target_label = file_name_label(target.to_string_lossy().as_ref());
+        let id = self.task_manager.enqueue_download(
+            entry.path.as_str(),
+            target.to_string_lossy().as_ref(),
+            size,
+        );
+        if self.task_manager.start(id).is_err() {
+            app.set_notice("download_error: failed to start task");
+            return;
+        }
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.task_cancellations
+            .insert(id, Arc::clone(&cancellation));
+        let tx = self.task_tx.clone();
+        let remote_path = entry.path;
+        let account_uid = self.account_uid;
+        thread::spawn(move || {
+            run_download_worker(DownloadWorker {
+                id,
+                client,
+                remote_path,
+                target,
+                size,
+                account_uid,
+                account_bduss,
+                cancellation,
+                tx,
+            });
+        });
+        app.set_notice(format!(
+            "download_started: #{} {}",
+            id.value(),
+            target_label
+        ));
+    }
+
+    fn cancel_latest_task(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let Some(id) = self
+            .task_manager
+            .snapshots()
+            .into_iter()
+            .rev()
+            .find(|task| {
+                matches!(
+                    task.state,
+                    baidupcsr_core::TaskState::Queued | baidupcsr_core::TaskState::Running
+                )
+            })
+            .map(|task| task.id)
+        else {
+            app.set_notice("task_cancel: no active transfer task");
+            return;
+        };
+
+        if self.task_manager.request_cancel(id).is_err() {
+            app.set_notice(format!("task_cancel_error: #{}", id.value()));
+            return;
+        }
+        if let Some(cancellation) = self.task_cancellations.get(&id) {
+            cancellation.store(true, Ordering::Release);
+        }
+        app.set_notice(format!("task_cancel_requested: #{}", id.value()));
+    }
+
+    fn drain_transfer_task_events(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        while let Ok(event) = self.task_rx.try_recv() {
+            match event {
+                TransferTaskEvent::Progress {
+                    id,
+                    bytes_done,
+                    elapsed_seconds,
+                } => {
+                    let _ = self
+                        .task_manager
+                        .update_progress(id, bytes_done, elapsed_seconds);
+                }
+                TransferTaskEvent::Completed { id } => {
+                    let _ = self.task_manager.complete(id);
+                    self.task_cancellations.remove(&id);
+                    app.set_notice(format!("download_complete: #{}", id.value()));
+                    let preferred = selected_path_for_refresh(app);
+                    self.start_directory_load(app, app.path().to_string(), preferred);
+                }
+                TransferTaskEvent::Failed { id, message } => {
+                    let _ = self.task_manager.fail(id, message.as_str());
+                    self.task_cancellations.remove(&id);
+                    app.set_notice(format!("download_failed: #{} {}", id.value(), message));
+                }
+                TransferTaskEvent::Cancelled { id, message } => {
+                    let _ = self.task_manager.cancelled(id, message.as_str());
+                    self.task_cancellations.remove(&id);
+                    app.set_notice(format!("download_cancelled: #{}", id.value()));
+                }
+            }
+        }
+    }
+
     fn start_video_preview(&mut self, app: &mut baidupcsr_tui::TuiApp) {
         let Some(entry) = app.selected_entry().cloned() else {
             app.set_notice("video_preview: no selected entry");
@@ -780,6 +959,19 @@ impl BrowserRuntime {
         app.set_cache_age_seconds(self.cache_age_seconds(app.path()));
     }
 
+    fn refresh_task_panel(&self, app: &mut baidupcsr_tui::TuiApp) {
+        let lines = self
+            .task_manager
+            .snapshots()
+            .into_iter()
+            .rev()
+            .take(3)
+            .map(|task| task_summary_line(&task))
+            .collect();
+        app.set_task_lines(lines);
+        app.set_background_tasks(self.inflight + self.task_manager.active_count());
+    }
+
     fn cache_age_seconds(&self, path: &str) -> Option<u64> {
         self.loaded_at
             .get(path)
@@ -868,6 +1060,164 @@ fn list_remote_directory(
         .map_err(|err| format!("remote_list_error: {err}"))
 }
 
+struct DownloadWorker {
+    id: baidupcsr_core::TaskId,
+    client: baidupcsr_pcs::BlockingPcsClient,
+    remote_path: String,
+    target: PathBuf,
+    size: u64,
+    account_uid: u64,
+    account_bduss: String,
+    cancellation: Arc<AtomicBool>,
+    tx: mpsc::Sender<TransferTaskEvent>,
+}
+
+enum DownloadWorkerResult {
+    Completed,
+    Cancelled(String),
+    Failed(String),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum DlinkRangeAttempt {
+    Bytes(Vec<u8>),
+    Cancelled,
+    Failed(String),
+}
+
+fn run_download_worker(worker: DownloadWorker) {
+    let id = worker.id;
+    let tx = worker.tx.clone();
+    let result = download_worker_body(worker);
+    let event = match result {
+        DownloadWorkerResult::Completed => TransferTaskEvent::Completed { id },
+        DownloadWorkerResult::Cancelled(message) => TransferTaskEvent::Cancelled { id, message },
+        DownloadWorkerResult::Failed(message) => TransferTaskEvent::Failed { id, message },
+    };
+    let _ = tx.send(event);
+}
+
+fn download_worker_body(worker: DownloadWorker) -> DownloadWorkerResult {
+    if worker.cancellation.load(Ordering::Acquire) {
+        return DownloadWorkerResult::Cancelled("user cancelled".to_string());
+    }
+    if worker.target.exists() {
+        return DownloadWorkerResult::Failed("local_exists".to_string());
+    }
+    if let Some(parent) = worker.target.parent() {
+        if let Err(err) = fs::create_dir_all(parent) {
+            return DownloadWorkerResult::Failed(io_error_label(&err));
+        }
+    }
+    if worker.size == 0 {
+        return match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&worker.target)
+        {
+            Ok(_) => DownloadWorkerResult::Completed,
+            Err(err) => DownloadWorkerResult::Failed(io_error_label(&err)),
+        };
+    }
+
+    let partial = partial_download_path(&worker.target);
+    let mut offset = match fs::metadata(&partial) {
+        Ok(metadata) => metadata.len(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(err) => return DownloadWorkerResult::Failed(io_error_label(&err)),
+    };
+    if offset > worker.size {
+        return DownloadWorkerResult::Failed("partial_larger_than_remote".to_string());
+    }
+
+    let urls = match worker.client.locate_download_urls(
+        worker.remote_path.as_str(),
+        worker.account_uid,
+        worker.account_bduss.as_str(),
+    ) {
+        Ok(urls) => urls,
+        Err(err) => return DownloadWorkerResult::Failed(pcs_error_label(&err)),
+    };
+    let started_at = Instant::now();
+    let mut file = match OpenOptions::new().create(true).append(true).open(&partial) {
+        Ok(file) => file,
+        Err(err) => return DownloadWorkerResult::Failed(io_error_label(&err)),
+    };
+    if offset > 0 {
+        let _ = worker.tx.send(TransferTaskEvent::Progress {
+            id: worker.id,
+            bytes_done: offset,
+            elapsed_seconds: 1,
+        });
+    }
+
+    while offset < worker.size {
+        if worker.cancellation.load(Ordering::Acquire) {
+            return DownloadWorkerResult::Cancelled("user cancelled".to_string());
+        }
+        let end = offset
+            .saturating_add(DOWNLOAD_CHUNK_BYTES)
+            .saturating_sub(1)
+            .min(worker.size.saturating_sub(1));
+        let range = match baidupcsr_pcs::ByteRange::new(offset, end) {
+            Ok(range) => range,
+            Err(err) => return DownloadWorkerResult::Failed(pcs_error_label(&err)),
+        };
+        let bytes = match fetch_first_successful_dlink_range(&urls, |dlink| {
+            worker
+                .client
+                .download_url_range_with_cancel(dlink, range, || {
+                    worker.cancellation.load(Ordering::Acquire)
+                })
+        }) {
+            DlinkRangeAttempt::Bytes(bytes) => bytes,
+            DlinkRangeAttempt::Cancelled => {
+                return DownloadWorkerResult::Cancelled("user cancelled".to_string());
+            }
+            DlinkRangeAttempt::Failed(message) => return DownloadWorkerResult::Failed(message),
+        };
+        if bytes.is_empty() {
+            return DownloadWorkerResult::Failed("empty_range".to_string());
+        }
+        let allowed =
+            usize::try_from(end.saturating_sub(offset).saturating_add(1)).unwrap_or(usize::MAX);
+        let write_len = bytes.len().min(allowed);
+        if let Err(err) = file.write_all(&bytes[..write_len]) {
+            return DownloadWorkerResult::Failed(io_error_label(&err));
+        }
+        offset = offset.saturating_add(u64::try_from(write_len).unwrap_or(u64::MAX));
+        let _ = worker.tx.send(TransferTaskEvent::Progress {
+            id: worker.id,
+            bytes_done: offset,
+            elapsed_seconds: started_at.elapsed().as_secs().max(1),
+        });
+    }
+
+    if let Err(err) = file.flush() {
+        return DownloadWorkerResult::Failed(io_error_label(&err));
+    }
+    drop(file);
+    match fs::rename(&partial, &worker.target) {
+        Ok(()) => DownloadWorkerResult::Completed,
+        Err(err) => DownloadWorkerResult::Failed(io_error_label(&err)),
+    }
+}
+
+fn fetch_first_successful_dlink_range<F>(urls: &[String], mut fetch: F) -> DlinkRangeAttempt
+where
+    F: FnMut(&str) -> Result<Vec<u8>, baidupcsr_pcs::PcsError>,
+{
+    let mut last_error = "locatedownload_empty".to_string();
+    for url in urls {
+        match fetch(url.as_str()) {
+            Ok(bytes) => return DlinkRangeAttempt::Bytes(bytes),
+            Err(baidupcsr_pcs::PcsError::Cancelled { .. }) => return DlinkRangeAttempt::Cancelled,
+            Err(err) => last_error = pcs_error_label(&err),
+        }
+    }
+    DlinkRangeAttempt::Failed(last_error)
+}
+
 fn is_video_entry(entry: &baidupcsr_pcs::FileEntry) -> bool {
     !entry.is_dir
         && baidupcsr_preview::preview_kind_from_name(entry.server_filename.as_str())
@@ -897,6 +1247,93 @@ fn video_error_label(error: Option<&baidupcsr_preview::VideoPreviewError>) -> St
     error
         .map(|error| format!("{error:?}"))
         .unwrap_or_else(|| "none".to_string())
+}
+
+fn download_target_path(download_dir: &Path, file_name: &str) -> PathBuf {
+    download_dir.join(sanitize_download_file_name(file_name))
+}
+
+fn partial_download_path(target: &Path) -> PathBuf {
+    let mut file_name = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("download")
+        .to_string();
+    file_name.push_str(".part");
+    target.with_file_name(file_name)
+}
+
+fn selected_path_for_refresh(app: &baidupcsr_tui::TuiApp) -> Option<String> {
+    app.selected_entry().map(|entry| entry.path.clone())
+}
+
+fn sanitize_download_file_name(file_name: &str) -> String {
+    let sanitized: String = file_name
+        .chars()
+        .map(|ch| {
+            if ch == '/' || ch == '\\' || ch.is_control() {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "download".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn task_summary_line(task: &baidupcsr_core::TaskSnapshot) -> String {
+    let (kind, local_name) = match &task.kind {
+        baidupcsr_core::TaskKind::Download { local_path, .. } => {
+            ("download", file_name_label(local_path))
+        }
+        baidupcsr_core::TaskKind::Upload { local_path, .. } => {
+            ("upload", file_name_label(local_path))
+        }
+    };
+    let total = task
+        .progress
+        .bytes_total
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let mut line = format!(
+        "#{} {} {} {}/{} {}",
+        task.id.value(),
+        kind,
+        task_state_label(task.state),
+        task.progress.bytes_done,
+        total,
+        local_name
+    );
+    if let Some(error) = &task.error {
+        line.push(' ');
+        line.push_str(error);
+    }
+    line
+}
+
+fn file_name_label(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn task_state_label(state: baidupcsr_core::TaskState) -> &'static str {
+    match state {
+        baidupcsr_core::TaskState::Queued => "queued",
+        baidupcsr_core::TaskState::Running => "running",
+        baidupcsr_core::TaskState::CancelRequested => "cancelling",
+        baidupcsr_core::TaskState::Completed => "done",
+        baidupcsr_core::TaskState::Failed => "failed",
+        baidupcsr_core::TaskState::Cancelled => "cancelled",
+    }
 }
 
 fn generate_video_token(
@@ -984,6 +1421,17 @@ fn pan_user_agent_for_config(config: &baidupcsr_config::PcsConfig) -> &str {
     }
 }
 
+fn download_dir_for_config(config: &baidupcsr_config::PcsConfig) -> PathBuf {
+    if let Some(path) = env::var_os(ENV_DOWNLOAD_DIR).map(PathBuf::from) {
+        return path;
+    }
+    if config.savedir.is_empty() {
+        env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    } else {
+        PathBuf::from(config.savedir.as_str())
+    }
+}
+
 fn bduss_from_user(user: &baidupcsr_config::BaiduUser) -> Option<String> {
     if !user.bduss.is_empty() {
         return Some(user.bduss.clone());
@@ -1009,6 +1457,19 @@ fn optional_string(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+fn pcs_error_label(err: &baidupcsr_pcs::PcsError) -> String {
+    match err {
+        baidupcsr_pcs::PcsError::Cancelled { .. } => "cancelled".to_string(),
+        baidupcsr_pcs::PcsError::Parse { .. } => "parse".to_string(),
+        baidupcsr_pcs::PcsError::Network { .. } => "network".to_string(),
+        baidupcsr_pcs::PcsError::Remote { code, .. } => format!("remote_code={code}"),
+    }
+}
+
+fn io_error_label(err: &std::io::Error) -> String {
+    format!("io:{:?}", err.kind())
 }
 
 fn print_doctor(config_dir: Option<PathBuf>) {
@@ -1069,9 +1530,11 @@ mod tests {
     use baidupcsr_pcs::FileEntry;
 
     use super::{
-        bduss_from_user, build_pcs_client, is_video_entry, list_remote_directory,
-        pan_user_agent_for_config, preview_key_for_entry, tui_preview_kind,
-        video_budget_from_config,
+        bduss_from_user, build_pcs_client, download_target_path,
+        fetch_first_successful_dlink_range, is_video_entry, list_remote_directory,
+        pan_user_agent_for_config, partial_download_path, preview_key_for_entry,
+        selected_path_for_refresh, task_summary_line, tui_preview_kind, video_budget_from_config,
+        DlinkRangeAttempt,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -1171,6 +1634,88 @@ mod tests {
 
         assert_eq!(pan_user_agent_for_config(&config), "fixture-pan-ua");
         Ok(())
+    }
+
+    #[test]
+    fn download_target_uses_sanitized_filename_under_download_dir() {
+        let target = download_target_path(Path::new("/tmp/downloads"), "../bad/name?.txt");
+
+        assert_eq!(target, Path::new("/tmp/downloads").join(".._bad_name?.txt"));
+        assert_eq!(
+            partial_download_path(&target),
+            Path::new("/tmp/downloads").join(".._bad_name?.txt.part")
+        );
+    }
+
+    #[test]
+    fn download_target_rejects_dot_path_components_as_filenames() {
+        assert_eq!(
+            download_target_path(Path::new("/tmp/downloads"), "."),
+            Path::new("/tmp/downloads").join("download")
+        );
+        assert_eq!(
+            download_target_path(Path::new("/tmp/downloads"), ".."),
+            Path::new("/tmp/downloads").join("download")
+        );
+    }
+
+    #[test]
+    fn task_summary_uses_local_name_without_remote_path() -> Result<(), baidupcsr_core::TaskError> {
+        let mut manager = baidupcsr_core::TaskManager::new();
+        let id = manager.enqueue_download("/private/remote/secret.txt", "/tmp/out.txt", 1024);
+        manager.start(id)?;
+        manager.update_progress(id, 512, 1)?;
+        let task = manager.snapshots().remove(0);
+
+        let line = task_summary_line(&task);
+
+        assert!(line.contains("#1 download running 512/1024 out.txt"));
+        assert!(!line.contains("/private/remote"));
+        Ok(())
+    }
+
+    #[test]
+    fn selected_path_for_refresh_uses_current_selection() {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![
+            file(1, 12),
+            FileEntry {
+                fs_id: 2,
+                path: "/docs/second.md".to_string(),
+                server_filename: "second.md".to_string(),
+                ..file(2, 34)
+            },
+        ]);
+        app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
+
+        assert_eq!(
+            selected_path_for_refresh(&app),
+            Some("/docs/second.md".to_string())
+        );
+    }
+
+    #[test]
+    fn dlink_range_fetch_tries_later_candidates_after_network_failure() {
+        let urls = vec![
+            "https://bad.invalid/file".to_string(),
+            "https://good.invalid/file".to_string(),
+        ];
+        let mut attempted = Vec::new();
+
+        let result = fetch_first_successful_dlink_range(&urls, |url| {
+            attempted.push(url.to_string());
+            if url.contains("bad") {
+                Err(baidupcsr_pcs::PcsError::Network {
+                    operation: "download".to_string(),
+                    message: "redacted".to_string(),
+                })
+            } else {
+                Ok(vec![1, 2, 3])
+            }
+        });
+
+        assert_eq!(result, DlinkRangeAttempt::Bytes(vec![1, 2, 3]));
+        assert_eq!(attempted, urls);
     }
 
     #[test]

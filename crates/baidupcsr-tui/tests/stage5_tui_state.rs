@@ -55,6 +55,14 @@ fn default_keymap_exposes_vim_navigation() {
         DEFAULT_KEYMAP.action_for(KeyEvent::Char('p')),
         KeyAction::Preview
     );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::Char('d')),
+        KeyAction::Download
+    );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::Char('x')),
+        KeyAction::CancelTask
+    );
 }
 
 #[test]
@@ -169,6 +177,24 @@ fn video_preview_status_updates_panel_without_disk_cache() {
     assert_eq!(app.preview_budget().memory_limit_bytes, 1024 * 1024);
     assert!(!app.preview_budget().disk_backed);
     assert_eq!(app.preview_lines()[0], "video=loopback");
+}
+
+#[test]
+fn task_lines_update_bottom_panel_state() {
+    let mut app = TuiApp::new("/remote");
+
+    app.set_task_lines(vec![
+        "#1 download running 512/1024".to_string(),
+        "#2 download failed network".to_string(),
+    ]);
+
+    assert_eq!(
+        app.task_lines(),
+        &[
+            "#1 download running 512/1024".to_string(),
+            "#2 download failed network".to_string(),
+        ]
+    );
 }
 
 #[test]

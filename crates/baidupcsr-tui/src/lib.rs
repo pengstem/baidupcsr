@@ -53,6 +53,8 @@ pub enum KeyAction {
     Command,
     Refresh,
     Preview,
+    Download,
+    CancelTask,
     Quit,
     None,
 }
@@ -96,6 +98,8 @@ impl KeyMap {
             KeyEvent::Char(':') => KeyAction::Command,
             KeyEvent::Char('r') => KeyAction::Refresh,
             KeyEvent::Char('p') => KeyAction::Preview,
+            KeyEvent::Char('d') => KeyAction::Download,
+            KeyEvent::Char('x') => KeyAction::CancelTask,
             KeyEvent::Char('q') => KeyAction::Quit,
             KeyEvent::Esc => KeyAction::None,
             KeyEvent::Char(_) => KeyAction::None,
@@ -116,6 +120,7 @@ pub struct TuiApp {
     preview_title: String,
     preview_lines: Vec<String>,
     preview_budget: PreviewBudget,
+    task_lines: Vec<String>,
 }
 
 impl TuiApp {
@@ -132,6 +137,7 @@ impl TuiApp {
             preview_title: String::new(),
             preview_lines: Vec::new(),
             preview_budget: default_preview_budget(),
+            task_lines: Vec::new(),
         }
     }
 
@@ -210,6 +216,10 @@ impl TuiApp {
         self.background_tasks = count;
     }
 
+    pub fn set_task_lines(&mut self, lines: Vec<String>) {
+        self.task_lines = lines;
+    }
+
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
     }
@@ -280,6 +290,8 @@ impl TuiApp {
             | KeyAction::Enter
             | KeyAction::Refresh
             | KeyAction::Preview
+            | KeyAction::Download
+            | KeyAction::CancelTask
             | KeyAction::Quit
             | KeyAction::None => {}
         }
@@ -322,6 +334,10 @@ impl TuiApp {
 
     pub fn preview_lines(&self) -> &[String] {
         &self.preview_lines
+    }
+
+    pub fn task_lines(&self) -> &[String] {
+        &self.task_lines
     }
 
     pub const fn preview_budget(&self) -> PreviewBudget {
@@ -685,6 +701,9 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
         app.cache_age_label(),
         app.background_tasks,
     ))];
+    for line in app.task_lines.iter().take(3) {
+        lines.push(Line::raw(line.to_string()));
+    }
     if let Some(notice) = app.notice() {
         lines.push(Line::raw(notice.to_string()));
     }
@@ -693,7 +712,7 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(Line::raw(format!(
-        "Status {}  keys j/k h/l / : r q",
+        "Status {}  keys j/k h/l / : r d/x p q",
         app.status_line()
     )))
     .style(Style::new().fg(Color::Black).bg(Color::Gray))

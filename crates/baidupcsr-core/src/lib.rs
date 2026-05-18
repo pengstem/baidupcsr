@@ -210,6 +210,278 @@ impl SessionState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TaskId(u64);
+
+impl TaskId {
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TransferPolicy {
+    Skip,
+    Overwrite,
+    Rsync,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskKind {
+    Download {
+        remote_path: String,
+        local_path: String,
+        size_bytes: u64,
+    },
+    Upload {
+        local_path: String,
+        remote_path: String,
+        policy: TransferPolicy,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskState {
+    Queued,
+    Running,
+    CancelRequested,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TransferProgress {
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub speed_bytes_per_sec: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskSnapshot {
+    pub id: TaskId,
+    pub kind: TaskKind,
+    pub state: TaskState,
+    pub progress: TransferProgress,
+    pub error: Option<String>,
+    pub retry_of: Option<TaskId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskError {
+    UnknownTask,
+    InvalidTransition,
+}
+
+#[derive(Clone, Debug)]
+pub struct TaskManager {
+    next_id: u64,
+    tasks: BTreeMap<TaskId, TaskRecord>,
+}
+
+impl Default for TaskManager {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            tasks: BTreeMap::new(),
+        }
+    }
+}
+
+impl TaskManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn enqueue_download(
+        &mut self,
+        remote_path: impl Into<String>,
+        local_path: impl Into<String>,
+        size_bytes: u64,
+    ) -> TaskId {
+        self.insert_task(
+            TaskKind::Download {
+                remote_path: remote_path.into(),
+                local_path: local_path.into(),
+                size_bytes,
+            },
+            Some(size_bytes),
+            None,
+        )
+    }
+
+    pub fn enqueue_upload(
+        &mut self,
+        local_path: impl Into<String>,
+        remote_path: impl Into<String>,
+        policy: TransferPolicy,
+    ) -> TaskId {
+        self.insert_task(
+            TaskKind::Upload {
+                local_path: local_path.into(),
+                remote_path: remote_path.into(),
+                policy,
+            },
+            None,
+            None,
+        )
+    }
+
+    pub fn start(&mut self, id: TaskId) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if task.state != TaskState::Queued {
+            return Err(TaskError::InvalidTransition);
+        }
+        task.state = TaskState::Running;
+        task.error = None;
+        Ok(())
+    }
+
+    pub fn update_progress(
+        &mut self,
+        id: TaskId,
+        bytes_done: u64,
+        elapsed_seconds: u64,
+    ) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if !matches!(task.state, TaskState::Running | TaskState::CancelRequested) {
+            return Err(TaskError::InvalidTransition);
+        }
+        task.progress.bytes_done = task
+            .progress
+            .bytes_total
+            .map_or(bytes_done, |total| bytes_done.min(total));
+        task.progress.speed_bytes_per_sec = task
+            .progress
+            .bytes_done
+            .checked_div(elapsed_seconds)
+            .unwrap_or(0);
+        Ok(())
+    }
+
+    pub fn request_cancel(&mut self, id: TaskId) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if !matches!(task.state, TaskState::Queued | TaskState::Running) {
+            return Err(TaskError::InvalidTransition);
+        }
+        task.state = TaskState::CancelRequested;
+        Ok(())
+    }
+
+    pub fn complete(&mut self, id: TaskId) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if !matches!(task.state, TaskState::Running | TaskState::CancelRequested) {
+            return Err(TaskError::InvalidTransition);
+        }
+        if let Some(total) = task.progress.bytes_total {
+            task.progress.bytes_done = total;
+        }
+        task.state = TaskState::Completed;
+        task.error = None;
+        Ok(())
+    }
+
+    pub fn fail(&mut self, id: TaskId, error: impl Into<String>) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if task.is_terminal() {
+            return Err(TaskError::InvalidTransition);
+        }
+        task.state = TaskState::Failed;
+        task.error = Some(error.into());
+        Ok(())
+    }
+
+    pub fn cancelled(&mut self, id: TaskId, reason: impl Into<String>) -> Result<(), TaskError> {
+        let task = self.task_mut(id)?;
+        if task.state != TaskState::CancelRequested {
+            return Err(TaskError::InvalidTransition);
+        }
+        task.state = TaskState::Cancelled;
+        task.error = Some(reason.into());
+        Ok(())
+    }
+
+    pub fn retry(&mut self, id: TaskId) -> Result<TaskId, TaskError> {
+        let task = self.task(id)?;
+        if !matches!(task.state, TaskState::Failed | TaskState::Cancelled) {
+            return Err(TaskError::InvalidTransition);
+        }
+        Ok(self.insert_task(task.kind.clone(), task.progress.bytes_total, Some(id)))
+    }
+
+    pub fn snapshots(&self) -> Vec<TaskSnapshot> {
+        self.tasks
+            .iter()
+            .map(|(id, task)| TaskSnapshot {
+                id: *id,
+                kind: task.kind.clone(),
+                state: task.state,
+                progress: task.progress,
+                error: task.error.clone(),
+                retry_of: task.retry_of,
+            })
+            .collect()
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.tasks
+            .values()
+            .filter(|task| !task.is_terminal())
+            .count()
+    }
+
+    fn insert_task(
+        &mut self,
+        kind: TaskKind,
+        bytes_total: Option<u64>,
+        retry_of: Option<TaskId>,
+    ) -> TaskId {
+        let id = TaskId(self.next_id);
+        self.next_id = self.next_id.saturating_add(1);
+        self.tasks.insert(
+            id,
+            TaskRecord {
+                kind,
+                state: TaskState::Queued,
+                progress: TransferProgress {
+                    bytes_done: 0,
+                    bytes_total,
+                    speed_bytes_per_sec: 0,
+                },
+                error: None,
+                retry_of,
+            },
+        );
+        id
+    }
+
+    fn task(&self, id: TaskId) -> Result<&TaskRecord, TaskError> {
+        self.tasks.get(&id).ok_or(TaskError::UnknownTask)
+    }
+
+    fn task_mut(&mut self, id: TaskId) -> Result<&mut TaskRecord, TaskError> {
+        self.tasks.get_mut(&id).ok_or(TaskError::UnknownTask)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct TaskRecord {
+    kind: TaskKind,
+    state: TaskState,
+    progress: TransferProgress,
+    error: Option<String>,
+    retry_of: Option<TaskId>,
+}
+
+impl TaskRecord {
+    const fn is_terminal(&self) -> bool {
+        matches!(
+            self.state,
+            TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+        )
+    }
+}
+
 fn diff_entries(old_entries: &[FileEntry], new_entries: &[FileEntry]) -> Vec<DirectoryChange> {
     let old_by_id = entries_by_id(old_entries);
     let new_by_id = entries_by_id(new_entries);
