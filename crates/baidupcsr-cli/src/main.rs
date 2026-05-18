@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{
@@ -108,6 +108,7 @@ struct ActiveVideoPreview {
     title: String,
     server: baidupcsr_preview::VideoLoopbackServer,
     player: Child,
+    player_log: Arc<Mutex<baidupcsr_preview::PlayerLogRing>>,
 }
 
 enum TransferTaskEvent {
@@ -1274,9 +1275,9 @@ impl BrowserRuntime {
             .args(launch.args())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn();
-        let child = match child {
+        let mut child = match child {
             Ok(child) => child,
             Err(err) => {
                 app.finish_preview_error(
@@ -1286,11 +1287,25 @@ impl BrowserRuntime {
                 return;
             }
         };
+        let player_log = Arc::new(Mutex::new(baidupcsr_preview::PlayerLogRing::new(6)));
+        if let Some(stderr) = child.stderr.take() {
+            let player_log = Arc::clone(&player_log);
+            thread::spawn(move || {
+                let reader = BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    let Ok(mut guard) = player_log.lock() else {
+                        break;
+                    };
+                    guard.push(line.as_str());
+                }
+            });
+        }
         self.active_video = Some(ActiveVideoPreview {
             key,
             title,
             server,
             player: child,
+            player_log,
         });
         self.refresh_active_video_preview(app);
     }
@@ -1303,17 +1318,28 @@ impl BrowserRuntime {
         let Some(active) = self.active_video.as_mut() else {
             return;
         };
-        let exited = match active.player.try_wait() {
+        let player_status = match active.player.try_wait() {
             Ok(Some(status)) => Some(format!("player_exit={status}")),
             Ok(None) => None,
             Err(err) => Some(format!("player_poll_error={err}")),
         };
+        let playback_state = if player_status.is_some() {
+            baidupcsr_preview::PlaybackState::Failed
+        } else {
+            baidupcsr_preview::PlaybackState::Playing
+        };
         let stats = active.server.stats();
         let memory_limit = video_memory_limit_from_config(&self.video_config);
         let player_line =
-            exited.unwrap_or_else(|| format!("player=mpv pid={}", active.player.id()));
+            player_status.unwrap_or_else(|| format!("player=mpv pid={}", active.player.id()));
         let lines = vec![
             "video=loopback seek=true".to_string(),
+            format!("playback={}", playback_state_label(playback_state)),
+            format!(
+                "mpv_profile={}",
+                mpv_profile_label(self.video_config.player_profile)
+            ),
+            active_player_log_line(&active.player_log),
             format!("listen=127.0.0.1:{}", active.server.endpoint().port()),
             player_line,
             format!(
@@ -1324,10 +1350,6 @@ impl BrowserRuntime {
             format!(
                 "cache={}/{} hits={} upstream={}",
                 stats.used_bytes, memory_limit, stats.cache_hits, stats.upstream_fetches
-            ),
-            format!(
-                "mpv_profile={}",
-                mpv_profile_label(self.video_config.player_profile)
             ),
             format!(
                 "disk=false error={}",
@@ -1699,6 +1721,28 @@ fn mpv_profile_label(profile: baidupcsr_config::VideoPlayerProfile) -> &'static 
     match profile {
         baidupcsr_config::VideoPlayerProfile::User => "user",
         baidupcsr_config::VideoPlayerProfile::Isolated => "isolated",
+    }
+}
+
+fn playback_state_label(state: baidupcsr_preview::PlaybackState) -> &'static str {
+    match state {
+        baidupcsr_preview::PlaybackState::Preparing => "preparing",
+        baidupcsr_preview::PlaybackState::Buffering => "buffering",
+        baidupcsr_preview::PlaybackState::Playing => "playing",
+        baidupcsr_preview::PlaybackState::Stalled => "stalled",
+        baidupcsr_preview::PlaybackState::Failed => "failed",
+        baidupcsr_preview::PlaybackState::Stopped => "stopped",
+    }
+}
+
+fn active_player_log_line(log: &Arc<Mutex<baidupcsr_preview::PlayerLogRing>>) -> String {
+    match log
+        .lock()
+        .ok()
+        .and_then(|guard| guard.last_line().map(str::to_string))
+    {
+        Some(line) if !line.is_empty() => format!("player_log={line}"),
+        _ => "player_log=none".to_string(),
     }
 }
 
@@ -2339,11 +2383,12 @@ fn presence(value: bool) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     use baidupcsr_pcs::FileEntry;
 
     use super::{
-        bduss_from_user, build_pcs_client, download_target_path,
+        active_player_log_line, bduss_from_user, build_pcs_client, download_target_path,
         fetch_first_successful_dlink_range, is_video_entry, list_remote_directory,
         pan_user_agent_for_config, parse_remote_command, partial_download_path,
         preview_key_for_entry, selected_path_for_refresh, task_summary_line, tui_preview_kind,
@@ -2404,6 +2449,22 @@ mod tests {
                 Err("command parsed as operation, expected search".to_string())
             }
         }
+    }
+
+    #[test]
+    fn active_player_log_line_uses_last_sanitized_player_line() -> Result<(), String> {
+        let log = Arc::new(Mutex::new(baidupcsr_preview::PlayerLogRing::new(2)));
+        {
+            let mut guard = log.lock().map_err(|_| "log lock poisoned".to_string())?;
+            guard.push("A: 00:00:01 / 00:20:00");
+            guard.push("Error: https://d.pcs.baidu.com/file/private?token=SECRET");
+        }
+
+        let line = active_player_log_line(&log);
+
+        assert_eq!(line, "player_log=Error: <redacted-url>");
+        assert!(!line.contains("SECRET"));
+        Ok(())
     }
 
     #[test]

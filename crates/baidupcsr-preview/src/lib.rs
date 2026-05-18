@@ -690,6 +690,111 @@ pub struct VideoProxyStats {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlaybackState {
+    Preparing,
+    Buffering,
+    Playing,
+    Stalled,
+    Failed,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlaybackProgress {
+    state: PlaybackState,
+    last_activity_ms: u64,
+}
+
+impl PlaybackProgress {
+    pub const fn new(state: PlaybackState) -> Self {
+        Self {
+            state,
+            last_activity_ms: 0,
+        }
+    }
+
+    pub const fn with_last_activity_ms(mut self, last_activity_ms: u64) -> Self {
+        self.last_activity_ms = last_activity_ms;
+        self
+    }
+
+    pub const fn status_at(&self, now_ms: u64, stall_timeout_ms: u64) -> PlaybackState {
+        if matches!(self.state, PlaybackState::Playing)
+            && now_ms.saturating_sub(self.last_activity_ms) >= stall_timeout_ms
+        {
+            PlaybackState::Stalled
+        } else {
+            self.state
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerLogRing {
+    limit: usize,
+    lines: VecDeque<String>,
+}
+
+impl PlayerLogRing {
+    pub const fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            lines: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, line: &str) {
+        if self.limit == 0 {
+            return;
+        }
+        while self.lines.len() >= self.limit {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(sanitize_player_log_line(line));
+    }
+
+    pub fn lines(&self) -> Vec<&str> {
+        self.lines.iter().map(String::as_str).collect()
+    }
+
+    pub fn last_line(&self) -> Option<&str> {
+        self.lines.back().map(String::as_str)
+    }
+}
+
+fn sanitize_player_log_line(line: &str) -> String {
+    line.split_whitespace()
+        .map(sanitize_player_log_part)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitize_player_log_part(part: &str) -> String {
+    if part.starts_with("http://") || part.starts_with("https://") {
+        return "<redacted-url>".to_string();
+    }
+    let Some((key, _value)) = part.split_once('=') else {
+        return part.to_string();
+    };
+    let normalized = key
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .to_ascii_lowercase();
+    if is_sensitive_log_key(normalized.as_str()) {
+        format!("{key}=<redacted>")
+    } else {
+        part.to_string()
+    }
+}
+
+fn is_sensitive_log_key(key: &str) -> bool {
+    key.contains("token")
+        || matches!(
+            key,
+            "bduss" | "cookie" | "cookies" | "authorization" | "auth" | "sign" | "secret"
+        )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlayerBackend {
     Mpv,
 }

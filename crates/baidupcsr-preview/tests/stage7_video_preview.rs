@@ -1,7 +1,8 @@
 use baidupcsr_preview::{
-    LoopbackEndpoint, MpvLaunchProfile, PlayerBackend, PreviewKey, VideoCacheBudget,
-    VideoChunkCache, VideoLoopbackServer, VideoPreviewError, VideoPreviewSession, VideoProxyMethod,
-    VideoProxyRequest, VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+    LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState, PlayerBackend,
+    PlayerLogRing, PreviewKey, VideoCacheBudget, VideoChunkCache, VideoLoopbackServer,
+    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
+    VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -27,6 +28,40 @@ fn session() -> Result<VideoPreviewSession, VideoPreviewError> {
         LoopbackEndpoint::new(39_177)?,
         VideoCacheBudget::new(256, 2)?,
     )
+}
+
+#[test]
+fn player_log_ring_keeps_recent_sanitized_lines() {
+    let mut log = PlayerLogRing::new(2);
+    log.push("Opening http://127.0.0.1:1234/preview/video/tok_secret");
+    log.push("A: 00:00:01 / 00:20:00");
+    log.push("Error: https://d.pcs.baidu.com/file/private?token=SECRET");
+
+    assert_eq!(log.lines().len(), 2);
+    assert!(log.lines()[0].contains("A: 00:00:01"));
+    assert!(log.lines()[1].contains("<redacted-url>"));
+    assert!(!log.lines()[1].contains("SECRET"));
+}
+
+#[test]
+fn player_log_ring_redacts_token_like_fields() {
+    let mut log = PlayerLogRing::new(2);
+    log.push("headers BDUSS=SECRET_BDUSS token=SECRET_TOKEN cookie=SECRET_COOKIE");
+
+    let line = log.last_line().unwrap_or_default();
+    assert!(line.contains("BDUSS=<redacted>"));
+    assert!(line.contains("token=<redacted>"));
+    assert!(line.contains("cookie=<redacted>"));
+    assert!(!line.contains("SECRET"));
+}
+
+#[test]
+fn playback_status_marks_stalled_after_no_progress_timeout() {
+    let status = PlaybackProgress::new(PlaybackState::Playing)
+        .with_last_activity_ms(1_000)
+        .status_at(7_000, 5_000);
+
+    assert_eq!(status, PlaybackState::Stalled);
 }
 
 #[test]

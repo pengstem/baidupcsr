@@ -190,6 +190,35 @@ fn ratatui_render_draws_text_preview_content() {
 }
 
 #[test]
+fn ratatui_render_keeps_video_playback_diagnostics_visible() {
+    let mut app = TuiApp::new("/videos");
+    app.set_entries(vec![file(1, "/videos/movie.mp4", 2048, false)]);
+    app.finish_preview_video(
+        "movie.mp4",
+        vec![
+            "video=loopback seek=true".to_string(),
+            "playback=playing".to_string(),
+            "mpv_profile=user".to_string(),
+            "player_log=none".to_string(),
+            "listen=127.0.0.1:42843".to_string(),
+        ],
+        PreviewBudget {
+            kind: PreviewKind::Video,
+            fetched_bytes: 1024,
+            memory_limit_bytes: 64 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let screen = buffer_to_text(&draw_buffer(&app, None, 80, 24));
+
+    assert!(screen.contains("playback=playing"));
+    assert!(screen.contains("mpv_profile=user"));
+    assert!(screen.contains("player_log=none"));
+}
+
+#[test]
 fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
     let mut app = TuiApp::new("/docs/course/chapter/session");
     app.set_entries(vec![file(
