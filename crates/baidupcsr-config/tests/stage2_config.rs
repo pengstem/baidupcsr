@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use baidupcsr_config::{
-    active_user, discover_config_file, load_config, AuthPresence, ConfigDiscoveryInput,
-    ConfigError, TargetOs, UiConfig, VideoPlayerProfile,
+    active_user, discover_config_file, load_config, save_active_user_workdir, AuthPresence,
+    ConfigDiscoveryInput, ConfigError, TargetOs, UiConfig, VideoPlayerProfile,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -100,6 +100,38 @@ fn load_config_extracts_auth_presence_from_cookie_string() {
 }
 
 #[test]
+fn save_active_user_workdir_updates_default_directory() -> Result<(), ConfigError> {
+    let dir = std::env::temp_dir().join(format!(
+        "baidupcsr-pcs-config-workdir-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|source| ConfigError::Write {
+        path: dir.clone(),
+        source,
+    })?;
+    let path = dir.join("pcs_config.json");
+    std::fs::copy(fixture_path("pcs_config_minimal.json"), &path).map_err(|source| {
+        ConfigError::Write {
+            path: path.clone(),
+            source,
+        }
+    })?;
+
+    save_active_user_workdir(&path, "/电影/科幻电影")?;
+    let config = load_config(&path)?;
+    let user = active_user(&config).ok_or_else(|| ConfigError::InvalidConfig {
+        path: path.clone(),
+        message: "active user missing after save".to_string(),
+    })?;
+
+    assert_eq!(user.workdir, "/电影/科幻电影");
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir(dir);
+    Ok(())
+}
+
+#[test]
 fn load_config_rejects_invalid_json_shape() {
     let err = load_config(&fixture_path("pcs_config_invalid.json"));
     assert!(matches!(err, Err(ConfigError::Parse { .. })));
@@ -110,7 +142,7 @@ fn ui_config_default_uses_user_mpv_profile_with_larger_video_budget() {
     let config = UiConfig::default();
 
     assert!(config.video_preview.enabled);
-    assert_eq!(config.video_preview.chunk_size_bytes, 4 * 1024 * 1024);
+    assert_eq!(config.video_preview.chunk_size_bytes, 8 * 1024 * 1024);
     assert_eq!(config.video_preview.max_chunks, 16);
     assert_eq!(
         config.video_preview.player_profile,

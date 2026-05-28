@@ -589,6 +589,7 @@ impl VideoRange {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestedVideoRange {
     Explicit(VideoRange),
+    OpenEnded(u64),
     Suffix(u64),
 }
 
@@ -603,6 +604,18 @@ impl RequestedVideoRange {
     fn resolve(self, file_size: u64, max_len: u64) -> Result<VideoRange, VideoPreviewError> {
         match self {
             Self::Explicit(range) => range.clamp_to_file(file_size)?.clamp_len(max_len),
+            Self::OpenEnded(start) => {
+                if file_size == 0 || start >= file_size || max_len == 0 {
+                    return Err(VideoPreviewError::InvalidRange);
+                }
+                VideoRange::new(
+                    start,
+                    start
+                        .saturating_add(max_len)
+                        .saturating_sub(1)
+                        .min(file_size.saturating_sub(1)),
+                )
+            }
             Self::Suffix(bytes) => {
                 if file_size == 0 || max_len == 0 || bytes == 0 {
                     return Err(VideoPreviewError::InvalidRange);
@@ -1448,7 +1461,7 @@ pub fn parse_video_range_header(
         return Some(Err(VideoPreviewError::InvalidRange));
     };
     let end = if end.is_empty() {
-        u64::MAX
+        return Some(Ok(RequestedVideoRange::OpenEnded(start)));
     } else {
         match end.parse::<u64>() {
             Ok(end) => end,
@@ -1572,6 +1585,7 @@ fn spawn_prefetch_after(
             range,
             window_before,
             state_guard.session.budget.chunk_size_bytes,
+            state_guard.session.budget.memory_limit_bytes(),
         ) {
             return;
         }
@@ -1596,9 +1610,13 @@ fn should_prefetch_after(
     range: VideoRange,
     window_before: Option<VideoRange>,
     chunk_size_bytes: u64,
+    memory_limit_bytes: u64,
 ) -> bool {
+    if range.len() >= memory_limit_bytes {
+        return false;
+    }
     match window_before {
-        None => range.start == 0,
+        None => range.start == 0 || range.len() == chunk_size_bytes,
         Some(window) => {
             range.start
                 <= window

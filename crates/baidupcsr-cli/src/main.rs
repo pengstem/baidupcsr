@@ -48,6 +48,7 @@ struct BrowserRuntime {
     client: Option<baidupcsr_pcs::BlockingPcsClient>,
     account_uid: u64,
     account_bduss: Option<String>,
+    config_path: PathBuf,
     cache: baidupcsr_core::DirectoryCache,
     cache_store: baidupcsr_core::DirectoryCacheStore,
     loaded_at: HashMap<String, SystemTime>,
@@ -71,6 +72,7 @@ struct BrowserRuntime {
     task_rx: mpsc::Receiver<TransferTaskEvent>,
     inflight: usize,
     initial_path: String,
+    current_path: String,
     startup_notice: Option<String>,
 }
 
@@ -163,6 +165,15 @@ impl Drop for ActiveVideoPreview {
     }
 }
 
+impl Drop for BrowserRuntime {
+    fn drop(&mut self) {
+        self.stop_active_video();
+        if let Err(err) = self.persist_current_workdir() {
+            eprintln!("workdir_persist_error: {err}");
+        }
+    }
+}
+
 impl BrowserRuntime {
     fn from_config() -> Self {
         let (tx, rx) = mpsc::channel();
@@ -183,6 +194,7 @@ impl BrowserRuntime {
                     client: None,
                     account_uid: 0,
                     account_bduss: None,
+                    config_path: config_path.clone(),
                     cache: baidupcsr_core::DirectoryCache::new(),
                     cache_store: cache_store.clone(),
                     loaded_at: HashMap::new(),
@@ -208,6 +220,7 @@ impl BrowserRuntime {
                     task_rx,
                     inflight: 0,
                     initial_path: "/".to_string(),
+                    current_path: "/".to_string(),
                     startup_notice: Some(format!("config_error: {err}")),
                 };
             }
@@ -218,6 +231,7 @@ impl BrowserRuntime {
                 client: None,
                 account_uid: 0,
                 account_bduss: None,
+                config_path: config_path.clone(),
                 cache: baidupcsr_core::DirectoryCache::new(),
                 cache_store: cache_store.clone(),
                 loaded_at: HashMap::new(),
@@ -241,6 +255,7 @@ impl BrowserRuntime {
                 task_rx,
                 inflight: 0,
                 initial_path: "/".to_string(),
+                current_path: "/".to_string(),
                 startup_notice: Some("active_user: missing".to_string()),
             };
         };
@@ -261,6 +276,7 @@ impl BrowserRuntime {
                 client: Some(client),
                 account_uid: user.uid,
                 account_bduss,
+                config_path: config_path.clone(),
                 cache: baidupcsr_core::DirectoryCache::new(),
                 cache_store: cache_store.clone(),
                 loaded_at: HashMap::new(),
@@ -283,6 +299,7 @@ impl BrowserRuntime {
                 task_tx,
                 task_rx,
                 inflight: 0,
+                current_path: initial_path.clone(),
                 initial_path,
                 startup_notice: None,
             },
@@ -290,6 +307,7 @@ impl BrowserRuntime {
                 client: None,
                 account_uid: user.uid,
                 account_bduss,
+                config_path: config_path.clone(),
                 cache: baidupcsr_core::DirectoryCache::new(),
                 cache_store,
                 loaded_at: HashMap::new(),
@@ -312,6 +330,7 @@ impl BrowserRuntime {
                 task_tx,
                 task_rx,
                 inflight: 0,
+                current_path: initial_path.clone(),
                 initial_path,
                 startup_notice: Some(message),
             },
@@ -326,6 +345,14 @@ impl BrowserRuntime {
             self.start_directory_load(&mut app, self.initial_path.clone(), None);
         }
         app
+    }
+
+    fn persist_current_workdir(&self) -> Result<(), baidupcsr_config::ConfigError> {
+        persist_workdir_if_active(
+            self.account_uid,
+            &self.config_path,
+            self.current_path.as_str(),
+        )
     }
 
     fn handle_event(
@@ -516,6 +543,7 @@ impl BrowserRuntime {
         preferred_selection_path: Option<String>,
     ) {
         self.stop_active_video();
+        self.current_path = path.clone();
         self.hydrate_directory_cache_from_disk(path.as_str());
         let view = self.cache.enter_directory(path.as_str());
         let cache_age = self.cache_age_seconds(path.as_str());
@@ -1190,7 +1218,7 @@ impl BrowserRuntime {
         let title = entry.server_filename.clone();
         let account_uid = self.account_uid;
         let cancellation_epoch = Arc::clone(&self.video_epoch);
-        let dlink_cache = Arc::new(Mutex::new(None::<String>));
+        let dlink_cache = Arc::new(Mutex::new(None::<Vec<String>>));
         let server = baidupcsr_preview::VideoLoopbackServer::spawn_with_policy(
             key,
             match baidupcsr_preview::VideoUpstream::new(VIDEO_UPSTREAM_REDACTED_URL) {
@@ -1212,12 +1240,12 @@ impl BrowserRuntime {
                 }
                 let byte_range = baidupcsr_pcs::ByteRange::new(range.start, range.end_inclusive)
                     .map_err(|_| baidupcsr_preview::VideoPreviewError::InvalidRange)?;
-                let dlink = {
+                let urls = {
                     let mut cached = dlink_cache
                         .lock()
                         .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
-                    if let Some(dlink) = cached.as_ref() {
-                        dlink.clone()
+                    if let Some(urls) = cached.as_ref() {
+                        urls.clone()
                     } else {
                         let urls = client
                             .locate_download_urls(
@@ -1226,19 +1254,58 @@ impl BrowserRuntime {
                                 account_bduss.as_str(),
                             )
                             .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
-                        let dlink = urls
-                            .into_iter()
-                            .next()
-                            .ok_or(baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
-                        *cached = Some(dlink.clone());
-                        dlink
+                        if urls.is_empty() {
+                            return Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo);
+                        }
+                        *cached = Some(urls.clone());
+                        urls
                     }
                 };
-                client
-                    .download_url_range_with_cancel(dlink.as_str(), byte_range, || {
-                        cancellation_epoch.load(Ordering::Acquire) != token_epoch
-                    })
-                    .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)
+                match fetch_video_dlink_range(
+                    &client,
+                    &urls,
+                    byte_range,
+                    cancellation_epoch.as_ref(),
+                    token_epoch,
+                ) {
+                    DlinkRangeAttempt::Bytes(bytes) => Ok(bytes),
+                    DlinkRangeAttempt::Cancelled => {
+                        Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession)
+                    }
+                    DlinkRangeAttempt::Failed(_) => {
+                        let refreshed_urls = client
+                            .locate_download_urls(
+                                path.as_str(),
+                                account_uid,
+                                account_bduss.as_str(),
+                            )
+                            .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
+                        if refreshed_urls.is_empty() {
+                            return Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo);
+                        }
+                        {
+                            let mut cached = dlink_cache.lock().map_err(|_| {
+                                baidupcsr_preview::VideoPreviewError::LoopbackServerIo
+                            })?;
+                            *cached = Some(refreshed_urls.clone());
+                        }
+                        match fetch_video_dlink_range(
+                            &client,
+                            &refreshed_urls,
+                            byte_range,
+                            cancellation_epoch.as_ref(),
+                            token_epoch,
+                        ) {
+                            DlinkRangeAttempt::Bytes(bytes) => Ok(bytes),
+                            DlinkRangeAttempt::Cancelled => {
+                                Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession)
+                            }
+                            DlinkRangeAttempt::Failed(_) => {
+                                Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo)
+                            }
+                        }
+                    }
+                }
             },
         );
         let server = match server {
@@ -1693,6 +1760,20 @@ where
         }
     }
     DlinkRangeAttempt::Failed(last_error)
+}
+
+fn fetch_video_dlink_range(
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    urls: &[String],
+    byte_range: baidupcsr_pcs::ByteRange,
+    cancellation_epoch: &AtomicU64,
+    token_epoch: u64,
+) -> DlinkRangeAttempt {
+    fetch_first_successful_dlink_range(urls, |dlink| {
+        client.download_url_range_with_cancel(dlink, byte_range, || {
+            cancellation_epoch.load(Ordering::Acquire) != token_epoch
+        })
+    })
 }
 
 fn is_video_entry(entry: &baidupcsr_pcs::FileEntry) -> bool {
@@ -2230,6 +2311,17 @@ fn download_dir_for_config(config: &baidupcsr_config::PcsConfig) -> PathBuf {
     }
 }
 
+fn persist_workdir_if_active(
+    account_uid: u64,
+    config_path: &Path,
+    current_path: &str,
+) -> Result<(), baidupcsr_config::ConfigError> {
+    if account_uid == 0 || current_path.is_empty() {
+        return Ok(());
+    }
+    baidupcsr_config::save_active_user_workdir(config_path, current_path)
+}
+
 fn bduss_from_user(user: &baidupcsr_config::BaiduUser) -> Option<String> {
     if !user.bduss.is_empty() {
         return Some(user.bduss.clone());
@@ -2402,8 +2494,9 @@ mod tests {
         active_player_log_line, bduss_from_user, build_pcs_client, download_target_path,
         fetch_first_successful_dlink_range, is_video_entry, list_remote_directory,
         pan_user_agent_for_config, parse_remote_command, partial_download_path,
-        preview_key_for_entry, selected_path_for_refresh, task_summary_line, tui_preview_kind,
-        video_budget_from_config, DlinkRangeAttempt, ParsedRemoteCommand,
+        persist_workdir_if_active, preview_key_for_entry, selected_path_for_refresh,
+        task_summary_line, tui_preview_kind, video_budget_from_config, DlinkRangeAttempt,
+        ParsedRemoteCommand,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -2411,6 +2504,12 @@ mod tests {
             .join("../../tests/fixtures/config")
             .join(name);
         baidupcsr_config::load_config(&path).map_err(|err| err.to_string())
+    }
+
+    fn config_fixture_path(name: &str) -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/config")
+            .join(name)
     }
 
     fn file(fs_id: i64, size: i64) -> FileEntry {
@@ -2436,6 +2535,28 @@ mod tests {
             baidupcsr_pcs::PcsError::Network { .. } => "network".to_string(),
             baidupcsr_pcs::PcsError::Remote { code, .. } => format!("remote_code={code}"),
         }
+    }
+
+    #[test]
+    fn persist_workdir_if_active_saves_browser_path_to_config() -> Result<(), String> {
+        let dir =
+            std::env::temp_dir().join(format!("baidupcsr-cli-workdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let path = dir.join("pcs_config.json");
+        std::fs::copy(config_fixture_path("pcs_config_minimal.json"), &path)
+            .map_err(|err| err.to_string())?;
+
+        persist_workdir_if_active(100000001, &path, "/电影/科幻电影")
+            .map_err(|err| err.to_string())?;
+        let config = baidupcsr_config::load_config(&path).map_err(|err| err.to_string())?;
+        let user = baidupcsr_config::active_user(&config)
+            .ok_or_else(|| "active user missing".to_string())?;
+
+        assert_eq!(user.workdir, "/电影/科幻电影");
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_dir(dir);
+        Ok(())
     }
 
     fn expect_operation(

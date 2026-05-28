@@ -44,7 +44,7 @@ Video preview sidecar keys:
 
 ```toml
 video_preview_enabled = true
-video_chunk_size_bytes = 4194304
+video_chunk_size_bytes = 8388608
 video_max_chunks = 16
 video_player_profile = "user"
 ```

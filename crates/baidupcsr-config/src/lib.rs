@@ -39,9 +39,17 @@ pub enum ConfigError {
         path: PathBuf,
         source: std::io::Error,
     },
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     Parse {
         path: PathBuf,
         source: serde_json::Error,
+    },
+    InvalidConfig {
+        path: PathBuf,
+        message: String,
     },
     InvalidUiConfig {
         path: PathBuf,
@@ -55,8 +63,14 @@ impl fmt::Display for ConfigError {
             Self::Read { path, source } => {
                 write!(f, "failed to read config {}: {source}", path.display())
             }
+            Self::Write { path, source } => {
+                write!(f, "failed to write config {}: {source}", path.display())
+            }
             Self::Parse { path, source } => {
                 write!(f, "failed to parse config {}: {source}", path.display())
+            }
+            Self::InvalidConfig { path, message } => {
+                write!(f, "invalid config {}: {message}", path.display())
             }
             Self::InvalidUiConfig { path, message } => {
                 write!(f, "invalid UI config {}: {message}", path.display())
@@ -69,7 +83,9 @@ impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Read { source, .. } => Some(source),
+            Self::Write { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
+            Self::InvalidConfig { .. } => None,
             Self::InvalidUiConfig { .. } => None,
         }
     }
@@ -155,7 +171,7 @@ impl Default for UiConfig {
         Self {
             video_preview: VideoPreviewConfig {
                 enabled: true,
-                chunk_size_bytes: 4 * 1024 * 1024,
+                chunk_size_bytes: 8 * 1024 * 1024,
                 max_chunks: 16,
                 player_profile: VideoPlayerProfile::User,
             },
@@ -233,6 +249,47 @@ pub fn load_config(path: &Path) -> Result<PcsConfig, ConfigError> {
         source,
     })?;
     serde_json::from_str(&data).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+pub fn save_active_user_workdir(path: &Path, workdir: &str) -> Result<(), ConfigError> {
+    let data = fs::read_to_string(path).map_err(|source| ConfigError::Read {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut config: Value = serde_json::from_str(&data).map_err(|source| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let active_uid = config
+        .get("baidu_active_uid")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| invalid_config(path, "missing baidu_active_uid"))?;
+    let users = config
+        .get_mut("baidu_user_list")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| invalid_config(path, "missing baidu_user_list"))?;
+    let active_user = users
+        .iter_mut()
+        .find(|user| user.get("uid").and_then(Value::as_u64) == Some(active_uid))
+        .ok_or_else(|| invalid_config(path, "active user not found"))?;
+    let active_user = active_user
+        .as_object_mut()
+        .ok_or_else(|| invalid_config(path, "active user is not an object"))?;
+    if active_user.get("workdir").and_then(Value::as_str) == Some(workdir) {
+        return Ok(());
+    }
+    active_user.insert("workdir".to_string(), Value::String(workdir.to_string()));
+
+    let mut serialized =
+        serde_json::to_string_pretty(&config).map_err(|source| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    serialized.push('\n');
+    fs::write(path, serialized).map_err(|source| ConfigError::Write {
         path: path.to_path_buf(),
         source,
     })
@@ -358,6 +415,13 @@ fn parse_video_player_profile(path: &Path, value: &str) -> Result<VideoPlayerPro
 
 fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {
     ConfigError::InvalidUiConfig {
+        path: path.to_path_buf(),
+        message: message.to_string(),
+    }
+}
+
+fn invalid_config(path: &Path, message: &str) -> ConfigError {
+    ConfigError::InvalidConfig {
         path: path.to_path_buf(),
         message: message.to_string(),
     }
