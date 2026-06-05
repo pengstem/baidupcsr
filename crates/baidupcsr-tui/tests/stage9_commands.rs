@@ -72,11 +72,28 @@ fn confirm_mode_requires_explicit_yes_or_no() {
 }
 
 #[test]
-fn search_mode_submits_current_directory_search() {
+fn slash_filter_does_not_submit_current_directory_search() {
     let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/notes.md"), file(2, "/docs/photo.jpg")]);
 
     assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
     for ch in "notes".chars() {
+        assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+    }
+
+    assert_eq!(app.handle_key_event(KeyEvent::Enter), None);
+    assert_eq!(
+        app.selected_entry().map(|entry| entry.path.as_str()),
+        Some("/docs/notes.md")
+    );
+}
+
+#[test]
+fn command_search_submits_remote_search() {
+    let mut app = TuiApp::new("/docs");
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char(':')), None);
+    for ch in "search notes".chars() {
         assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
     }
 

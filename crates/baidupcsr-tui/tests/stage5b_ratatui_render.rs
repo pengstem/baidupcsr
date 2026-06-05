@@ -317,6 +317,25 @@ fn ratatui_render_distinguishes_loading_empty_and_error_file_states() {
 }
 
 #[test]
+fn ratatui_render_shows_filter_input_in_bottom_modeline() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![
+        file(1, "/notes.md", 1024, false),
+        file(2, "/photo.jpg", 2048, false),
+    ]);
+    app.handle_key(baidupcsr_tui::KeyEvent::Char('/'));
+    app.handle_key(baidupcsr_tui::KeyEvent::Char('n'));
+
+    let screen = draw_to_text(&app, None);
+    let last_line = screen.lines().last().unwrap_or_default();
+
+    assert!(last_line.contains("/n|"));
+    assert!(screen.contains("Files 1/2 items"));
+    assert!(screen.contains("notes.md"));
+    assert!(!screen.contains("photo.jpg"));
+}
+
+#[test]
 fn ratatui_render_prioritizes_confirm_prompt_in_tasks_panel() {
     let mut app = TuiApp::new("/docs");
     app.set_task_lines(vec!["#7 remote done 0/? search".to_string()]);

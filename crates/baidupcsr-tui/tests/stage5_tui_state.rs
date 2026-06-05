@@ -136,11 +136,11 @@ fn mouse_wheel_moves_selection_like_keyboard_navigation() {
 }
 
 #[test]
-fn mode_keys_enter_search_command_and_return_to_normal() {
+fn mode_keys_enter_filter_command_and_return_to_normal() {
     let mut app = TuiApp::new("/");
 
     app.handle_key(KeyEvent::Char('/'));
-    assert_eq!(app.mode(), AppMode::Search);
+    assert_eq!(app.mode(), AppMode::Filter);
 
     app.handle_key(KeyEvent::Esc);
     assert_eq!(app.mode(), AppMode::Normal);
@@ -150,6 +150,41 @@ fn mode_keys_enter_search_command_and_return_to_normal() {
 
     app.handle_key(KeyEvent::Esc);
     assert_eq!(app.mode(), AppMode::Normal);
+}
+
+#[test]
+fn slash_filters_current_entries_without_submitting_remote_search() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![
+        file(1, "/notes.md"),
+        file(2, "/photo.jpg"),
+        file(3, "/todo.txt"),
+    ]);
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
+    for ch in "note".chars() {
+        assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+    }
+
+    assert_eq!(app.mode(), AppMode::Filter);
+    assert_eq!(app.filter_input(), "note");
+    assert_eq!(app.filtered_entry_count(), 1);
+    assert_eq!(
+        app.selected_entry().map(|entry| entry.path.as_str()),
+        Some("/notes.md")
+    );
+    assert_eq!(app.handle_key_event(KeyEvent::Enter), None);
+    assert_eq!(app.mode(), AppMode::Normal);
+    assert_eq!(app.filter_input(), "note");
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
+    for ch in "zzz".chars() {
+        assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+    }
+    assert_eq!(app.filtered_entry_count(), 0);
+    assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
+    assert_eq!(app.filter_input(), "");
+    assert_eq!(app.filtered_entry_count(), 3);
 }
 
 #[test]

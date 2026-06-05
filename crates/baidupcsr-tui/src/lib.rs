@@ -41,7 +41,7 @@ const THEME_ERROR: Color = Color::Rgb(248, 113, 113);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppMode {
     Normal,
-    Search,
+    Filter,
     Command,
     Confirm,
     TaskFocus,
@@ -51,7 +51,7 @@ impl AppMode {
     const fn label(self) -> &'static str {
         match self {
             Self::Normal => "NORMAL",
-            Self::Search => "SEARCH",
+            Self::Filter => "FILTER",
             Self::Command => "COMMAND",
             Self::Confirm => "CONFIRM",
             Self::TaskFocus => "TASKS",
@@ -198,6 +198,7 @@ pub struct TuiApp {
     task_lines: Vec<String>,
     preload_lines: Vec<String>,
     command_input: String,
+    filter_input: String,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
     help_visible: bool,
@@ -221,6 +222,7 @@ impl TuiApp {
             task_lines: Vec::new(),
             preload_lines: Vec::new(),
             command_input: String::new(),
+            filter_input: String::new(),
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
             help_visible: false,
@@ -249,7 +251,11 @@ impl TuiApp {
         cache_age_seconds: Option<u64>,
         preferred_selection_path: Option<&str>,
     ) {
-        self.path = normalize_path(path);
+        let path = normalize_path(path);
+        if path != self.path {
+            self.filter_input.clear();
+        }
+        self.path = path;
         self.cache_age_seconds = cache_age_seconds;
         self.background_tasks = 1;
         self.request_state = if cached_entries.is_empty() {
@@ -416,11 +422,12 @@ impl TuiApp {
                 }
 
                 let row_offset = usize::from(input.row.saturating_sub(files_inner.y));
+                let visible_indices = self.filtered_indices();
                 let range = self.visible_entry_range(usize::from(files_inner.height));
-                let index = range.start.saturating_add(row_offset);
-                if index >= self.entries.len() {
+                let visible_index = range.start.saturating_add(row_offset);
+                let Some(index) = visible_indices.get(visible_index).copied() else {
                     return None;
-                }
+                };
                 self.selected_index = Some(index);
                 if input.kind == MouseInputKind::DoubleClick
                     && self.selected_entry().is_some_and(|entry| entry.is_dir)
@@ -443,8 +450,8 @@ impl TuiApp {
 
         match self.mode {
             AppMode::Normal => self.handle_normal_key(event),
-            AppMode::Command => self.handle_command_key(event, None),
-            AppMode::Search => self.handle_command_key(event, Some("search")),
+            AppMode::Command => self.handle_command_key(event),
+            AppMode::Filter => self.handle_filter_key(event),
             AppMode::Confirm => self.handle_confirm_key(event),
             AppMode::TaskFocus => {
                 if event == KeyEvent::Esc {
@@ -510,6 +517,14 @@ impl TuiApp {
         &self.command_input
     }
 
+    pub fn filter_input(&self) -> &str {
+        &self.filter_input
+    }
+
+    pub fn filtered_entry_count(&self) -> usize {
+        self.filtered_indices().len()
+    }
+
     pub fn selected_paths(&self) -> &[String] {
         &self.selected_paths
     }
@@ -544,7 +559,9 @@ impl TuiApp {
     }
 
     pub fn visible_entry_range(&self, rows: usize) -> Range<usize> {
-        visible_range(self.entries.len(), self.selected_index.unwrap_or(0), rows)
+        let indices = self.filtered_indices();
+        let selected = self.selected_visible_position(&indices).unwrap_or(0);
+        visible_range(indices.len(), selected, rows)
     }
 
     pub fn parent_path(path: &str) -> Option<String> {
@@ -561,16 +578,22 @@ impl TuiApp {
     }
 
     fn move_down(&mut self) {
-        if let Some(index) = self.selected_index {
-            let last = self.entries.len().saturating_sub(1);
-            self.selected_index = Some(index.saturating_add(1).min(last));
-        }
+        let indices = self.filtered_indices();
+        let Some(position) = self.selected_visible_position(&indices) else {
+            return;
+        };
+        let next = position
+            .saturating_add(1)
+            .min(indices.len().saturating_sub(1));
+        self.selected_index = indices.get(next).copied();
     }
 
     fn move_up(&mut self) {
-        if let Some(index) = self.selected_index {
-            self.selected_index = Some(index.saturating_sub(1));
-        }
+        let indices = self.filtered_indices();
+        let Some(position) = self.selected_visible_position(&indices) else {
+            return;
+        };
+        self.selected_index = indices.get(position.saturating_sub(1)).copied();
     }
 
     fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
@@ -594,8 +617,9 @@ impl TuiApp {
                 return Some(TuiRuntimeEvent::Action(KeyAction::Up));
             }
             KeyAction::Search => {
-                self.mode = AppMode::Search;
-                self.command_input.clear();
+                self.mode = AppMode::Filter;
+                self.filter_input.clear();
+                self.sync_selection_to_filter();
             }
             KeyAction::Command => {
                 self.mode = AppMode::Command;
@@ -617,11 +641,7 @@ impl TuiApp {
         None
     }
 
-    fn handle_command_key(
-        &mut self,
-        event: KeyEvent,
-        submit_prefix: Option<&str>,
-    ) -> Option<TuiRuntimeEvent> {
+    fn handle_command_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
         match event {
             KeyEvent::Esc => {
                 self.mode = AppMode::Normal;
@@ -638,16 +658,38 @@ impl TuiApp {
                 self.mode = AppMode::Normal;
                 if input.is_empty() {
                     None
-                } else if let Some(prefix) = submit_prefix {
-                    Some(TuiRuntimeEvent::CommandSubmitted(format!(
-                        "{prefix} {input}"
-                    )))
                 } else {
                     Some(TuiRuntimeEvent::CommandSubmitted(input))
                 }
             }
             KeyEvent::Char(ch) => {
                 self.command_input.push(ch);
+                None
+            }
+            KeyEvent::Up | KeyEvent::Down | KeyEvent::Left | KeyEvent::Right => None,
+        }
+    }
+
+    fn handle_filter_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                self.filter_input.clear();
+                self.sync_selection_to_filter();
+                None
+            }
+            KeyEvent::Backspace => {
+                self.filter_input.pop();
+                self.sync_selection_to_filter();
+                None
+            }
+            KeyEvent::Enter => {
+                self.mode = AppMode::Normal;
+                None
+            }
+            KeyEvent::Char(ch) => {
+                self.filter_input.push(ch);
+                self.sync_selection_to_filter();
                 None
             }
             KeyEvent::Up | KeyEvent::Down | KeyEvent::Left | KeyEvent::Right => None,
@@ -701,17 +743,54 @@ impl TuiApp {
         self.selected_index = preferred_selection_path
             .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
             .or_else(|| (!self.entries.is_empty()).then_some(0));
+        self.sync_selection_to_filter();
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        let needle = self.filter_input.trim().to_lowercase();
+        if needle.is_empty() {
+            return (0..self.entries.len()).collect();
+        }
+        self.entries
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                entry
+                    .server_filename
+                    .to_lowercase()
+                    .contains(needle.as_str())
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn selected_visible_position(&self, indices: &[usize]) -> Option<usize> {
+        let selected = self.selected_index?;
+        indices.iter().position(|index| *index == selected)
+    }
+
+    fn sync_selection_to_filter(&mut self) {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            self.selected_index = None;
+            return;
+        }
+        if self
+            .selected_index
+            .is_some_and(|selected| indices.contains(&selected))
+        {
+            return;
+        }
+        self.selected_index = indices.first().copied();
     }
 
     fn position_label(&self) -> String {
-        if self.entries.is_empty() {
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
             return "0/0".to_string();
         }
-        let index = self
-            .selected_index
-            .unwrap_or(0)
-            .min(self.entries.len().saturating_sub(1));
-        format!("{}/{}", index.saturating_add(1), self.entries.len())
+        let position = self.selected_visible_position(&indices).unwrap_or(0);
+        format!("{}/{}", position.saturating_add(1), indices.len())
     }
 
     fn status_hint(&self) -> Option<String> {
@@ -724,6 +803,9 @@ impl TuiApp {
                     .map(|notice| format!("Error: {notice}"))
                     .unwrap_or_else(|| "Error".to_string()),
             ),
+            DirectoryRequestState::Idle if !self.filter_input.is_empty() => {
+                Some(format!("filter \"{}\"", self.filter_input))
+            }
             DirectoryRequestState::Idle if self.background_tasks > 0 => Some(format!(
                 "{} {}",
                 self.background_tasks,
@@ -985,13 +1067,6 @@ fn meta_value_style() -> Style {
     Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
 }
 
-fn input_style() -> Style {
-    Style::new()
-        .fg(THEME_ACCENT)
-        .bg(THEME_PANEL)
-        .add_modifier(Modifier::BOLD)
-}
-
 fn preload_style() -> Style {
     Style::new().fg(THEME_DIRECTORY).bg(THEME_PANEL)
 }
@@ -1064,7 +1139,7 @@ fn help_widget() -> Paragraph<'static> {
         help_section_line("Navigation"),
         content_line("  j/k or Up/Down     move selection"),
         content_line("  h/l or Left/Right  parent / enter directory"),
-        content_line("  /  search          :  command"),
+        content_line("  /  filter          :  command"),
         Line::raw("").style(surface_style()),
         help_section_line("Actions"),
         content_line("  space mark         r refresh"),
@@ -1105,6 +1180,7 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
 
 fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
     let rows = area.height.saturating_sub(2) as usize;
+    let visible_indices = app.filtered_indices();
     let range = app.visible_entry_range(rows);
     let inner_width = area.width.saturating_sub(2) as usize;
     let items: Vec<ListItem<'_>> = if range.is_empty() {
@@ -1112,12 +1188,12 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             Line::raw(files_empty_message(app)).style(meta_value_style()),
         )]
     } else {
-        app.entries()[range.clone()]
+        visible_indices[range.clone()]
             .iter()
             .enumerate()
-            .map(|(relative_index, entry)| {
-                let index = range.start + relative_index;
-                let selected = app.selected_index() == Some(index);
+            .map(|(_relative_index, index)| {
+                let entry = &app.entries()[*index];
+                let selected = app.selected_index() == Some(*index);
                 let marker = if selected {
                     ">"
                 } else if app.path_is_marked(entry.path.as_str()) {
@@ -1175,7 +1251,15 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             .collect()
     };
 
-    let title = format!("Files {} items", app.entries().len());
+    let title = if app.filter_input().is_empty() {
+        format!("Files {} items", app.entries().len())
+    } else {
+        format!(
+            "Files {}/{} items",
+            visible_indices.len(),
+            app.entries().len()
+        )
+    };
     List::new(items)
         .block(themed_block(title, true))
         .style(surface_style())
@@ -1295,14 +1379,6 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     if let Some(line) = task_status_line(app) {
         lines.push(line);
     }
-    if !app.command_input.is_empty() || matches!(app.mode, AppMode::Command | AppMode::Search) {
-        let prompt = if app.mode == AppMode::Search {
-            "/"
-        } else {
-            ":"
-        };
-        lines.push(Line::raw(format!("{prompt}{}", app.command_input)).style(input_style()));
-    }
     for line in app.preload_lines.iter().take(2) {
         lines.push(Line::raw(format!("preload {line}")).style(preload_style()));
     }
@@ -1321,6 +1397,13 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 }
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
+    if app.mode == AppMode::Command {
+        return input_status_widget(":", app.command_input());
+    }
+    if app.mode == AppMode::Filter {
+        return input_status_widget("/", app.filter_input());
+    }
+
     let mut spans = vec![
         Span::styled(
             app.mode.label(),
@@ -1358,6 +1441,15 @@ fn status_widget(app: &TuiApp) -> Paragraph<'_> {
         ));
     }
     Paragraph::new(Line::from(spans)).style(Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG))
+}
+
+fn input_status_widget(prompt: &str, input: &str) -> Paragraph<'static> {
+    Paragraph::new(Line::raw(format!("{prompt}{input}|"))).style(
+        Style::new()
+            .fg(THEME_ACCENT)
+            .bg(THEME_BG)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn request_state_color(state: DirectoryRequestState) -> Color {
@@ -1410,6 +1502,9 @@ fn cache_storage_label(disk_backed: bool) -> &'static str {
 }
 
 fn files_empty_message(app: &TuiApp) -> String {
+    if !app.filter_input().is_empty() {
+        return format!("No matches for \"{}\"", app.filter_input());
+    }
     match app.request_state {
         DirectoryRequestState::Loading => "Loading...".to_string(),
         DirectoryRequestState::Refreshing => "Refreshing cached entries...".to_string(),
