@@ -770,7 +770,7 @@ impl VideoIntervalBuffer {
 
     pub fn put(&mut self, range: VideoRange, bytes: Vec<u8>) -> Result<(), VideoPreviewError> {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if len != range.len() || len > self.budget.memory_limit_bytes() {
+        if len > range.len() || len > self.budget.memory_limit_bytes() {
             return Err(VideoPreviewError::VideoChunkTooLarge);
         }
 
@@ -1542,9 +1542,12 @@ fn video_get_response(
                 let mut state = state
                     .lock()
                     .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
-                state.cache.put(range, bytes.clone())?;
+                if let Err(cache_err) = state.cache.put(range, bytes.clone()) {
+                    state.stats.last_error = Some(cache_err);
+                } else {
+                    state.stats.last_error = None;
+                }
                 state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
-                state.stats.last_error = None;
                 state.session.key.size
             };
             spawn_prefetch_after(range, window_before, state);

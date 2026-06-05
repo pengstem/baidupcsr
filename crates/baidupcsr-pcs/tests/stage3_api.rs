@@ -150,7 +150,7 @@ fn preview_range_header_is_bounded_to_requested_bytes() {
     let range = baidupcsr_pcs::ByteRange::prefix(16);
 
     assert_eq!(range.header_value(), "bytes=0-15");
-    assert_eq!(range.read_limit_bytes(), 17);
+    assert_eq!(range.read_limit_bytes(), 16);
 }
 
 #[test]
@@ -158,7 +158,7 @@ fn preview_range_header_supports_seek_offsets() -> Result<(), PcsError> {
     let range = ByteRange::new(1024, 2047)?;
 
     assert_eq!(range.header_value(), "bytes=1024-2047");
-    assert_eq!(range.read_limit_bytes(), 1025);
+    assert_eq!(range.read_limit_bytes(), 1024);
     Ok(())
 }
 

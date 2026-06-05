@@ -310,7 +310,7 @@ impl ByteRange {
     pub fn read_limit_bytes(&self) -> u64 {
         self.end_inclusive
             .saturating_sub(self.start)
-            .saturating_add(2)
+            .saturating_add(1)
     }
 }
 
