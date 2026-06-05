@@ -1,6 +1,6 @@
 use baidupcsr_pcs::FileEntry;
 use baidupcsr_tui::{
-    render_app, CacheSource, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp,
+    render_app, CacheSource, KeyAction, KeyEvent, PanelFocus, PreviewBudget, PreviewKind, TuiApp,
     TuiRuntimeEvent,
 };
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
@@ -209,7 +209,7 @@ fn visual_hierarchy_uses_a_real_theme_not_default_black_and_white() {
         &buffer,
         "Cache:",
         Some(Color::Rgb(148, 163, 184)),
-        Some(Color::Rgb(15, 23, 42))
+        Some(Color::Rgb(24, 32, 52))
     ));
     assert!(text_has_style(
         &buffer,
@@ -222,6 +222,46 @@ fn visual_hierarchy_uses_a_real_theme_not_default_black_and_white() {
         "photos/",
         Some(Color::White),
         Some(Color::Blue)
+    ));
+}
+
+#[test]
+fn tab_focus_only_highlights_the_active_browser_pane() {
+    let mut app = TuiApp::new("/remote/current");
+    app.set_entries(vec![
+        file(1, "/remote/current/photos", 0, true),
+        file(2, "/remote/current/readme.md", 2048, false),
+    ]);
+
+    assert_eq!(app.focus(), PanelFocus::Files);
+    let files_focused = draw_buffer(&app, 108, 24);
+    assert!(text_has_style(
+        &files_focused,
+        "Files",
+        Some(Color::Rgb(94, 234, 212)),
+        Some(Color::Rgb(15, 23, 42))
+    ));
+    assert!(text_has_style(
+        &files_focused,
+        "Preview",
+        Some(Color::Rgb(125, 211, 252)),
+        Some(Color::Rgb(15, 23, 42))
+    ));
+
+    assert_eq!(app.handle_key_event(KeyEvent::Tab), None);
+    assert_eq!(app.focus(), PanelFocus::Preview);
+    let preview_focused = draw_buffer(&app, 108, 24);
+    assert!(text_has_style(
+        &preview_focused,
+        "Files",
+        Some(Color::Rgb(125, 211, 252)),
+        Some(Color::Rgb(15, 23, 42))
+    ));
+    assert!(text_has_style(
+        &preview_focused,
+        "Preview",
+        Some(Color::Rgb(94, 234, 212)),
+        Some(Color::Rgb(15, 23, 42))
     ));
 }
 

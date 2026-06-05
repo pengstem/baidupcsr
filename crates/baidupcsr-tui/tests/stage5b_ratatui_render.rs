@@ -245,6 +245,9 @@ fn help_overlay_is_hidden_until_question_mark() {
     let help = draw_to_text(&app, None);
     assert!(help.contains("Shortcuts"));
     assert!(help.contains("j/k"));
+    assert!(help.contains("gg/G"));
+    assert!(help.contains("Esc"));
+    assert!(help.contains("y/n"));
     assert!(help.contains("Mouse"));
 }
 
@@ -360,6 +363,34 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
     assert!(screen.contains("Files 1-1/1 of 2"));
     assert!(screen.contains("notes.md"));
     assert!(!screen.contains("photo.jpg"));
+}
+
+#[test]
+fn ratatui_render_marks_truncated_preview_and_task_lists() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/notes.md", 128, false)]);
+    app.finish_preview_text(
+        "notes.md",
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 128,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: true,
+            disk_backed: false,
+        },
+    );
+    app.set_preload_lines(vec![
+        "queued dirs=1 previews=1".to_string(),
+        "window=0..10".to_string(),
+        "extra=1".to_string(),
+    ]);
+
+    let tall = buffer_to_text(&draw_buffer(&app, None, 96, 30));
+    assert!(tall.contains("+3 more"));
+
+    let normal = draw_to_text(&app, None);
+    assert!(normal.contains("+2 more"));
 }
 
 #[test]

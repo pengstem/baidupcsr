@@ -27,7 +27,7 @@ pub const fn crate_name() -> &'static str {
 pub const DEFAULT_KEYMAP: KeyMap = KeyMap;
 
 const THEME_BG: Color = Color::Rgb(15, 23, 42);
-const THEME_PANEL: Color = Color::Rgb(15, 23, 42);
+const THEME_PANEL: Color = Color::Rgb(24, 32, 52);
 const THEME_BORDER: Color = Color::Rgb(51, 65, 85);
 const THEME_BORDER_ACTIVE: Color = Color::Rgb(34, 211, 238);
 const THEME_TEXT: Color = Color::Rgb(226, 232, 240);
@@ -54,6 +54,12 @@ pub enum AppMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PanelFocus {
+    Files,
+    Preview,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConfirmKind {
     Operation,
     Quit,
@@ -75,6 +81,7 @@ impl AppMode {
 pub enum KeyEvent {
     Char(char),
     Ctrl(char),
+    Tab,
     Enter,
     Backspace,
     Esc,
@@ -205,7 +212,7 @@ impl KeyMap {
             KeyEvent::Char(' ') => KeyAction::ToggleSelect,
             KeyEvent::Char('q') => KeyAction::Quit,
             KeyEvent::Esc => KeyAction::None,
-            KeyEvent::Enter | KeyEvent::Backspace => KeyAction::None,
+            KeyEvent::Enter | KeyEvent::Backspace | KeyEvent::Tab => KeyAction::None,
             KeyEvent::Ctrl(_) => KeyAction::None,
             KeyEvent::Char(_) => KeyAction::None,
         }
@@ -236,6 +243,7 @@ pub struct TuiApp {
     help_visible: bool,
     pending_g: bool,
     scroll_offset: usize,
+    focus: PanelFocus,
 }
 
 impl TuiApp {
@@ -263,6 +271,7 @@ impl TuiApp {
             help_visible: false,
             pending_g: false,
             scroll_offset: 0,
+            focus: PanelFocus::Files,
         }
     }
 
@@ -463,9 +472,7 @@ impl TuiApp {
                 let visible_indices = self.filtered_indices();
                 let range = self.visible_entry_range(usize::from(files_inner.height));
                 let visible_index = range.start.saturating_add(row_offset);
-                let Some(index) = visible_indices.get(visible_index).copied() else {
-                    return None;
-                };
+                let index = visible_indices.get(visible_index).copied()?;
                 self.selected_index = Some(index);
                 if input.kind == MouseInputKind::DoubleClick
                     && self.selected_entry().is_some_and(|entry| entry.is_dir)
@@ -510,6 +517,10 @@ impl TuiApp {
 
     pub const fn help_visible(&self) -> bool {
         self.help_visible
+    }
+
+    pub const fn focus(&self) -> PanelFocus {
+        self.focus
     }
 
     pub const fn request_state(&self) -> DirectoryRequestState {
@@ -691,6 +702,11 @@ impl TuiApp {
             return None;
         }
 
+        if event == KeyEvent::Tab {
+            self.toggle_focus();
+            return None;
+        }
+
         if self.pending_g {
             self.pending_g = false;
             if event == KeyEvent::Char('g') {
@@ -805,7 +821,8 @@ impl TuiApp {
             | KeyEvent::PageDown
             | KeyEvent::Home
             | KeyEvent::End
-            | KeyEvent::Ctrl(_) => None,
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
         }
     }
 
@@ -839,7 +856,8 @@ impl TuiApp {
             | KeyEvent::PageDown
             | KeyEvent::Home
             | KeyEvent::End
-            | KeyEvent::Ctrl(_) => None,
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
         }
     }
 
@@ -874,7 +892,8 @@ impl TuiApp {
             | KeyEvent::PageDown
             | KeyEvent::Home
             | KeyEvent::End
-            | KeyEvent::Ctrl(_) => None,
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
         }
     }
 
@@ -952,6 +971,13 @@ impl TuiApp {
             self.background_tasks,
             pluralize(self.background_tasks, "task", "tasks")
         )];
+    }
+
+    fn toggle_focus(&mut self) {
+        self.focus = match self.focus {
+            PanelFocus::Files => PanelFocus::Preview,
+            PanelFocus::Preview => PanelFocus::Files,
+        };
     }
 
     fn position_label(&self) -> String {
@@ -1108,7 +1134,7 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     frame.render_widget(tasks_widget(app), tasks);
     frame.render_widget(status_widget(app), status);
     if app.help_visible() {
-        let area = centered_rect(frame.area(), 58, 16);
+        let area = centered_rect(frame.area(), 58, 20);
         frame.render_widget(Clear, area);
         frame.render_widget(help_widget(), area);
     }
@@ -1201,6 +1227,7 @@ fn map_crossterm_key(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyEvent>
         KeyCode::Char(value) => Some(KeyEvent::Char(value)),
         KeyCode::Enter => Some(KeyEvent::Enter),
         KeyCode::Backspace => Some(KeyEvent::Backspace),
+        KeyCode::Tab => Some(KeyEvent::Tab),
         KeyCode::Esc => Some(KeyEvent::Esc),
         KeyCode::Up => Some(KeyEvent::Up),
         KeyCode::Down => Some(KeyEvent::Down),
@@ -1316,14 +1343,20 @@ fn help_section_line(value: &'static str) -> Line<'static> {
 fn help_widget() -> Paragraph<'static> {
     Paragraph::new(vec![
         help_section_line("Navigation"),
-        content_line("  j/k or Up/Down     move selection"),
-        content_line("  h/l or Left/Right  parent / enter directory"),
-        content_line("  /  filter          :  command"),
+        content_line("  j/k Up/Down        move selection"),
+        content_line("  gg/G Home/End      first / last"),
+        content_line("  PgUp/PgDn C-u/C-d  page / half-page"),
+        content_line("  h/l Left/Right     parent / enter"),
+        content_line("  Tab                switch pane focus"),
+        content_line("  Enter              submit input"),
         Line::raw("").style(surface_style()),
         help_section_line("Actions"),
+        content_line("  / filter           : command"),
+        content_line("  ? help             Esc close/cancel"),
         content_line("  space mark         r refresh"),
         content_line("  d download         x cancel task"),
         content_line("  p preview video    q quit"),
+        content_line("  y/n                confirm / cancel"),
         Line::raw("").style(surface_style()),
         help_section_line("Mouse"),
         content_line("  click selects      wheel scrolls"),
@@ -1353,7 +1386,7 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
                 .add_modifier(Modifier::BOLD),
         ),
     ]))
-    .block(themed_block("Session", true))
+    .block(themed_block("Session", false))
     .style(surface_style())
 }
 
@@ -1391,8 +1424,7 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
     } else {
         visible_indices[range.clone()]
             .iter()
-            .enumerate()
-            .map(|(_relative_index, index)| {
+            .map(|index| {
                 let entry = &app.entries()[*index];
                 let selected = app.selected_index() == Some(*index);
                 let marked = app.path_is_marked(entry.path.as_str());
@@ -1489,7 +1521,7 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
         )
     };
     List::new(items)
-        .block(themed_block(title, true))
+        .block(themed_block(title, app.focus() == PanelFocus::Files))
         .style(surface_style())
 }
 
@@ -1516,9 +1548,7 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
         });
     lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
-        for line in app.preview_lines.iter().take(10) {
-            lines.push(content_line(line.to_string()));
-        }
+        push_limited_lines(&mut lines, &app.preview_lines, 10, "", content_style());
         lines.push(Line::raw("").style(surface_style()));
         lines.push(detail_line(
             "Buffer:",
@@ -1540,19 +1570,15 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
             ),
         ));
         lines.push(Line::raw("").style(surface_style()));
-        for line in app.preview_lines.iter().take(10) {
-            lines.push(content_line(line.to_string()));
-        }
+        push_limited_lines(&mut lines, &app.preview_lines, 10, "", content_style());
     } else {
         lines.push(detail_line("Preview:", budget.kind.label().to_string()));
         lines.push(Line::raw("").style(surface_style()));
-        for line in app.preview_lines.iter().take(8) {
-            lines.push(content_line(line.to_string()));
-        }
+        push_limited_lines(&mut lines, &app.preview_lines, 8, "", content_style());
     }
 
     Paragraph::new(lines)
-        .block(themed_block("Preview", true))
+        .block(themed_block("Preview", app.focus() == PanelFocus::Preview))
         .style(surface_style())
         .wrap(Wrap { trim: true })
 }
@@ -1587,17 +1613,42 @@ fn default_preview_budget() -> PreviewBudget {
     }
 }
 
+fn push_limited_lines(
+    output: &mut Vec<Line<'static>>,
+    source: &[String],
+    limit: usize,
+    prefix: &str,
+    style: Style,
+) {
+    if limit == 0 {
+        return;
+    }
+    let shown = if source.len() > limit {
+        limit.saturating_sub(1)
+    } else {
+        limit
+    };
+    for line in source.iter().take(shown) {
+        output.push(Line::raw(format!("{prefix}{line}")).style(style));
+    }
+    if source.len() > limit {
+        output.push(Line::raw(format!("+{} more", source.len() - shown)).style(meta_value_style()));
+    }
+}
+
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     let mut lines = Vec::new();
     if let Some(line) = task_status_line(app) {
         lines.push(line);
     }
-    for line in app.preload_lines.iter().take(2) {
-        lines.push(Line::raw(format!("preload {line}")).style(preload_style()));
-    }
-    for line in app.task_lines.iter().take(3) {
-        lines.push(Line::raw(line.to_string()).style(content_style()));
-    }
+    push_limited_lines(
+        &mut lines,
+        &app.preload_lines,
+        2,
+        "preload ",
+        preload_style(),
+    );
+    push_limited_lines(&mut lines, &app.task_lines, 3, "", content_style());
     if let Some(notice) = app.notice() {
         lines.push(Line::raw(notice.to_string()).style(notice_style()));
     }
@@ -1611,13 +1662,17 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
 
 fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
     let mut lines = Vec::new();
-    for (index, line) in confirm_body_lines(app).into_iter().take(9).enumerate() {
+    let body_lines = confirm_body_lines(app);
+    for (index, line) in body_lines.iter().take(9).enumerate() {
         let style = if index == 0 {
             confirm_style()
         } else {
             content_style()
         };
-        lines.push(Line::raw(line).style(style));
+        lines.push(Line::raw(line.to_string()).style(style));
+    }
+    if body_lines.len() > 9 {
+        lines.push(Line::raw(format!("+{} more", body_lines.len() - 9)).style(meta_value_style()));
     }
     lines.push(Line::raw("").style(surface_style()));
     lines.push(Line::from(vec![
