@@ -89,3 +89,8 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - TUI UI quality pass started from the Focused Browser design: remove the vague left rail, keep `?` as a hidden help entry, add arrow and mouse input, improve right Preview readability, and broaden preview classification.
 - TUI UI quality RED/GREEN: added tests for hidden help overlay, arrow-key parity, mouse click/wheel selection events, two-pane focused layout, filename suffix preservation, and audio/document/ebook/font/torrent/playlist/checksum preview planning.
 - TUI UI quality live smoke: tmux TUI used the local BaiduPCS-Go config, loaded a real remote directory, showed a two-pane Files/Preview layout, opened help only after `?`, closed it with Esc, and confirmed Down moved selection plus refreshed Preview.
+
+## 2026-06-05
+
+- TUI usability polish Stage 0 started from direct UI feedback: replace debug status with file-manager status, format timestamps/sizes, make `/` local filtering, move destructive confirmations into a modal, add quit protection, large-directory navigation, visible multi-select, scrollbar/position indicators, focus cleanup, and contextual help.
+- Stage 0 plan recorded in `docs/superpowers/plans/2026-06-05-tui-usability-polish.md`; code changes are deferred to staged commits so each UI slice has tests, move-log evidence, and a focused commit.
