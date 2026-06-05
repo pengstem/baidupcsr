@@ -412,6 +412,12 @@ impl BrowserRuntime {
             }
             baidupcsr_tui::KeyAction::Up
             | baidupcsr_tui::KeyAction::Down
+            | baidupcsr_tui::KeyAction::PageUp
+            | baidupcsr_tui::KeyAction::PageDown
+            | baidupcsr_tui::KeyAction::HalfPageUp
+            | baidupcsr_tui::KeyAction::HalfPageDown
+            | baidupcsr_tui::KeyAction::Top
+            | baidupcsr_tui::KeyAction::Bottom
             | baidupcsr_tui::KeyAction::Select => {
                 self.update_preview_for_selection(app);
                 self.prefetch_visible_page(app);

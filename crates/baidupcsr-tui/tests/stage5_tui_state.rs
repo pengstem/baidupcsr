@@ -63,6 +63,24 @@ fn default_keymap_exposes_vim_navigation() {
         DEFAULT_KEYMAP.action_for(KeyEvent::Char('x')),
         KeyAction::CancelTask
     );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::PageDown),
+        KeyAction::PageDown
+    );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::PageUp),
+        KeyAction::PageUp
+    );
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Home), KeyAction::Top);
+    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::End), KeyAction::Bottom);
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::Ctrl('d')),
+        KeyAction::HalfPageDown
+    );
+    assert_eq!(
+        DEFAULT_KEYMAP.action_for(KeyEvent::Ctrl('u')),
+        KeyAction::HalfPageUp
+    );
 }
 
 #[test]
@@ -119,9 +137,12 @@ fn mouse_click_selects_visible_file_row() {
 }
 
 #[test]
-fn mouse_wheel_moves_selection_like_keyboard_navigation() {
+fn mouse_wheel_scrolls_view_without_moving_selection() {
     let mut app = TuiApp::new("/docs");
-    app.set_entries(vec![file(1, "/docs/a.txt"), file(2, "/docs/b.txt")]);
+    let entries: Vec<FileEntry> = (0..20)
+        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+        .collect();
+    app.set_entries(entries);
 
     assert_eq!(
         app.handle_mouse_event(baidupcsr_tui::MouseInput {
@@ -130,9 +151,56 @@ fn mouse_wheel_moves_selection_like_keyboard_navigation() {
             row: 5,
             area: ratatui::layout::Rect::new(0, 0, 96, 24),
         }),
-        Some(TuiRuntimeEvent::Action(KeyAction::Down))
+        None
     );
-    assert_eq!(app.selected_index(), Some(1));
+    assert_eq!(app.selected_index(), Some(0));
+    assert_eq!(app.visible_entry_range(4), 10..14);
+}
+
+#[test]
+fn normal_mode_supports_large_directory_navigation_keys() {
+    let mut app = TuiApp::new("/");
+    let entries: Vec<FileEntry> = (0..30)
+        .map(|index| file(index, &format!("/item-{index:02}.txt")))
+        .collect();
+    app.set_entries(entries);
+
+    assert_eq!(
+        app.handle_key_event(KeyEvent::PageDown),
+        Some(TuiRuntimeEvent::Action(KeyAction::PageDown))
+    );
+    assert_eq!(app.selected_index(), Some(10));
+
+    assert_eq!(
+        app.handle_key_event(KeyEvent::Ctrl('u')),
+        Some(TuiRuntimeEvent::Action(KeyAction::HalfPageUp))
+    );
+    assert_eq!(app.selected_index(), Some(5));
+
+    assert_eq!(
+        app.handle_key_event(KeyEvent::End),
+        Some(TuiRuntimeEvent::Action(KeyAction::Bottom))
+    );
+    assert_eq!(app.selected_index(), Some(29));
+
+    assert_eq!(
+        app.handle_key_event(KeyEvent::Home),
+        Some(TuiRuntimeEvent::Action(KeyAction::Top))
+    );
+    assert_eq!(app.selected_index(), Some(0));
+
+    assert_eq!(
+        app.handle_key_event(KeyEvent::Char('G')),
+        Some(TuiRuntimeEvent::Action(KeyAction::Bottom))
+    );
+    assert_eq!(app.selected_index(), Some(29));
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('g')), None);
+    assert_eq!(
+        app.handle_key_event(KeyEvent::Char('g')),
+        Some(TuiRuntimeEvent::Action(KeyAction::Top))
+    );
+    assert_eq!(app.selected_index(), Some(0));
 }
 
 #[test]

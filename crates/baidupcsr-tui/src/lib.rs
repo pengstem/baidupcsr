@@ -3,14 +3,17 @@ use ratatui::{
     crossterm::{
         event::{
             self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode,
-            MouseButton, MouseEventKind,
+            KeyModifiers, MouseButton, MouseEventKind,
         },
         execute,
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{
+        Block, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Wrap,
+    },
     Frame,
 };
 use std::{cmp::Ordering, io, ops::Range, time::Duration};
@@ -33,10 +36,13 @@ const THEME_MUTED: Color = Color::Rgb(148, 163, 184);
 const THEME_DIM: Color = Color::Rgb(100, 116, 139);
 const THEME_ACCENT: Color = Color::Rgb(94, 234, 212);
 const THEME_SELECTED: Color = Color::Rgb(14, 116, 144);
+const THEME_MARKED: Color = Color::Rgb(30, 41, 59);
 const THEME_DIRECTORY: Color = Color::Rgb(125, 211, 252);
 const THEME_WARNING: Color = Color::Rgb(250, 204, 21);
 const THEME_SUCCESS: Color = Color::Rgb(52, 211, 153);
 const THEME_ERROR: Color = Color::Rgb(248, 113, 113);
+const PAGE_STEP: usize = 10;
+const HALF_PAGE_STEP: usize = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppMode {
@@ -68,6 +74,7 @@ impl AppMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyEvent {
     Char(char),
+    Ctrl(char),
     Enter,
     Backspace,
     Esc,
@@ -75,6 +82,10 @@ pub enum KeyEvent {
     Down,
     Left,
     Right,
+    PageUp,
+    PageDown,
+    Home,
+    End,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,6 +102,12 @@ pub enum KeyAction {
     CancelTask,
     ToggleSelect,
     Select,
+    PageUp,
+    PageDown,
+    HalfPageUp,
+    HalfPageDown,
+    Top,
+    Bottom,
     Quit,
     None,
 }
@@ -172,8 +189,15 @@ impl KeyMap {
             KeyEvent::Up => KeyAction::Up,
             KeyEvent::Left => KeyAction::Back,
             KeyEvent::Right => KeyAction::Enter,
+            KeyEvent::PageUp => KeyAction::PageUp,
+            KeyEvent::PageDown => KeyAction::PageDown,
+            KeyEvent::Home => KeyAction::Top,
+            KeyEvent::End => KeyAction::Bottom,
+            KeyEvent::Ctrl('u') | KeyEvent::Ctrl('U') => KeyAction::HalfPageUp,
+            KeyEvent::Ctrl('d') | KeyEvent::Ctrl('D') => KeyAction::HalfPageDown,
             KeyEvent::Char('/') => KeyAction::Search,
             KeyEvent::Char(':') => KeyAction::Command,
+            KeyEvent::Char('G') => KeyAction::Bottom,
             KeyEvent::Char('r') => KeyAction::Refresh,
             KeyEvent::Char('p') => KeyAction::Preview,
             KeyEvent::Char('d') => KeyAction::Download,
@@ -182,6 +206,7 @@ impl KeyMap {
             KeyEvent::Char('q') => KeyAction::Quit,
             KeyEvent::Esc => KeyAction::None,
             KeyEvent::Enter | KeyEvent::Backspace => KeyAction::None,
+            KeyEvent::Ctrl(_) => KeyAction::None,
             KeyEvent::Char(_) => KeyAction::None,
         }
     }
@@ -209,6 +234,8 @@ pub struct TuiApp {
     confirm_lines: Vec<String>,
     confirm_kind: Option<ConfirmKind>,
     help_visible: bool,
+    pending_g: bool,
+    scroll_offset: usize,
 }
 
 impl TuiApp {
@@ -234,6 +261,8 @@ impl TuiApp {
             confirm_lines: Vec::new(),
             confirm_kind: None,
             help_visible: false,
+            pending_g: false,
+            scroll_offset: 0,
         }
     }
 
@@ -416,12 +445,12 @@ impl TuiApp {
 
         match input.kind {
             MouseInputKind::ScrollUp => {
-                self.move_up();
-                Some(TuiRuntimeEvent::Action(KeyAction::Up))
+                self.scroll_view_by(-(PAGE_STEP as isize));
+                None
             }
             MouseInputKind::ScrollDown => {
-                self.move_down();
-                Some(TuiRuntimeEvent::Action(KeyAction::Down))
+                self.scroll_view_by(PAGE_STEP as isize);
+                None
             }
             MouseInputKind::LeftClick | MouseInputKind::DoubleClick => {
                 let layout = tui_layout(input.area);
@@ -569,8 +598,7 @@ impl TuiApp {
 
     pub fn visible_entry_range(&self, rows: usize) -> Range<usize> {
         let indices = self.filtered_indices();
-        let selected = self.selected_visible_position(&indices).unwrap_or(0);
-        visible_range(indices.len(), selected, rows)
+        visible_range_from_offset(indices.len(), self.scroll_offset, rows)
     }
 
     pub fn parent_path(path: &str) -> Option<String> {
@@ -587,22 +615,74 @@ impl TuiApp {
     }
 
     fn move_down(&mut self) {
-        let indices = self.filtered_indices();
-        let Some(position) = self.selected_visible_position(&indices) else {
-            return;
-        };
-        let next = position
-            .saturating_add(1)
-            .min(indices.len().saturating_sub(1));
-        self.selected_index = indices.get(next).copied();
+        self.move_visible_by(1);
     }
 
     fn move_up(&mut self) {
+        self.move_visible_by(-1);
+    }
+
+    fn move_page_down(&mut self) {
+        self.move_visible_by(PAGE_STEP as isize);
+    }
+
+    fn move_page_up(&mut self) {
+        self.move_visible_by(-(PAGE_STEP as isize));
+    }
+
+    fn move_half_page_down(&mut self) {
+        self.move_visible_by(HALF_PAGE_STEP as isize);
+    }
+
+    fn move_half_page_up(&mut self) {
+        self.move_visible_by(-(HALF_PAGE_STEP as isize));
+    }
+
+    fn move_to_top(&mut self) {
+        let indices = self.filtered_indices();
+        let Some(index) = indices.first().copied() else {
+            return;
+        };
+        self.selected_index = Some(index);
+        self.scroll_offset = 0;
+    }
+
+    fn move_to_bottom(&mut self) {
+        let indices = self.filtered_indices();
+        let Some(index) = indices.last().copied() else {
+            return;
+        };
+        self.selected_index = Some(index);
+        self.scroll_offset = indices.len().saturating_sub(1);
+    }
+
+    fn move_visible_by(&mut self, delta: isize) {
         let indices = self.filtered_indices();
         let Some(position) = self.selected_visible_position(&indices) else {
             return;
         };
-        self.selected_index = indices.get(position.saturating_sub(1)).copied();
+        let last = indices.len().saturating_sub(1);
+        let next = if delta.is_negative() {
+            position.saturating_sub(delta.unsigned_abs())
+        } else {
+            position.saturating_add(delta as usize).min(last)
+        };
+        self.selected_index = indices.get(next).copied();
+        self.scroll_offset = next.saturating_sub(1);
+    }
+
+    fn scroll_view_by(&mut self, delta: isize) {
+        let total = self.filtered_indices().len();
+        if total == 0 {
+            self.scroll_offset = 0;
+            return;
+        }
+        let last = total.saturating_sub(1);
+        self.scroll_offset = if delta.is_negative() {
+            self.scroll_offset.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.scroll_offset.saturating_add(delta as usize).min(last)
+        };
     }
 
     fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
@@ -611,8 +691,20 @@ impl TuiApp {
             return None;
         }
 
+        if self.pending_g {
+            self.pending_g = false;
+            if event == KeyEvent::Char('g') {
+                self.move_to_top();
+                return Some(TuiRuntimeEvent::Action(KeyAction::Top));
+            }
+        } else if event == KeyEvent::Char('g') {
+            self.pending_g = true;
+            return None;
+        }
+
         if event == KeyEvent::Esc {
             self.mode = AppMode::Normal;
+            self.pending_g = false;
             return None;
         }
 
@@ -624,6 +716,30 @@ impl TuiApp {
             KeyAction::Up => {
                 self.move_up();
                 return Some(TuiRuntimeEvent::Action(KeyAction::Up));
+            }
+            KeyAction::PageDown => {
+                self.move_page_down();
+                return Some(TuiRuntimeEvent::Action(KeyAction::PageDown));
+            }
+            KeyAction::PageUp => {
+                self.move_page_up();
+                return Some(TuiRuntimeEvent::Action(KeyAction::PageUp));
+            }
+            KeyAction::HalfPageDown => {
+                self.move_half_page_down();
+                return Some(TuiRuntimeEvent::Action(KeyAction::HalfPageDown));
+            }
+            KeyAction::HalfPageUp => {
+                self.move_half_page_up();
+                return Some(TuiRuntimeEvent::Action(KeyAction::HalfPageUp));
+            }
+            KeyAction::Top => {
+                self.move_to_top();
+                return Some(TuiRuntimeEvent::Action(KeyAction::Top));
+            }
+            KeyAction::Bottom => {
+                self.move_to_bottom();
+                return Some(TuiRuntimeEvent::Action(KeyAction::Bottom));
             }
             KeyAction::Search => {
                 self.mode = AppMode::Filter;
@@ -681,7 +797,15 @@ impl TuiApp {
                 self.command_input.push(ch);
                 None
             }
-            KeyEvent::Up | KeyEvent::Down | KeyEvent::Left | KeyEvent::Right => None,
+            KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_) => None,
         }
     }
 
@@ -707,7 +831,15 @@ impl TuiApp {
                 self.sync_selection_to_filter();
                 None
             }
-            KeyEvent::Up | KeyEvent::Down | KeyEvent::Left | KeyEvent::Right => None,
+            KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_) => None,
         }
     }
 
@@ -737,7 +869,12 @@ impl TuiApp {
             | KeyEvent::Up
             | KeyEvent::Down
             | KeyEvent::Left
-            | KeyEvent::Right => None,
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_) => None,
         }
     }
 
@@ -796,15 +933,15 @@ impl TuiApp {
         let indices = self.filtered_indices();
         if indices.is_empty() {
             self.selected_index = None;
+            self.scroll_offset = 0;
             return;
         }
-        if self
-            .selected_index
-            .is_some_and(|selected| indices.contains(&selected))
-        {
+        if let Some(position) = self.selected_visible_position(&indices) {
+            self.scroll_offset = position.saturating_sub(1);
             return;
         }
         self.selected_index = indices.first().copied();
+        self.scroll_offset = 0;
     }
 
     fn begin_quit_confirm(&mut self) {
@@ -870,21 +1007,13 @@ fn sort_entries(entries: &mut [FileEntry]) {
     });
 }
 
-fn visible_range(total: usize, selected: usize, rows: usize) -> Range<usize> {
+fn visible_range_from_offset(total: usize, offset: usize, rows: usize) -> Range<usize> {
     if total == 0 || rows == 0 {
         return 0..0;
     }
 
     let rows = rows.min(total);
-    let selected = selected.min(total.saturating_sub(1));
-    let scrolloff = rows / 2;
-    let start = if selected < scrolloff {
-        0
-    } else if selected.saturating_add(scrolloff) >= total {
-        total.saturating_sub(rows)
-    } else {
-        selected.saturating_sub(scrolloff)
-    };
+    let start = offset.min(total.saturating_sub(rows));
 
     start..start.saturating_add(rows)
 }
@@ -959,21 +1088,21 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(48), Constraint::Min(42)])
             .areas(body);
-        frame.render_widget(files_widget(app, files), files);
+        render_files_pane(frame, app, files);
         frame.render_widget(preview_widget(app, preview), preview_area);
     } else if body.width >= 56 {
         let [files, preview_area] = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
             .areas(body);
-        frame.render_widget(files_widget(app, files), files);
+        render_files_pane(frame, app, files);
         frame.render_widget(preview_widget(app, preview), preview_area);
     } else {
         let [files, preview_area] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
             .areas(body);
-        frame.render_widget(files_widget(app, files), files);
+        render_files_pane(frame, app, files);
         frame.render_widget(preview_widget(app, preview), preview_area);
     }
     frame.render_widget(tasks_widget(app), tasks);
@@ -1024,7 +1153,7 @@ where
         if event::poll(Duration::from_millis(100))? {
             let runtime_event = match event::read()? {
                 CrosstermEvent::Key(key) => {
-                    let Some(tui_key) = map_crossterm_key(key.code) else {
+                    let Some(tui_key) = map_crossterm_key(key.code, key.modifiers) else {
                         continue;
                     };
                     app.handle_key_event(tui_key)
@@ -1064,8 +1193,11 @@ fn map_crossterm_mouse_kind(kind: MouseEventKind) -> Option<MouseInputKind> {
     }
 }
 
-fn map_crossterm_key(code: KeyCode) -> Option<KeyEvent> {
+fn map_crossterm_key(code: KeyCode, modifiers: KeyModifiers) -> Option<KeyEvent> {
     match code {
+        KeyCode::Char(value) if modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(KeyEvent::Ctrl(value))
+        }
         KeyCode::Char(value) => Some(KeyEvent::Char(value)),
         KeyCode::Enter => Some(KeyEvent::Enter),
         KeyCode::Backspace => Some(KeyEvent::Backspace),
@@ -1074,6 +1206,10 @@ fn map_crossterm_key(code: KeyCode) -> Option<KeyEvent> {
         KeyCode::Down => Some(KeyEvent::Down),
         KeyCode::Left => Some(KeyEvent::Left),
         KeyCode::Right => Some(KeyEvent::Right),
+        KeyCode::PageUp => Some(KeyEvent::PageUp),
+        KeyCode::PageDown => Some(KeyEvent::PageDown),
+        KeyCode::Home => Some(KeyEvent::Home),
+        KeyCode::End => Some(KeyEvent::End),
         _ => None,
     }
 }
@@ -1221,6 +1357,28 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
     .style(surface_style())
 }
 
+fn render_files_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    frame.render_widget(files_widget(app, area), area);
+
+    let rows = area.height.saturating_sub(2) as usize;
+    let total = app.filtered_entry_count();
+    if total <= rows || rows == 0 {
+        return;
+    }
+
+    let range = app.visible_entry_range(rows);
+    let mut state = ScrollbarState::new(total)
+        .position(range.start)
+        .viewport_content_length(rows);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::new().fg(THEME_ACCENT).bg(THEME_PANEL))
+            .track_style(Style::new().fg(THEME_BORDER).bg(THEME_PANEL)),
+        inner_rect(area),
+        &mut state,
+    );
+}
+
 fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
     let rows = area.height.saturating_sub(2) as usize;
     let visible_indices = app.filtered_indices();
@@ -1237,17 +1395,22 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             .map(|(_relative_index, index)| {
                 let entry = &app.entries()[*index];
                 let selected = app.selected_index() == Some(*index);
-                let marker = if selected {
-                    ">"
-                } else if app.path_is_marked(entry.path.as_str()) {
-                    "*"
-                } else {
-                    " "
-                };
+                let marked = app.path_is_marked(entry.path.as_str());
+                let cursor_marker = if selected { ">" } else { " " };
+                let mark_marker = if marked { "[x]" } else { "[ ]" };
                 let suffix = if entry.is_dir { "/" } else { "" };
                 let size = file_size_label(entry);
+                let row_bg = if selected {
+                    THEME_SELECTED
+                } else if marked {
+                    THEME_MARKED
+                } else {
+                    THEME_PANEL
+                };
                 let name_width = inner_width
-                    .saturating_sub(UnicodeWidthStr::width(marker))
+                    .saturating_sub(UnicodeWidthStr::width(cursor_marker))
+                    .saturating_sub(1)
+                    .saturating_sub(UnicodeWidthStr::width(mark_marker))
                     .saturating_sub(2)
                     .saturating_sub(UnicodeWidthStr::width(size.as_str()))
                     .saturating_sub(2)
@@ -1257,33 +1420,46 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
                 let base_style = if selected {
                     Style::new()
                         .fg(THEME_TEXT)
-                        .bg(THEME_SELECTED)
+                        .bg(row_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    surface_style()
+                    Style::new().fg(THEME_TEXT).bg(row_bg)
                 };
                 let name_style = if selected {
                     base_style
                 } else if entry.is_dir {
                     Style::new()
                         .fg(THEME_DIRECTORY)
-                        .bg(THEME_PANEL)
+                        .bg(row_bg)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
+                    Style::new().fg(THEME_TEXT).bg(row_bg)
                 };
-                let marker_style = if selected {
-                    base_style
+                let cursor_style = if selected {
+                    Style::new()
+                        .fg(THEME_ACCENT)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
+                    Style::new().fg(THEME_DIM).bg(row_bg)
+                };
+                let mark_style = if marked {
+                    Style::new()
+                        .fg(THEME_WARNING)
+                        .bg(row_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(THEME_DIM).bg(row_bg)
                 };
                 let size_style = if selected {
-                    Style::new().fg(THEME_TEXT).bg(THEME_SELECTED)
+                    Style::new().fg(THEME_TEXT).bg(row_bg)
                 } else {
-                    Style::new().fg(THEME_DIM).bg(THEME_PANEL)
+                    Style::new().fg(THEME_DIM).bg(row_bg)
                 };
                 ListItem::new(Line::from(vec![
-                    Span::styled(marker, marker_style),
+                    Span::styled(cursor_marker, cursor_style),
+                    Span::styled(" ", base_style),
+                    Span::styled(mark_marker, mark_style),
                     Span::styled(" ", base_style),
                     Span::styled(name, name_style),
                     Span::styled("  ", base_style),
@@ -1294,12 +1470,21 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             .collect()
     };
 
-    let title = if app.filter_input().is_empty() {
-        format!("Files {} items", app.entries().len())
+    let total = visible_indices.len();
+    let title = if total == 0 {
+        if app.filter_input().is_empty() {
+            "Files 0 items".to_string()
+        } else {
+            format!("Files 0/{} items", app.entries().len())
+        }
+    } else if app.filter_input().is_empty() {
+        format!("Files {}-{}/{}", range.start + 1, range.end, total)
     } else {
         format!(
-            "Files {}/{} items",
-            visible_indices.len(),
+            "Files {}-{}/{} of {}",
+            range.start + 1,
+            range.end,
+            total,
             app.entries().len()
         )
     };

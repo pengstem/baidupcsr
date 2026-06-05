@@ -106,7 +106,7 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
     assert!(!screen.contains("Context"));
     assert!(screen.contains("Files"));
     assert!(screen.contains("Preview"));
-    assert!(screen.contains("> apps/"));
+    assert!(screen.contains("> [ ] apps/"));
     assert!(screen.contains("demo.txt"));
     assert!(screen.contains("Preview: text"));
     assert!(!screen.contains("limit 16777216"));
@@ -129,8 +129,8 @@ fn ratatui_render_keeps_selection_visible_after_navigation() {
 
     let screen = draw_to_text(&app, None);
 
-    assert!(screen.contains("  alpha/"));
-    assert!(screen.contains("> beta.txt"));
+    assert!(screen.contains("  [ ] alpha/"));
+    assert!(screen.contains("> [ ] beta.txt"));
     assert!(screen.contains("metadata"));
 }
 
@@ -155,6 +155,33 @@ fn ratatui_render_scrolls_long_lists_and_highlights_selected_row() {
         &buffer,
         "item-18.txt",
         Color::Rgb(14, 116, 144)
+    ));
+    assert!(screen.contains("Files 18-"));
+    assert!(screen.contains("/30"));
+}
+
+#[test]
+fn ratatui_render_keeps_cursor_and_mark_columns_separate() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![
+        file(1, "/a.txt", 512, false),
+        file(2, "/b.txt", 512, false),
+    ]);
+
+    app.handle_key(baidupcsr_tui::KeyEvent::Char(' '));
+    let selected_marked = draw_to_text(&app, None);
+    assert!(selected_marked.contains("> [x] a.txt"));
+
+    app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
+    let buffer = draw_buffer(&app, None, 80, 16);
+    let screen = buffer_to_text(&buffer);
+
+    assert!(screen.contains("  [x] a.txt"));
+    assert!(screen.contains("> [ ] b.txt"));
+    assert!(line_with_text_has_bg(
+        &buffer,
+        "[x] a.txt",
+        Color::Rgb(30, 41, 59)
     ));
 }
 
@@ -330,7 +357,7 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
     let last_line = screen.lines().last().unwrap_or_default();
 
     assert!(last_line.contains("/n|"));
-    assert!(screen.contains("Files 1/2 items"));
+    assert!(screen.contains("Files 1-1/1 of 2"));
     assert!(screen.contains("notes.md"));
     assert!(!screen.contains("photo.jpg"));
 }

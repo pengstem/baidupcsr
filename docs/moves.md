@@ -103,3 +103,6 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - TUI usability polish Stage 3 moved destructive operation confirmation out of the Tasks panel and into a centered red-bordered modal that lists affected entries and shows `[y] confirm` / `[n] cancel`.
 - Stage 3 added quit protection: pressing `q` while background tasks are running enters Confirm mode, `n`/Esc returns to Normal, and `y` emits the real quit action.
 - Stage 3 validation: `cargo test -p baidupcsr-tui` passed with state coverage for guarded quit and render coverage for the modal confirmation surface.
+- TUI usability polish Stage 4 added large-directory navigation keys: `gg`, `G`, `PageUp`, `PageDown`, `Home`, `End`, `Ctrl-u`, and `Ctrl-d`, with preview/preload refresh wired through the CLI runtime action group.
+- Stage 4 split the Files row prefix into cursor and `[x]` marker columns, added marked-row background styling, added Files range titles plus a Ratatui vertical scrollbar, and changed mouse wheel input to scroll the viewport without moving selection or emitting Up/Down actions.
+- Stage 4 validation: `cargo test -p baidupcsr-tui` passed with state/render coverage for paging keys, viewport wheel scroll, range indicators, and marked rows; `cargo test -p baidupcsr-cli` passed to verify the runtime action integration.
