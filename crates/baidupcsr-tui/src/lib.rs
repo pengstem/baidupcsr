@@ -47,6 +47,12 @@ pub enum AppMode {
     TaskFocus,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConfirmKind {
+    Operation,
+    Quit,
+}
+
 impl AppMode {
     const fn label(self) -> &'static str {
         match self {
@@ -201,6 +207,7 @@ pub struct TuiApp {
     filter_input: String,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
+    confirm_kind: Option<ConfirmKind>,
     help_visible: bool,
 }
 
@@ -225,6 +232,7 @@ impl TuiApp {
             filter_input: String::new(),
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
+            confirm_kind: None,
             help_visible: false,
         }
     }
@@ -319,6 +327,7 @@ impl TuiApp {
     pub fn begin_confirm(&mut self, lines: Vec<String>) {
         self.mode = AppMode::Confirm;
         self.confirm_lines = lines;
+        self.confirm_kind = Some(ConfirmKind::Operation);
     }
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
@@ -625,6 +634,13 @@ impl TuiApp {
                 self.mode = AppMode::Command;
                 self.command_input.clear();
             }
+            KeyAction::Quit => {
+                if self.background_tasks > 0 {
+                    self.begin_quit_confirm();
+                } else {
+                    return Some(TuiRuntimeEvent::Action(KeyAction::Quit));
+                }
+            }
             KeyAction::ToggleSelect => self.toggle_selected_path(),
             KeyAction::Back
             | KeyAction::Enter
@@ -632,8 +648,7 @@ impl TuiApp {
             | KeyAction::Preview
             | KeyAction::Download
             | KeyAction::CancelTask
-            | KeyAction::Select
-            | KeyAction::Quit => {
+            | KeyAction::Select => {
                 return Some(TuiRuntimeEvent::Action(DEFAULT_KEYMAP.action_for(event)));
             }
             KeyAction::None => {}
@@ -699,14 +714,22 @@ impl TuiApp {
     fn handle_confirm_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
         match event {
             KeyEvent::Char('y') | KeyEvent::Char('Y') => {
+                let kind = self.confirm_kind.take().unwrap_or(ConfirmKind::Operation);
                 self.mode = AppMode::Normal;
                 self.confirm_lines.clear();
-                Some(TuiRuntimeEvent::ConfirmAccepted)
+                match kind {
+                    ConfirmKind::Operation => Some(TuiRuntimeEvent::ConfirmAccepted),
+                    ConfirmKind::Quit => Some(TuiRuntimeEvent::Action(KeyAction::Quit)),
+                }
             }
             KeyEvent::Char('n') | KeyEvent::Char('N') | KeyEvent::Esc => {
+                let kind = self.confirm_kind.take().unwrap_or(ConfirmKind::Operation);
                 self.mode = AppMode::Normal;
                 self.confirm_lines.clear();
-                Some(TuiRuntimeEvent::ConfirmRejected)
+                match kind {
+                    ConfirmKind::Operation => Some(TuiRuntimeEvent::ConfirmRejected),
+                    ConfirmKind::Quit => None,
+                }
             }
             KeyEvent::Enter
             | KeyEvent::Backspace
@@ -782,6 +805,16 @@ impl TuiApp {
             return;
         }
         self.selected_index = indices.first().copied();
+    }
+
+    fn begin_quit_confirm(&mut self) {
+        self.mode = AppMode::Confirm;
+        self.confirm_kind = Some(ConfirmKind::Quit);
+        self.confirm_lines = vec![format!(
+            "Quit with {} {} still running?",
+            self.background_tasks,
+            pluralize(self.background_tasks, "task", "tasks")
+        )];
     }
 
     fn position_label(&self) -> String {
@@ -950,6 +983,11 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
         frame.render_widget(Clear, area);
         frame.render_widget(help_widget(), area);
     }
+    if !app.confirm_lines().is_empty() {
+        let area = confirm_modal_rect(frame.area(), app);
+        frame.render_widget(Clear, area);
+        frame.render_widget(confirm_widget(app), area);
+    }
 }
 
 pub fn run_terminal_app(app: TuiApp) -> io::Result<()> {
@@ -1049,6 +1087,11 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+fn confirm_modal_rect(area: Rect, app: &TuiApp) -> Rect {
+    let body_lines = confirm_body_lines(app).len() as u16;
+    centered_rect(area, 64, body_lines.saturating_add(4).clamp(7, 14))
 }
 
 fn surface_style() -> Style {
@@ -1360,21 +1403,6 @@ fn default_preview_budget() -> PreviewBudget {
 }
 
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
-    if !app.confirm_lines.is_empty() {
-        let mut lines = Vec::new();
-        if let Some(summary) = app.confirm_lines.first() {
-            lines.push(Line::raw(summary.to_string()).style(confirm_style()));
-        }
-        if let Some(prompt) = app.confirm_lines.last() {
-            if app.confirm_lines.first() != Some(prompt) {
-                lines.push(Line::raw(prompt.to_string()).style(warning_style()));
-            }
-        }
-        return Paragraph::new(lines)
-            .block(themed_block("Tasks", false))
-            .style(surface_style());
-    }
-
     let mut lines = Vec::new();
     if let Some(line) = task_status_line(app) {
         lines.push(line);
@@ -1394,6 +1422,58 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     Paragraph::new(lines)
         .block(themed_block("Tasks", false))
         .style(surface_style())
+}
+
+fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
+    let mut lines = Vec::new();
+    for (index, line) in confirm_body_lines(app).into_iter().take(9).enumerate() {
+        let style = if index == 0 {
+            confirm_style()
+        } else {
+            content_style()
+        };
+        lines.push(Line::raw(line).style(style));
+    }
+    lines.push(Line::raw("").style(surface_style()));
+    lines.push(Line::from(vec![
+        Span::styled("[y] confirm", confirm_style()),
+        Span::styled("    ", surface_style()),
+        Span::styled("[n] cancel", warning_style()),
+    ]));
+
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .style(surface_style())
+                .border_style(Style::new().fg(THEME_ERROR).bg(THEME_BG))
+                .title(Line::from(Span::styled(
+                    confirm_title(app),
+                    Style::new()
+                        .fg(THEME_ERROR)
+                        .bg(THEME_BG)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+        )
+        .style(surface_style())
+        .wrap(Wrap { trim: true })
+}
+
+fn confirm_title(app: &TuiApp) -> &'static str {
+    match app.confirm_kind {
+        Some(ConfirmKind::Quit) => "Quit?",
+        Some(ConfirmKind::Operation) | None => "Confirm",
+    }
+}
+
+fn confirm_body_lines(app: &TuiApp) -> Vec<String> {
+    let mut lines = app.confirm_lines.clone();
+    if lines
+        .last()
+        .is_some_and(|line| line.contains("press y") || line.contains("confirm"))
+    {
+        lines.pop();
+    }
+    lines
 }
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {

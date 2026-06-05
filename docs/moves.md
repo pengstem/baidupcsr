@@ -100,3 +100,6 @@ This log records implementation moves made while completing the Rust + Ratatui r
 - TUI usability polish Stage 2 changed `/` from remote search submission into incremental local filtering over the current directory entries while keeping actions pointed at the real selected entry.
 - Stage 2 moved command/filter input from the Tasks box to the bottom modeline with a visible `|` cursor, added filtered Files counts and no-match messaging, and kept remote search behind `:search`.
 - Stage 2 validation: `cargo test -p baidupcsr-tui` passed, and `cargo test -p baidupcsr-cli remote_command_search_parses_recursive_flag` confirmed the remote search command path still parses.
+- TUI usability polish Stage 3 moved destructive operation confirmation out of the Tasks panel and into a centered red-bordered modal that lists affected entries and shows `[y] confirm` / `[n] cancel`.
+- Stage 3 added quit protection: pressing `q` while background tasks are running enters Confirm mode, `n`/Esc returns to Normal, and `y` emits the real quit action.
+- Stage 3 validation: `cargo test -p baidupcsr-tui` passed with state coverage for guarded quit and render coverage for the modal confirmation surface.

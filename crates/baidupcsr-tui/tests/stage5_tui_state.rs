@@ -188,6 +188,28 @@ fn slash_filters_current_entries_without_submitting_remote_search() {
 }
 
 #[test]
+fn quit_with_background_tasks_requires_confirmation() {
+    let mut app = TuiApp::new("/docs");
+    app.set_background_tasks(2);
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
+    assert_eq!(app.mode(), AppMode::Confirm);
+    assert_eq!(
+        app.confirm_lines(),
+        &["Quit with 2 tasks still running?".to_string()]
+    );
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('n')), None);
+    assert_eq!(app.mode(), AppMode::Normal);
+
+    assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
+    assert_eq!(
+        app.handle_key_event(KeyEvent::Char('y')),
+        Some(TuiRuntimeEvent::Action(KeyAction::Quit))
+    );
+}
+
+#[test]
 fn status_line_reports_mode_path_and_task_count() {
     let mut app = TuiApp::new("/docs");
     app.set_background_tasks(2);
