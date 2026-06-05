@@ -94,3 +94,6 @@ This log records implementation moves made while completing the Rust + Ratatui r
 
 - TUI usability polish Stage 0 started from direct UI feedback: replace debug status with file-manager status, format timestamps/sizes, make `/` local filtering, move destructive confirmations into a modal, add quit protection, large-directory navigation, visible multi-select, scrollbar/position indicators, focus cleanup, and contextual help.
 - Stage 0 plan recorded in `docs/superpowers/plans/2026-06-05-tui-usability-polish.md`; code changes are deferred to staged commits so each UI slice has tests, move-log evidence, and a focused commit.
+- TUI usability polish Stage 1 changed the bottom status from raw `mode=... request=... cache_age=...` debug text to a file-manager summary with mode, position, selection count, path, and short loading/error/task hints.
+- Stage 1 formatted remote mtimes with the `time` crate, changed file sizes to one-decimal `KiB/MiB/GiB/TiB`, added Files loading/empty/error fallbacks, moved Tasks away from request/cache counters, and removed raw preview memory-accounting lines except for video diagnostics.
+- Stage 1 validation: `cargo test -p baidupcsr-tui` passed with updated state/render tests for status text, large sizes, UTC timestamp formatting, empty/loading/error states, and human-readable Preview copy.

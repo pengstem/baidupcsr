@@ -171,8 +171,8 @@ fn preview_panel_uses_empty_space_for_selected_file_details() {
 
     assert!(screen.contains("Name: photo.png"));
     assert!(screen.contains("Kind: file"));
-    assert!(screen.contains("Size: 8KiB"));
-    assert!(screen.contains("Modified: 1700000000"));
+    assert!(screen.contains("Size: 8.0 KiB"));
+    assert!(screen.contains("Modified: 2023-11-14 22:13"));
     assert!(screen.contains("ID: 7"));
     assert!(screen.contains("image=png"));
     assert!(screen.contains("dimensions=320x240"));
@@ -213,8 +213,8 @@ fn visual_hierarchy_uses_a_real_theme_not_default_black_and_white() {
     ));
     assert!(text_has_style(
         &buffer,
-        "Status",
-        Some(Color::Rgb(203, 213, 225)),
+        "1/2",
+        Some(Color::Rgb(226, 232, 240)),
         Some(Color::Rgb(15, 23, 42))
     ));
     assert!(!text_has_style(

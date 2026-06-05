@@ -26,6 +26,13 @@ fn file_with_name(fs_id: i64, path: &str, name: &str, size: i64, is_dir: bool) -
     }
 }
 
+fn file_with_mtime(fs_id: i64, path: &str, size: i64, mtime: i64) -> FileEntry {
+    FileEntry {
+        mtime,
+        ..file(fs_id, path, size, false)
+    }
+}
+
 fn draw_buffer(app: &TuiApp, preview: Option<PreviewBudget>, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = infallible(Terminal::new(backend));
@@ -102,11 +109,13 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
     assert!(screen.contains("> apps/"));
     assert!(screen.contains("demo.txt"));
     assert!(screen.contains("Preview: text"));
-    assert!(screen.contains("fetched 128"));
-    assert!(screen.contains("limit 16777216"));
-    assert!(screen.contains("Truncated: false"));
-    assert!(screen.contains("disk false"));
-    assert!(screen.contains("mode=NORMAL path=/apps request=idle cache_age=none tasks=1"));
+    assert!(!screen.contains("limit 16777216"));
+    assert!(!screen.contains("Truncated: false"));
+    assert!(!screen.contains("disk false"));
+    assert!(!screen.contains("mode=NORMAL"));
+    assert!(screen.contains("1/2"));
+    assert!(screen.contains("0 selected"));
+    assert!(screen.contains("1 task"));
 }
 
 #[test]
@@ -166,7 +175,7 @@ fn ratatui_render_truncates_long_wide_names_without_breaking_layout() {
     assert!(screen.contains("..."));
     assert!(screen.contains("with-a-long-tail.txt"));
     assert!(screen.contains("Preview"));
-    assert!(screen.contains("Status"));
+    assert!(screen.contains("1/1"));
 }
 
 #[test]
@@ -190,7 +199,10 @@ fn ratatui_render_draws_text_preview_content() {
     assert!(screen.contains("hello"));
     assert!(screen.contains("world"));
     assert!(screen.contains("Preview: text"));
-    assert!(screen.contains("disk false"));
+    assert!(screen.contains("11 B fetched"));
+    assert!(screen.contains("memory only"));
+    assert!(!screen.contains("16777216"));
+    assert!(!screen.contains("disk false"));
 }
 
 #[test]
@@ -262,9 +274,46 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
     let screen = buffer_to_text(&draw_buffer(&app, None, 80, 24));
 
     assert!(screen.contains("Preview: text"));
-    assert!(screen.contains("fetched 96"));
-    assert!(screen.contains("disk false"));
+    assert!(screen.contains("96 B fetched"));
+    assert!(screen.contains("memory only"));
     assert!(screen.contains("line one"));
+}
+
+#[test]
+fn ratatui_render_formats_large_sizes_and_timestamps_for_people() {
+    let mut app = TuiApp::new("/videos");
+    app.set_entries(vec![
+        file_with_mtime(
+            1,
+            "/videos/clip.mkv",
+            5_i64 * 1024 * 1024 * 1024,
+            1_700_000_000,
+        ),
+        file(2, "/videos/sample.bin", 1_992_294, false),
+    ]);
+
+    let screen = draw_to_text(&app, None);
+
+    assert!(screen.contains("5.0 GiB"));
+    assert!(screen.contains("1.9 MiB"));
+    assert!(screen.contains("2023-11-14 22:13"));
+    assert!(!screen.contains("5120MiB"));
+    assert!(!screen.contains("1700000000"));
+}
+
+#[test]
+fn ratatui_render_distinguishes_loading_empty_and_error_file_states() {
+    let mut loading = TuiApp::new("/docs");
+    loading.begin_directory_load("/docs");
+    assert!(draw_to_text(&loading, None).contains("Loading..."));
+
+    let empty = TuiApp::new("/empty");
+    assert!(draw_to_text(&empty, None).contains("Empty directory"));
+
+    let mut failed = TuiApp::new("/missing");
+    failed.finish_directory_error("/missing", Vec::new(), None, "remote_list_error: 403", None);
+    let screen = draw_to_text(&failed, None);
+    assert!(screen.contains("Error: remote_list_error: 403"));
 }
 
 #[test]

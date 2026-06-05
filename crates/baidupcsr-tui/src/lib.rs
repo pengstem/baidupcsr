@@ -14,6 +14,7 @@ use ratatui::{
     Frame,
 };
 use std::{cmp::Ordering, io, ops::Range, time::Duration};
+use time::{macros::format_description, OffsetDateTime};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const fn crate_name() -> &'static str {
@@ -122,12 +123,12 @@ pub enum DirectoryRequestState {
 }
 
 impl DirectoryRequestState {
-    const fn label(self) -> &'static str {
+    const fn user_label(self) -> &'static str {
         match self {
-            Self::Idle => "idle",
-            Self::Loading => "loading",
-            Self::Refreshing => "refreshing",
-            Self::Failed => "failed",
+            Self::Idle => "Ready",
+            Self::Loading => "Loading",
+            Self::Refreshing => "Refreshing",
+            Self::Failed => "Error",
         }
     }
 }
@@ -141,7 +142,7 @@ pub enum CacheSource {
 }
 
 impl CacheSource {
-    const fn label(self) -> &'static str {
+    const fn user_label(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Memory => "memory",
@@ -530,14 +531,16 @@ impl TuiApp {
     }
 
     pub fn status_line(&self) -> String {
-        format!(
-            "mode={} path={} request={} cache_age={} tasks={}",
-            self.mode.label(),
-            self.path,
-            self.request_state.label(),
-            self.cache_age_label(),
-            self.background_tasks
-        )
+        let mut parts = vec![
+            self.mode.label().to_string(),
+            self.position_label(),
+            format!("{} selected", self.selected_paths.len()),
+            self.path.clone(),
+        ];
+        if let Some(hint) = self.status_hint() {
+            parts.push(hint);
+        }
+        parts.join("  ")
     }
 
     pub fn visible_entry_range(&self, rows: usize) -> Range<usize> {
@@ -700,10 +703,34 @@ impl TuiApp {
             .or_else(|| (!self.entries.is_empty()).then_some(0));
     }
 
-    fn cache_age_label(&self) -> String {
-        self.cache_age_seconds
-            .map(|seconds| format!("{seconds}s"))
-            .unwrap_or_else(|| "none".to_string())
+    fn position_label(&self) -> String {
+        if self.entries.is_empty() {
+            return "0/0".to_string();
+        }
+        let index = self
+            .selected_index
+            .unwrap_or(0)
+            .min(self.entries.len().saturating_sub(1));
+        format!("{}/{}", index.saturating_add(1), self.entries.len())
+    }
+
+    fn status_hint(&self) -> Option<String> {
+        match self.request_state {
+            DirectoryRequestState::Loading => Some("Loading...".to_string()),
+            DirectoryRequestState::Refreshing => Some("Refreshing...".to_string()),
+            DirectoryRequestState::Failed => Some(
+                self.notice
+                    .as_ref()
+                    .map(|notice| format!("Error: {notice}"))
+                    .unwrap_or_else(|| "Error".to_string()),
+            ),
+            DirectoryRequestState::Idle if self.background_tasks > 0 => Some(format!(
+                "{} {}",
+                self.background_tasks,
+                pluralize(self.background_tasks, "task", "tasks")
+            )),
+            DirectoryRequestState::Idle => None,
+        }
     }
 }
 
@@ -1065,7 +1092,7 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
         Span::styled(app.path(), Style::new().fg(THEME_TEXT).bg(THEME_BG)),
         Span::styled("  ", surface_style()),
         Span::styled(
-            app.request_state.label(),
+            app.request_state.user_label(),
             Style::new()
                 .fg(request_state_color(app.request_state))
                 .bg(THEME_BG)
@@ -1080,66 +1107,73 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
     let rows = area.height.saturating_sub(2) as usize;
     let range = app.visible_entry_range(rows);
     let inner_width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem<'_>> = app.entries()[range.clone()]
-        .iter()
-        .enumerate()
-        .map(|(relative_index, entry)| {
-            let index = range.start + relative_index;
-            let selected = app.selected_index() == Some(index);
-            let marker = if selected {
-                ">"
-            } else if app.path_is_marked(entry.path.as_str()) {
-                "*"
-            } else {
-                " "
-            };
-            let suffix = if entry.is_dir { "/" } else { "" };
-            let size = file_size_label(entry);
-            let name_width = inner_width
-                .saturating_sub(UnicodeWidthStr::width(marker))
-                .saturating_sub(2)
-                .saturating_sub(UnicodeWidthStr::width(size.as_str()))
-                .saturating_sub(2)
-                .max(4);
-            let name = truncate_cells(&format!("{}{}", entry.server_filename, suffix), name_width);
-            let base_style = if selected {
-                Style::new()
-                    .fg(THEME_TEXT)
-                    .bg(THEME_SELECTED)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                surface_style()
-            };
-            let name_style = if selected {
-                base_style
-            } else if entry.is_dir {
-                Style::new()
-                    .fg(THEME_DIRECTORY)
-                    .bg(THEME_PANEL)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
-            };
-            let marker_style = if selected {
-                base_style
-            } else {
-                Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
-            };
-            let size_style = if selected {
-                Style::new().fg(THEME_TEXT).bg(THEME_SELECTED)
-            } else {
-                Style::new().fg(THEME_DIM).bg(THEME_PANEL)
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(marker, marker_style),
-                Span::styled(" ", base_style),
-                Span::styled(name, name_style),
-                Span::styled("  ", base_style),
-                Span::styled(size, size_style),
-            ]))
-            .style(base_style)
-        })
-        .collect();
+    let items: Vec<ListItem<'_>> = if range.is_empty() {
+        vec![ListItem::new(
+            Line::raw(files_empty_message(app)).style(meta_value_style()),
+        )]
+    } else {
+        app.entries()[range.clone()]
+            .iter()
+            .enumerate()
+            .map(|(relative_index, entry)| {
+                let index = range.start + relative_index;
+                let selected = app.selected_index() == Some(index);
+                let marker = if selected {
+                    ">"
+                } else if app.path_is_marked(entry.path.as_str()) {
+                    "*"
+                } else {
+                    " "
+                };
+                let suffix = if entry.is_dir { "/" } else { "" };
+                let size = file_size_label(entry);
+                let name_width = inner_width
+                    .saturating_sub(UnicodeWidthStr::width(marker))
+                    .saturating_sub(2)
+                    .saturating_sub(UnicodeWidthStr::width(size.as_str()))
+                    .saturating_sub(2)
+                    .max(4);
+                let name =
+                    truncate_cells(&format!("{}{}", entry.server_filename, suffix), name_width);
+                let base_style = if selected {
+                    Style::new()
+                        .fg(THEME_TEXT)
+                        .bg(THEME_SELECTED)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    surface_style()
+                };
+                let name_style = if selected {
+                    base_style
+                } else if entry.is_dir {
+                    Style::new()
+                        .fg(THEME_DIRECTORY)
+                        .bg(THEME_PANEL)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
+                };
+                let marker_style = if selected {
+                    base_style
+                } else {
+                    Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
+                };
+                let size_style = if selected {
+                    Style::new().fg(THEME_TEXT).bg(THEME_SELECTED)
+                } else {
+                    Style::new().fg(THEME_DIM).bg(THEME_PANEL)
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(marker, marker_style),
+                    Span::styled(" ", base_style),
+                    Span::styled(name, name_style),
+                    Span::styled("  ", base_style),
+                    Span::styled(size, size_style),
+                ]))
+                .style(base_style)
+            })
+            .collect()
+    };
 
     let title = format!("Files {} items", app.entries().len());
     List::new(items)
@@ -1165,7 +1199,7 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
             vec![
                 detail_line("Name:", middle_truncate_cells(title, 48)),
                 detail_line("Kind:", "none".to_string()),
-                detail_line("Cache:", app.cache_source().label().to_string()),
+                detail_line("Cache:", app.cache_source().user_label().to_string()),
             ]
         });
     lines.push(Line::raw("").style(surface_style()));
@@ -1174,47 +1208,32 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
             lines.push(content_line(line.to_string()));
         }
         lines.push(Line::raw("").style(surface_style()));
-        lines.push(
-            Line::raw(format!(
-                "Memory: fetched {} / {} · disk {}",
-                budget.fetched_bytes, budget.memory_limit_bytes, budget.disk_backed
-            ))
-            .style(meta_value_style()),
-        );
+        lines.push(detail_line(
+            "Buffer:",
+            format!(
+                "{} / {} · {}",
+                bytes_label(budget.fetched_bytes),
+                bytes_label(budget.memory_limit_bytes),
+                cache_storage_label(budget.disk_backed)
+            ),
+        ));
     } else if budget.kind == PreviewKind::Text && !app.preview_lines.is_empty() {
-        lines.truncate(3);
-        lines.push(Line::raw("").style(surface_style()));
-        lines.push(
-            Line::raw(format!("Preview: text · fetched {}", budget.fetched_bytes))
-                .style(meta_value_style()),
-        );
-        lines.push(
-            Line::raw(format!(
-                "Memory: limit {} · disk {}",
-                budget.memory_limit_bytes, budget.disk_backed
-            ))
-            .style(meta_value_style()),
-        );
+        lines.truncate(4);
+        lines.push(detail_line(
+            "Preview:",
+            format!(
+                "text · {} fetched · {}",
+                bytes_label(budget.fetched_bytes),
+                cache_storage_label(budget.disk_backed)
+            ),
+        ));
         lines.push(Line::raw("").style(surface_style()));
         for line in app.preview_lines.iter().take(10) {
             lines.push(content_line(line.to_string()));
         }
     } else {
-        lines.extend([
-            Line::raw(format!(
-                "Preview: {} · fetched {}",
-                budget.kind.label(),
-                budget.fetched_bytes
-            ))
-            .style(meta_value_style()),
-            Line::raw(format!(
-                "Memory: limit {} · disk {}",
-                budget.memory_limit_bytes, budget.disk_backed
-            ))
-            .style(meta_value_style()),
-            Line::raw(format!("Truncated: {}", budget.truncated)).style(meta_value_style()),
-            Line::raw("").style(surface_style()),
-        ]);
+        lines.push(detail_line("Preview:", budget.kind.label().to_string()));
+        lines.push(Line::raw("").style(surface_style()));
         for line in app.preview_lines.iter().take(8) {
             lines.push(content_line(line.to_string()));
         }
@@ -1238,11 +1257,9 @@ fn preview_detail_lines(
             middle_truncate_cells(entry.server_filename.as_str(), 52),
         ),
         detail_line("Kind:", format!("{item_type} · {}", budget.kind.label())),
-        detail_line("Cache:", source.label().to_string()),
-        detail_line(
-            "Size:",
-            format!("{} · Modified: {}", file_size_label(entry), entry.mtime),
-        ),
+        detail_line("Size:", file_size_label(entry)),
+        detail_line("Modified:", modified_time_label(entry.mtime)),
+        detail_line("Cache:", source.user_label().to_string()),
         detail_line("ID:", entry.fs_id.to_string()),
         detail_line("Path:", middle_truncate_cells(entry.path.as_str(), 56)),
     ]
@@ -1274,19 +1291,10 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
             .style(surface_style());
     }
 
-    let mut lines = vec![Line::from(vec![
-        Span::styled("request=", meta_label_style()),
-        Span::styled(
-            app.request_state.label(),
-            Style::new()
-                .fg(request_state_color(app.request_state))
-                .bg(THEME_BG),
-        ),
-        Span::styled("  cache_age=", meta_label_style()),
-        Span::styled(app.cache_age_label(), meta_value_style()),
-        Span::styled("  background=", meta_label_style()),
-        Span::styled(app.background_tasks.to_string(), meta_value_style()),
-    ])];
+    let mut lines = Vec::new();
+    if let Some(line) = task_status_line(app) {
+        lines.push(line);
+    }
     if !app.command_input.is_empty() || matches!(app.mode, AppMode::Command | AppMode::Search) {
         let prompt = if app.mode == AppMode::Search {
             "/"
@@ -1304,14 +1312,52 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
     if let Some(notice) = app.notice() {
         lines.push(Line::raw(notice.to_string()).style(notice_style()));
     }
+    if lines.is_empty() {
+        lines.push(Line::raw("No active tasks").style(meta_value_style()));
+    }
     Paragraph::new(lines)
         .block(themed_block("Tasks", false))
         .style(surface_style())
 }
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
-    Paragraph::new(Line::raw(format!("Status {}", app.status_line())))
-        .style(Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG))
+    let mut spans = vec![
+        Span::styled(
+            app.mode.label(),
+            Style::new()
+                .fg(THEME_BG)
+                .bg(THEME_ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
+        Span::styled(
+            app.position_label(),
+            Style::new().fg(THEME_TEXT).bg(THEME_BG),
+        ),
+        Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
+        Span::styled(
+            format!("{} selected", app.selected_paths.len()),
+            Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG),
+        ),
+        Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
+        Span::styled(
+            app.path().to_string(),
+            Style::new().fg(THEME_TEXT).bg(THEME_BG),
+        ),
+    ];
+    if let Some(hint) = app.status_hint() {
+        spans.push(Span::styled(
+            "  ",
+            Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG),
+        ));
+        spans.push(Span::styled(
+            hint,
+            Style::new()
+                .fg(request_state_color(app.request_state))
+                .bg(THEME_BG),
+        ));
+    }
+    Paragraph::new(Line::from(spans)).style(Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG))
 }
 
 fn request_state_color(state: DirectoryRequestState) -> Color {
@@ -1328,12 +1374,92 @@ fn file_size_label(entry: &FileEntry) -> String {
     }
 
     let bytes = u64::try_from(entry.size).unwrap_or(0);
+    bytes_label(bytes)
+}
+
+fn bytes_label(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     if bytes < 1024 {
-        format!("{bytes}B")
-    } else if bytes < 1024 * 1024 {
-        format!("{}KiB", bytes / 1024)
+        return format!("{bytes} B");
+    }
+
+    let mut value = bytes as f64;
+    let mut unit_index = 0;
+    while value >= 1024.0 && unit_index < UNITS.len().saturating_sub(1) {
+        value /= 1024.0;
+        unit_index = unit_index.saturating_add(1);
+    }
+    format!("{value:.1} {}", UNITS[unit_index])
+}
+
+fn modified_time_label(timestamp: i64) -> String {
+    let Ok(datetime) = OffsetDateTime::from_unix_timestamp(timestamp) else {
+        return "unknown".to_string();
+    };
+    datetime
+        .format(format_description!("[year]-[month]-[day] [hour]:[minute]"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn cache_storage_label(disk_backed: bool) -> &'static str {
+    if disk_backed {
+        "disk backed"
     } else {
-        format!("{}MiB", bytes / 1024 / 1024)
+        "memory only"
+    }
+}
+
+fn files_empty_message(app: &TuiApp) -> String {
+    match app.request_state {
+        DirectoryRequestState::Loading => "Loading...".to_string(),
+        DirectoryRequestState::Refreshing => "Refreshing cached entries...".to_string(),
+        DirectoryRequestState::Failed => app
+            .notice()
+            .map(|notice| format!("Error: {notice}"))
+            .unwrap_or_else(|| "Could not load directory".to_string()),
+        DirectoryRequestState::Idle => "Empty directory".to_string(),
+    }
+}
+
+fn task_status_line(app: &TuiApp) -> Option<Line<'static>> {
+    match app.request_state {
+        DirectoryRequestState::Loading => Some(
+            Line::raw(format!("Loading {}", app.path())).style(
+                Style::new()
+                    .fg(request_state_color(app.request_state))
+                    .bg(THEME_PANEL),
+            ),
+        ),
+        DirectoryRequestState::Refreshing => Some(
+            Line::raw(format!("Refreshing {} from cache", app.path())).style(
+                Style::new()
+                    .fg(request_state_color(app.request_state))
+                    .bg(THEME_PANEL),
+            ),
+        ),
+        DirectoryRequestState::Failed => app.notice().map(|notice| {
+            Line::raw(format!("Error: {notice}")).style(
+                Style::new()
+                    .fg(request_state_color(app.request_state))
+                    .bg(THEME_PANEL),
+            )
+        }),
+        DirectoryRequestState::Idle => (app.background_tasks > 0).then(|| {
+            Line::raw(format!(
+                "{} {} running",
+                app.background_tasks,
+                pluralize(app.background_tasks, "task", "tasks")
+            ))
+            .style(meta_value_style())
+        }),
+    }
+}
+
+fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 {
+        singular
+    } else {
+        plural
     }
 }
 

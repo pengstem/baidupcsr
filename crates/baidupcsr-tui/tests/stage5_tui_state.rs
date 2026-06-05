@@ -157,10 +157,7 @@ fn status_line_reports_mode_path_and_task_count() {
     let mut app = TuiApp::new("/docs");
     app.set_background_tasks(2);
 
-    assert_eq!(
-        app.status_line(),
-        "mode=NORMAL path=/docs request=idle cache_age=none tasks=2"
-    );
+    assert_eq!(app.status_line(), "NORMAL  0/0  0 selected  /docs  2 tasks");
 }
 
 #[test]
@@ -277,7 +274,7 @@ fn directory_load_state_replaces_path_entries_and_status() {
     assert_eq!(app.request_state(), DirectoryRequestState::Loading);
     assert_eq!(
         app.status_line(),
-        "mode=NORMAL path=/docs request=loading cache_age=none tasks=1"
+        "NORMAL  0/0  0 selected  /docs  Loading..."
     );
 
     app.finish_directory_success(
@@ -291,10 +288,7 @@ fn directory_load_state_replaces_path_entries_and_status() {
     assert_eq!(app.entries().len(), 2);
     assert_eq!(app.selected_index(), Some(0));
     assert_eq!(app.notice(), Some("loaded /docs"));
-    assert_eq!(
-        app.status_line(),
-        "mode=NORMAL path=/docs request=idle cache_age=0s tasks=0"
-    );
+    assert_eq!(app.status_line(), "NORMAL  1/2  0 selected  /docs");
 }
 
 #[test]
@@ -320,7 +314,7 @@ fn directory_load_failure_keeps_cached_entries_and_reports_error() {
     assert_eq!(app.notice(), Some("remote_list_error: 403"));
     assert_eq!(
         app.status_line(),
-        "mode=NORMAL path=/missing request=failed cache_age=7s tasks=0"
+        "NORMAL  1/1  0 selected  /missing  Error: remote_list_error: 403"
     );
 }
 
