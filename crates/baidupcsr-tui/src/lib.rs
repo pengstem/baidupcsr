@@ -11,12 +11,12 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{
-        Block, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-        Wrap,
+        Block, Cell, Clear, Gauge, HighlightSpacing, Paragraph, Row, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Sparkline, Table, TableState, Wrap,
     },
     Frame,
 };
-use std::{cmp::Ordering, io, ops::Range, time::Duration};
+use std::{cmp::Ordering, collections::BTreeMap, io, ops::Range, time::Duration};
 use time::{macros::format_description, OffsetDateTime};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -157,6 +157,19 @@ pub enum TuiRuntimeEvent {
     ConfirmRejected,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskPanelItem {
+    pub id: u64,
+    pub kind: String,
+    pub state: String,
+    pub bytes_done: u64,
+    pub bytes_total: Option<u64>,
+    pub speed_bytes_per_sec: u64,
+    pub label: String,
+    pub error: Option<String>,
+    pub speed_history: Vec<u64>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryRequestState {
     Idle,
@@ -247,6 +260,8 @@ pub struct TuiApp {
     preview_lines: Vec<String>,
     preview_budget: PreviewBudget,
     task_lines: Vec<String>,
+    task_items: Vec<TaskPanelItem>,
+    task_speed_history: BTreeMap<u64, Vec<u64>>,
     preload_lines: Vec<String>,
     command_input: String,
     filter_input: String,
@@ -278,6 +293,8 @@ impl TuiApp {
             preview_lines: Vec::new(),
             preview_budget: default_preview_budget(),
             task_lines: Vec::new(),
+            task_items: Vec::new(),
+            task_speed_history: BTreeMap::new(),
             preload_lines: Vec::new(),
             command_input: String::new(),
             filter_input: String::new(),
@@ -375,6 +392,23 @@ impl TuiApp {
 
     pub fn set_task_lines(&mut self, lines: Vec<String>) {
         self.task_lines = lines;
+    }
+
+    pub fn set_task_items(&mut self, mut items: Vec<TaskPanelItem>) {
+        let active_ids: Vec<u64> = items.iter().map(|item| item.id).collect();
+        self.task_speed_history
+            .retain(|id, _| active_ids.iter().any(|active_id| active_id == id));
+        for item in &mut items {
+            let history = self.task_speed_history.entry(item.id).or_default();
+            if item.speed_bytes_per_sec > 0 {
+                history.push(item.speed_bytes_per_sec);
+                if history.len() > 20 {
+                    history.drain(0..history.len() - 20);
+                }
+            }
+            item.speed_history = history.clone();
+        }
+        self.task_items = items;
     }
 
     pub fn set_preload_lines(&mut self, lines: Vec<String>) {
@@ -637,6 +671,10 @@ impl TuiApp {
 
     pub fn task_lines(&self) -> &[String] {
         &self.task_lines
+    }
+
+    pub fn task_items(&self) -> &[TaskPanelItem] {
+        &self.task_items
     }
 
     pub fn preload_lines(&self) -> &[String] {
@@ -1187,7 +1225,7 @@ fn full_layout(area: Rect) -> FullLayout {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(1),
         ])
         .areas(area);
@@ -1241,11 +1279,8 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     let browser = browser_layout(layout.body);
     frame.render_widget(header_widget(app), layout.header);
     render_files_pane(frame, app, browser.files);
-    frame.render_widget(
-        preview_widget(app, preview, browser.preview),
-        browser.preview,
-    );
-    frame.render_widget(tasks_widget(app), layout.tasks);
+    render_preview_pane(frame, app, preview, browser.preview);
+    render_tasks_pane(frame, app, layout.tasks);
     frame.render_widget(status_widget(app), layout.status);
     if app.help_visible() {
         let area = centered_rect(frame.area(), 58, 22);
@@ -1595,9 +1630,17 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
 }
 
 fn render_files_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
-    frame.render_widget(files_widget(app, area), area);
+    let rows = files_visible_rows(area);
+    let visible_indices = app.filtered_indices();
+    let range = app.visible_entry_range(rows);
+    let selected_row = app.selected_index().and_then(|selected| {
+        visible_indices[range.clone()]
+            .iter()
+            .position(|index| *index == selected)
+    });
+    let mut table_state = TableState::new().with_selected(selected_row);
+    frame.render_stateful_widget(files_widget(app, area), area, &mut table_state);
 
-    let rows = area.height.saturating_sub(2) as usize;
     let total = app.filtered_entry_count();
     if total <= rows || rows == 0 {
         return;
@@ -1616,15 +1659,58 @@ fn render_files_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     );
 }
 
-fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
-    let rows = area.height.saturating_sub(2) as usize;
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileTableColumns {
+    widths: Vec<Constraint>,
+    name_width: usize,
+    show_mtime: bool,
+}
+
+fn files_visible_rows(area: Rect) -> usize {
+    usize::from(area.height.saturating_sub(2))
+}
+
+fn file_table_columns(inner_width: usize) -> FileTableColumns {
+    let show_mtime = inner_width >= 64;
+    let size_width = 11;
+    let mtime_width = 16;
+    let fixed_width = if show_mtime {
+        1 + 3 + size_width + mtime_width
+    } else {
+        1 + 3 + size_width
+    };
+    let column_count: usize = if show_mtime { 5 } else { 4 };
+    let spacing_width = column_count.saturating_sub(1);
+    let name_width = inner_width
+        .saturating_sub(fixed_width)
+        .saturating_sub(spacing_width)
+        .max(4);
+    let mut widths = vec![
+        Constraint::Length(1),
+        Constraint::Length(3),
+        Constraint::Min(name_width as u16),
+        Constraint::Length(size_width as u16),
+    ];
+    if show_mtime {
+        widths.push(Constraint::Length(mtime_width as u16));
+    }
+    FileTableColumns {
+        widths,
+        name_width,
+        show_mtime,
+    }
+}
+
+fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
+    let rows = files_visible_rows(area);
     let visible_indices = app.filtered_indices();
     let range = app.visible_entry_range(rows);
     let inner_width = area.width.saturating_sub(2) as usize;
-    let items: Vec<ListItem<'_>> = if range.is_empty() {
-        vec![ListItem::new(
+    let columns = file_table_columns(inner_width);
+    let items: Vec<Row<'_>> = if range.is_empty() {
+        vec![Row::new(vec![Cell::from(
             Line::raw(files_empty_message(app)).style(meta_value_style()),
-        )]
+        )])]
     } else {
         visible_indices[range.clone()]
             .iter()
@@ -1643,14 +1729,7 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
                 } else {
                     THEME_PANEL
                 };
-                let name_width = inner_width
-                    .saturating_sub(UnicodeWidthStr::width(cursor_marker))
-                    .saturating_sub(1)
-                    .saturating_sub(UnicodeWidthStr::width(mark_marker))
-                    .saturating_sub(2)
-                    .saturating_sub(UnicodeWidthStr::width(size.as_str()))
-                    .saturating_sub(2)
-                    .max(4);
+                let name_width = columns.name_width;
                 let name_value = format!("{}{}", entry.server_filename, suffix);
                 let name = if selected {
                     marquee_cells(name_value.as_str(), name_width, app.marquee_tick)
@@ -1696,16 +1775,24 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
                 } else {
                     Style::new().fg(THEME_DIM).bg(row_bg)
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(cursor_marker, cursor_style),
-                    Span::styled(" ", base_style),
-                    Span::styled(mark_marker, mark_style),
-                    Span::styled(" ", base_style),
-                    Span::styled(name, name_style),
-                    Span::styled("  ", base_style),
-                    Span::styled(size, size_style),
-                ]))
-                .style(base_style)
+                let mtime_style = if selected {
+                    Style::new().fg(THEME_TEXT).bg(row_bg)
+                } else {
+                    Style::new().fg(THEME_DIM).bg(row_bg)
+                };
+                let mut cells = vec![
+                    Cell::from(Line::from(Span::styled(cursor_marker, cursor_style))),
+                    Cell::from(Line::from(Span::styled(mark_marker, mark_style))),
+                    Cell::from(Line::from(Span::styled(name, name_style))),
+                    Cell::from(Line::from(Span::styled(size, size_style))),
+                ];
+                if columns.show_mtime {
+                    cells.push(Cell::from(Line::from(Span::styled(
+                        modified_time_label(entry.mtime),
+                        mtime_style,
+                    ))));
+                }
+                Row::new(cells).style(base_style)
             })
             .collect()
     };
@@ -1728,9 +1815,22 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
             app.entries().len()
         )
     };
-    List::new(items)
+    let widths = if range.is_empty() {
+        vec![Constraint::Min(1)]
+    } else {
+        columns.widths
+    };
+    Table::new(items, widths)
         .block(themed_block(title, app.focus() == PanelFocus::Files))
         .style(surface_style())
+        .column_spacing(1)
+        .highlight_spacing(HighlightSpacing::Never)
+        .row_highlight_style(
+            Style::new()
+                .fg(THEME_TEXT)
+                .bg(THEME_SELECTED)
+                .add_modifier(Modifier::BOLD),
+        )
 }
 
 fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> Paragraph<'_> {
@@ -1805,6 +1905,32 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> P
         .style(surface_style())
         .scroll((scroll, 0))
         .wrap(Wrap { trim: true })
+}
+
+fn render_preview_pane(
+    frame: &mut Frame<'_>,
+    app: &TuiApp,
+    preview: Option<PreviewBudget>,
+    area: Rect,
+) {
+    frame.render_widget(preview_widget(app, preview, area), area);
+
+    let rows = usize::from(inner_rect(area).height);
+    let total = app.preview_render_line_count();
+    if rows == 0 || total <= rows {
+        return;
+    }
+
+    let mut state = ScrollbarState::new(total)
+        .position(app.preview_scroll_offset)
+        .viewport_content_length(rows);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .thumb_style(Style::new().fg(THEME_ACCENT).bg(THEME_PANEL))
+            .track_style(Style::new().fg(THEME_BORDER).bg(THEME_PANEL)),
+        inner_rect(area),
+        &mut state,
+    );
 }
 
 fn preview_detail_lines(
@@ -1885,6 +2011,133 @@ fn push_plain_lines(
         source
             .iter()
             .map(|line| Line::raw(format!("{prefix}{line}")).style(style)),
+    );
+}
+
+fn render_tasks_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
+    if app.task_items.is_empty() {
+        frame.render_widget(tasks_widget(app), area);
+        return;
+    }
+
+    frame.render_widget(themed_block("Tasks", false), area);
+    let inner = inner_rect(area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let metrics_height = if inner.height >= 3 { 2 } else { 0 };
+    let table_height = inner.height.saturating_sub(metrics_height).max(1);
+    let [table_area, metrics_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(table_height), Constraint::Min(0)])
+        .areas(inner);
+
+    frame.render_widget(
+        task_table_widget(app, usize::from(table_height)),
+        table_area,
+    );
+    if metrics_height == 0 {
+        return;
+    }
+
+    let Some(task) = app.task_items.first() else {
+        return;
+    };
+    let [progress_area, speed_area] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Length(1)])
+        .areas(metrics_area);
+    render_task_progress(frame, task, progress_area);
+    render_task_speed(frame, task, speed_area);
+}
+
+fn task_table_widget(app: &TuiApp, rows: usize) -> Table<'_> {
+    let table_rows = app.task_items.iter().take(rows).map(|task| {
+        let state_style = match task.state.as_str() {
+            "failed" | "cancelled" => Style::new().fg(THEME_ERROR).bg(THEME_PANEL),
+            "done" => Style::new().fg(THEME_SUCCESS).bg(THEME_PANEL),
+            "running" => Style::new().fg(THEME_ACCENT).bg(THEME_PANEL),
+            _ => meta_value_style(),
+        };
+        Row::new(vec![
+            Cell::from(Line::raw(format!("#{}", task.id)).style(meta_value_style())),
+            Cell::from(Line::raw(task.kind.clone()).style(meta_value_style())),
+            Cell::from(Line::raw(task.state.clone()).style(state_style)),
+            Cell::from(Line::raw(task.label.clone()).style(content_style())),
+        ])
+        .style(content_style())
+    });
+    Table::new(
+        table_rows,
+        [
+            Constraint::Length(5),
+            Constraint::Length(8),
+            Constraint::Length(10),
+            Constraint::Min(12),
+        ],
+    )
+    .column_spacing(1)
+    .highlight_spacing(HighlightSpacing::Never)
+    .style(surface_style())
+}
+
+fn render_task_progress(frame: &mut Frame<'_>, task: &TaskPanelItem, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    if let Some(total) = task.bytes_total.filter(|total| *total > 0) {
+        let ratio = (task.bytes_done as f64 / total as f64).clamp(0.0, 1.0);
+        let label = format!(
+            "{}% {} / {}",
+            (ratio * 100.0).round() as u64,
+            bytes_label(task.bytes_done),
+            bytes_label(total)
+        );
+        frame.render_widget(
+            Gauge::default()
+                .ratio(ratio)
+                .label(label)
+                .style(content_style())
+                .gauge_style(Style::new().fg(THEME_ACCENT).bg(THEME_MARKED)),
+            area,
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::raw(format!(
+                "progress {} / ?",
+                bytes_label(task.bytes_done)
+            )))
+            .style(content_style()),
+            area,
+        );
+    }
+}
+
+fn render_task_speed(frame: &mut Frame<'_>, task: &TaskPanelItem, area: Rect) {
+    if area.is_empty() {
+        return;
+    }
+    let [label_area, spark_area] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(18), Constraint::Min(1)])
+        .areas(area);
+    frame.render_widget(
+        Paragraph::new(Line::raw(format!(
+            "{}/s",
+            bytes_label(task.speed_bytes_per_sec)
+        )))
+        .style(meta_value_style()),
+        label_area,
+    );
+    if task.speed_history.is_empty() {
+        return;
+    }
+    frame.render_widget(
+        Sparkline::default()
+            .data(task.speed_history.iter().copied())
+            .style(Style::new().fg(THEME_SUCCESS).bg(THEME_PANEL)),
+        spark_area,
     );
 }
 

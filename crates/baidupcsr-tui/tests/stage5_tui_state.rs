@@ -1,7 +1,7 @@
 use baidupcsr_pcs::FileEntry;
 use baidupcsr_tui::{
-    AppMode, DirectoryRequestState, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp,
-    TuiRuntimeEvent, DEFAULT_KEYMAP,
+    AppMode, DirectoryRequestState, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TaskPanelItem,
+    TuiApp, TuiRuntimeEvent, DEFAULT_KEYMAP,
 };
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
@@ -499,6 +499,29 @@ fn task_lines_update_bottom_panel_state() {
             "#2 download failed network".to_string(),
         ]
     );
+}
+
+#[test]
+fn task_items_track_recent_speed_history() {
+    let mut app = TuiApp::new("/remote");
+    let mut item = TaskPanelItem {
+        id: 7,
+        kind: "download".to_string(),
+        state: "running".to_string(),
+        bytes_done: 512,
+        bytes_total: Some(1024),
+        speed_bytes_per_sec: 128,
+        label: "movie.mkv".to_string(),
+        error: None,
+        speed_history: Vec::new(),
+    };
+
+    app.set_task_items(vec![item.clone()]);
+    item.bytes_done = 768;
+    item.speed_bytes_per_sec = 256;
+    app.set_task_items(vec![item]);
+
+    assert_eq!(app.task_items()[0].speed_history, vec![128, 256]);
 }
 
 #[test]

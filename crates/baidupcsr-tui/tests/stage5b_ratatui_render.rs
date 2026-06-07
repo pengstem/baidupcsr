@@ -1,5 +1,5 @@
 use baidupcsr_pcs::FileEntry;
-use baidupcsr_tui::{render_app, PreviewBudget, PreviewKind, TuiApp};
+use baidupcsr_tui::{render_app, PreviewBudget, PreviewKind, TaskPanelItem, TuiApp};
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 use std::convert::Infallible;
 
@@ -73,6 +73,16 @@ fn line_with_text_has_bg(buffer: &Buffer, text: &str, color: Color) -> bool {
     }
 
     false
+}
+
+fn column_has_fg(buffer: &Buffer, x: u16, color: Color) -> bool {
+    (buffer.area.top()..buffer.area.bottom()).any(|y| buffer[(x, y)].fg == color)
+}
+
+fn bottom_rows_have_fg(buffer: &Buffer, color: Color) -> bool {
+    let start = buffer.area.bottom().saturating_sub(5);
+    (start..buffer.area.bottom())
+        .any(|y| (buffer.area.left()..buffer.area.right()).any(|x| buffer[(x, y)].fg == color))
 }
 
 fn infallible<T>(result: Result<T, Infallible>) -> T {
@@ -375,6 +385,23 @@ fn ratatui_render_formats_large_sizes_and_timestamps_for_people() {
 }
 
 #[test]
+fn ratatui_render_keeps_file_table_size_and_mtime_columns_stable() {
+    let mut app = TuiApp::new("/videos");
+    app.set_entries(vec![file_with_mtime(
+        1,
+        "/videos/A.Knight.of.the.Seven.Kingdoms.S01E01.2160p.MAX.WEB-DL.mkv",
+        5_i64 * 1024 * 1024 * 1024,
+        1_700_000_000,
+    )]);
+
+    let screen = buffer_to_text(&draw_buffer(&app, None, 140, 24));
+
+    assert!(screen.contains("5.0 GiB"));
+    assert!(screen.contains("2023-11-14 22:13"));
+    assert!(screen.contains("A.Knight"));
+}
+
+#[test]
 fn ratatui_render_distinguishes_loading_empty_and_error_file_states() {
     let mut loading = TuiApp::new("/docs");
     loading.begin_directory_load("/docs");
@@ -435,6 +462,60 @@ fn ratatui_render_keeps_full_preview_content_and_truncates_task_lists() {
 
     let normal = draw_to_text(&app, None);
     assert!(normal.contains("+2 more"));
+}
+
+#[test]
+fn ratatui_render_draws_preview_scrollbar_for_long_preview_content() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/notes.md", 128, false)]);
+    app.finish_preview_text(
+        "notes.md",
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 128,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let buffer = draw_buffer(&app, None, 96, 18);
+
+    assert!(column_has_fg(&buffer, 94, Color::Rgb(94, 234, 212)));
+}
+
+#[test]
+fn ratatui_render_draws_structured_tasks_with_progress_and_speed_history() {
+    let mut app = TuiApp::new("/downloads");
+    let item = TaskPanelItem {
+        id: 7,
+        kind: "download".to_string(),
+        state: "running".to_string(),
+        bytes_done: 512 * 1024,
+        bytes_total: Some(1024 * 1024),
+        speed_bytes_per_sec: 1024 * 1024,
+        label: "movie.mkv".to_string(),
+        error: None,
+        speed_history: Vec::new(),
+    };
+    app.set_task_items(vec![item.clone()]);
+    app.set_task_items(vec![TaskPanelItem {
+        bytes_done: 768 * 1024,
+        speed_bytes_per_sec: 2 * 1024 * 1024,
+        ..item
+    }]);
+
+    let buffer = draw_buffer(&app, None, 96, 18);
+    let screen = buffer_to_text(&buffer);
+
+    assert!(screen.contains("#7"));
+    assert!(screen.contains("download"));
+    assert!(screen.contains("running"));
+    assert!(screen.contains("movie.mkv"));
+    assert!(screen.contains("75%"));
+    assert!(screen.contains("2.0 MiB/s"));
+    assert!(bottom_rows_have_fg(&buffer, Color::Rgb(52, 211, 153)));
 }
 
 #[test]

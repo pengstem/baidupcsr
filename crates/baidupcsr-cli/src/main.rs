@@ -1604,15 +1604,17 @@ impl BrowserRuntime {
     }
 
     fn refresh_task_panel(&self, app: &mut baidupcsr_tui::TuiApp) {
-        let lines = self
+        let snapshots: Vec<_> = self
             .task_manager
             .snapshots()
             .into_iter()
             .rev()
             .take(3)
-            .map(|task| task_summary_line(&task))
             .collect();
+        let lines = snapshots.iter().map(task_summary_line).collect();
+        let items = snapshots.iter().map(task_panel_item).collect();
         app.set_task_lines(lines);
+        app.set_task_items(items);
         app.set_background_tasks(self.inflight + self.task_manager.active_count());
     }
 
@@ -2465,6 +2467,32 @@ fn task_summary_line(task: &baidupcsr_core::TaskSnapshot) -> String {
         line.push_str(error);
     }
     line
+}
+
+fn task_panel_item(task: &baidupcsr_core::TaskSnapshot) -> baidupcsr_tui::TaskPanelItem {
+    let (kind, label) = match &task.kind {
+        baidupcsr_core::TaskKind::Download { local_path, .. } => {
+            ("download", file_name_label(local_path))
+        }
+        baidupcsr_core::TaskKind::LocalOpen { local_path, .. } => {
+            ("open", file_name_label(local_path))
+        }
+        baidupcsr_core::TaskKind::Upload { local_path, .. } => {
+            ("upload", file_name_label(local_path))
+        }
+        baidupcsr_core::TaskKind::RemoteOperation { label, .. } => ("remote", label.to_string()),
+    };
+    baidupcsr_tui::TaskPanelItem {
+        id: task.id.value(),
+        kind: kind.to_string(),
+        state: task_state_label(task.state).to_string(),
+        bytes_done: task.progress.bytes_done,
+        bytes_total: task.progress.bytes_total,
+        speed_bytes_per_sec: task.progress.speed_bytes_per_sec,
+        label,
+        error: task.error.clone(),
+        speed_history: Vec::new(),
+    }
 }
 
 fn file_name_label(path: &str) -> String {
