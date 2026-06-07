@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::env;
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PREVIEW_MEMORY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 const TEXT_PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
 const DOWNLOAD_CHUNK_BYTES: u64 = 1024 * 1024;
+const LOCAL_OPEN_MAX_BYTES: u64 = 100 * 1024 * 1024;
+const LOCAL_OPEN_TEMP_DIR_NAME: &str = "baidupcsr-open";
+const VIDEO_PREFETCH_CHUNKS: usize = 4;
 const ENV_DOWNLOAD_DIR: &str = "BAIDUPCSR_DOWNLOAD_DIR";
 const VIDEO_UPSTREAM_REDACTED_URL: &str = "https://pcs.baidu.com/rest/2.0/pcs/file";
 
@@ -111,6 +115,12 @@ struct ActiveVideoPreview {
     server: baidupcsr_preview::VideoLoopbackServer,
     player: Child,
     player_log: Arc<Mutex<baidupcsr_preview::PlayerLogRing>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferWorkerMode {
+    Download,
+    LocalOpen,
 }
 
 enum TransferTaskEvent {
@@ -426,7 +436,7 @@ impl BrowserRuntime {
                 self.prefetch_visible_page(app);
             }
             baidupcsr_tui::KeyAction::Preview => {
-                self.start_video_preview(app);
+                self.start_preview_action(app);
             }
             baidupcsr_tui::KeyAction::Download => {
                 self.start_download_task(app);
@@ -805,7 +815,7 @@ impl BrowserRuntime {
                 app.finish_preview_metadata(
                     entry.server_filename.as_str(),
                     tui_preview_kind(plan.kind),
-                    plan.reason,
+                    metadata_preview_reason(&entry, plan.reason),
                     budget,
                 );
             }
@@ -1033,6 +1043,7 @@ impl BrowserRuntime {
                 account_bduss,
                 cancellation,
                 tx,
+                mode: TransferWorkerMode::Download,
             });
         });
         app.set_notice(format!(
@@ -1083,21 +1094,36 @@ impl BrowserRuntime {
                         .update_progress(id, bytes_done, elapsed_seconds);
                 }
                 TransferTaskEvent::Completed { id } => {
+                    let task_kind = self.task_kind_for_id(id);
                     let _ = self.task_manager.complete(id);
                     self.task_cancellations.remove(&id);
-                    app.set_notice(format!("download_complete: #{}", id.value()));
-                    let preferred = selected_path_for_refresh(app);
-                    self.start_directory_load(app, app.path().to_string(), preferred);
+                    if matches!(task_kind, Some(baidupcsr_core::TaskKind::LocalOpen { .. })) {
+                        app.set_notice(format!("open_complete: #{}", id.value()));
+                    } else {
+                        app.set_notice(format!("download_complete: #{}", id.value()));
+                        let preferred = selected_path_for_refresh(app);
+                        self.start_directory_load(app, app.path().to_string(), preferred);
+                    }
                 }
                 TransferTaskEvent::Failed { id, message } => {
+                    let task_kind = self.task_kind_for_id(id);
                     let _ = self.task_manager.fail(id, message.as_str());
                     self.task_cancellations.remove(&id);
-                    app.set_notice(format!("download_failed: #{} {}", id.value(), message));
+                    if matches!(task_kind, Some(baidupcsr_core::TaskKind::LocalOpen { .. })) {
+                        app.set_notice(format!("open_failed: #{} {}", id.value(), message));
+                    } else {
+                        app.set_notice(format!("download_failed: #{} {}", id.value(), message));
+                    }
                 }
                 TransferTaskEvent::Cancelled { id, message } => {
+                    let task_kind = self.task_kind_for_id(id);
                     let _ = self.task_manager.cancelled(id, message.as_str());
                     self.task_cancellations.remove(&id);
-                    app.set_notice(format!("download_cancelled: #{}", id.value()));
+                    if matches!(task_kind, Some(baidupcsr_core::TaskKind::LocalOpen { .. })) {
+                        app.set_notice(format!("open_cancelled: #{}", id.value()));
+                    } else {
+                        app.set_notice(format!("download_cancelled: #{}", id.value()));
+                    }
                 }
                 TransferTaskEvent::RemoteCompleted {
                     id,
@@ -1140,6 +1166,14 @@ impl BrowserRuntime {
         }
     }
 
+    fn task_kind_for_id(&self, id: baidupcsr_core::TaskId) -> Option<baidupcsr_core::TaskKind> {
+        self.task_manager
+            .snapshots()
+            .into_iter()
+            .find(|task| task.id == id)
+            .map(|task| task.kind)
+    }
+
     fn refresh_related_dirs(&mut self, app: &mut baidupcsr_tui::TuiApp, dirs: Vec<String>) {
         let Some(client) = self.client.clone() else {
             return;
@@ -1157,6 +1191,88 @@ impl BrowserRuntime {
                 self.spawn_directory_load(client.clone(), dir, generation);
             }
         }
+    }
+
+    fn start_preview_action(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        let Some(entry) = app.selected_entry().cloned() else {
+            app.set_notice("preview: no selected entry");
+            return;
+        };
+        if is_video_entry(&entry) {
+            self.start_video_preview(app);
+        } else {
+            self.start_local_open_preview(app, entry);
+        }
+    }
+
+    fn start_local_open_preview(
+        &mut self,
+        app: &mut baidupcsr_tui::TuiApp,
+        entry: baidupcsr_pcs::FileEntry,
+    ) {
+        if entry.is_dir {
+            app.set_notice("open: directories cannot be opened as local files");
+            return;
+        }
+        let size = nonnegative_size(entry.size);
+        if !is_local_open_size_allowed(size) {
+            app.set_notice(format!(
+                "open_skipped: {} exceeds 100MiB limit",
+                entry.server_filename
+            ));
+            return;
+        }
+        let Some(client) = self.client.clone() else {
+            app.set_notice("open_error: client unavailable");
+            return;
+        };
+        let Some(account_bduss) = self.account_bduss.clone() else {
+            app.set_notice("open_auth_error: missing BDUSS");
+            return;
+        };
+        if self.account_uid == 0 {
+            app.set_notice("open_auth_error: missing uid");
+            return;
+        }
+
+        let target = local_open_target_path(
+            env::temp_dir().join(LOCAL_OPEN_TEMP_DIR_NAME).as_path(),
+            self.account_uid,
+            &entry,
+            size,
+        );
+        let target_label = file_name_label(target.to_string_lossy().as_ref());
+        let id = self.task_manager.enqueue_local_open(
+            entry.path.as_str(),
+            target.to_string_lossy().as_ref(),
+            size,
+        );
+        if self.task_manager.start(id).is_err() {
+            app.set_notice("open_error: failed to start task");
+            return;
+        }
+
+        let cancellation = Arc::new(AtomicBool::new(false));
+        self.task_cancellations
+            .insert(id, Arc::clone(&cancellation));
+        let tx = self.task_tx.clone();
+        let remote_path = entry.path;
+        let account_uid = self.account_uid;
+        thread::spawn(move || {
+            run_download_worker(DownloadWorker {
+                id,
+                client,
+                remote_path,
+                target,
+                size,
+                account_uid,
+                account_bduss,
+                cancellation,
+                tx,
+                mode: TransferWorkerMode::LocalOpen,
+            });
+        });
+        app.set_notice(format!("open_started: #{} {}", id.value(), target_label));
     }
 
     fn start_video_preview(&mut self, app: &mut baidupcsr_tui::TuiApp) {
@@ -1250,7 +1366,9 @@ impl BrowserRuntime {
             },
             token,
             budget,
-            baidupcsr_preview::VideoGatewayPolicy { prefetch_chunks: 2 },
+            baidupcsr_preview::VideoGatewayPolicy {
+                prefetch_chunks: VIDEO_PREFETCH_CHUNKS,
+            },
             move |range| {
                 if cancellation_epoch.load(Ordering::Acquire) != token_epoch {
                     return Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession);
@@ -1631,12 +1749,19 @@ struct DownloadWorker {
     account_bduss: String,
     cancellation: Arc<AtomicBool>,
     tx: mpsc::Sender<TransferTaskEvent>,
+    mode: TransferWorkerMode,
 }
 
 enum DownloadWorkerResult {
     Completed,
     Cancelled(String),
     Failed(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExistingTargetPolicy {
+    FailIfExists,
+    ReuseIfComplete,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -1649,7 +1774,10 @@ enum DlinkRangeAttempt {
 fn run_download_worker(worker: DownloadWorker) {
     let id = worker.id;
     let tx = worker.tx.clone();
-    let result = download_worker_body(worker);
+    let result = match worker.mode {
+        TransferWorkerMode::Download => download_worker_body(&worker),
+        TransferWorkerMode::LocalOpen => local_open_worker_body(&worker),
+    };
     let event = match result {
         DownloadWorkerResult::Completed => TransferTaskEvent::Completed { id },
         DownloadWorkerResult::Cancelled(message) => TransferTaskEvent::Cancelled { id, message },
@@ -1658,12 +1786,44 @@ fn run_download_worker(worker: DownloadWorker) {
     let _ = tx.send(event);
 }
 
-fn download_worker_body(worker: DownloadWorker) -> DownloadWorkerResult {
+fn download_worker_body(worker: &DownloadWorker) -> DownloadWorkerResult {
+    download_remote_file(worker, ExistingTargetPolicy::FailIfExists)
+}
+
+fn local_open_worker_body(worker: &DownloadWorker) -> DownloadWorkerResult {
+    match download_remote_file(worker, ExistingTargetPolicy::ReuseIfComplete) {
+        DownloadWorkerResult::Completed => match spawn_local_file_opener(&worker.target) {
+            Ok(()) => DownloadWorkerResult::Completed,
+            Err(message) => DownloadWorkerResult::Failed(message),
+        },
+        result => result,
+    }
+}
+
+fn download_remote_file(
+    worker: &DownloadWorker,
+    existing_policy: ExistingTargetPolicy,
+) -> DownloadWorkerResult {
     if worker.cancellation.load(Ordering::Acquire) {
         return DownloadWorkerResult::Cancelled("user cancelled".to_string());
     }
-    if worker.target.exists() {
-        return DownloadWorkerResult::Failed("local_exists".to_string());
+    match existing_policy {
+        ExistingTargetPolicy::FailIfExists if worker.target.exists() => {
+            return DownloadWorkerResult::Failed("local_exists".to_string());
+        }
+        ExistingTargetPolicy::ReuseIfComplete => match fs::metadata(&worker.target) {
+            Ok(metadata) if metadata.len() == worker.size => {
+                return DownloadWorkerResult::Completed;
+            }
+            Ok(_) => {
+                if let Err(err) = fs::remove_file(&worker.target) {
+                    return DownloadWorkerResult::Failed(io_error_label(&err));
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return DownloadWorkerResult::Failed(io_error_label(&err)),
+        },
+        _ => {}
     }
     if let Some(parent) = worker.target.parent() {
         if let Err(err) = fs::create_dir_all(parent) {
@@ -1671,11 +1831,17 @@ fn download_worker_body(worker: DownloadWorker) -> DownloadWorkerResult {
         }
     }
     if worker.size == 0 {
-        return match OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&worker.target)
-        {
+        let mut options = OpenOptions::new();
+        options.write(true);
+        match existing_policy {
+            ExistingTargetPolicy::FailIfExists => {
+                options.create_new(true);
+            }
+            ExistingTargetPolicy::ReuseIfComplete => {
+                options.create(true).truncate(true);
+            }
+        }
+        return match options.open(&worker.target) {
             Ok(_) => DownloadWorkerResult::Completed,
             Err(err) => DownloadWorkerResult::Failed(io_error_label(&err)),
         };
@@ -1688,7 +1854,17 @@ fn download_worker_body(worker: DownloadWorker) -> DownloadWorkerResult {
         Err(err) => return DownloadWorkerResult::Failed(io_error_label(&err)),
     };
     if offset > worker.size {
-        return DownloadWorkerResult::Failed("partial_larger_than_remote".to_string());
+        match existing_policy {
+            ExistingTargetPolicy::FailIfExists => {
+                return DownloadWorkerResult::Failed("partial_larger_than_remote".to_string());
+            }
+            ExistingTargetPolicy::ReuseIfComplete => {
+                if let Err(err) = fs::remove_file(&partial) {
+                    return DownloadWorkerResult::Failed(io_error_label(&err));
+                }
+                offset = 0;
+            }
+        }
     }
 
     let urls = match worker.client.locate_download_urls(
@@ -1882,6 +2058,14 @@ fn image_preview_lines(metadata: baidupcsr_preview::ImagePreviewMetadata) -> Vec
     ]
 }
 
+fn metadata_preview_reason(entry: &baidupcsr_pcs::FileEntry, reason: String) -> String {
+    if entry.is_dir || is_video_entry(entry) {
+        reason
+    } else {
+        format!("{reason}; press p to open local copy (<100MiB)")
+    }
+}
+
 fn program_available(program: &str) -> bool {
     if program.contains(std::path::MAIN_SEPARATOR) {
         return Path::new(program).is_file();
@@ -1909,6 +2093,88 @@ fn partial_download_path(target: &Path) -> PathBuf {
         .to_string();
     file_name.push_str(".part");
     target.with_file_name(file_name)
+}
+
+fn local_open_target_path(
+    root: &Path,
+    account_uid: u64,
+    entry: &baidupcsr_pcs::FileEntry,
+    size: u64,
+) -> PathBuf {
+    root.join(account_uid.to_string()).join(format!(
+        "{}-{}-{}-{}",
+        entry.fs_id,
+        entry.mtime,
+        size,
+        sanitize_download_file_name(entry.server_filename.as_str())
+    ))
+}
+
+fn is_local_open_size_allowed(size: u64) -> bool {
+    size < LOCAL_OPEN_MAX_BYTES
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LocalOpenCommand {
+    program: &'static str,
+    args: Vec<OsString>,
+}
+
+fn spawn_local_file_opener(path: &Path) -> Result<(), String> {
+    let mut last_error = "opener_unavailable".to_string();
+    for command in local_open_command_candidates(path) {
+        match Command::new(command.program)
+            .args(command.args.iter())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(_) => return Ok(()),
+            Err(err) => last_error = io_error_label(&err),
+        }
+    }
+    Err(format!("open_failed: {last_error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn local_open_command_candidates(path: &Path) -> Vec<LocalOpenCommand> {
+    vec![
+        LocalOpenCommand {
+            program: "xdg-open",
+            args: vec![path.as_os_str().to_os_string()],
+        },
+        LocalOpenCommand {
+            program: "gio",
+            args: vec![OsString::from("open"), path.as_os_str().to_os_string()],
+        },
+    ]
+}
+
+#[cfg(target_os = "macos")]
+fn local_open_command_candidates(path: &Path) -> Vec<LocalOpenCommand> {
+    vec![LocalOpenCommand {
+        program: "open",
+        args: vec![path.as_os_str().to_os_string()],
+    }]
+}
+
+#[cfg(target_os = "windows")]
+fn local_open_command_candidates(path: &Path) -> Vec<LocalOpenCommand> {
+    vec![LocalOpenCommand {
+        program: "cmd",
+        args: vec![
+            OsString::from("/C"),
+            OsString::from("start"),
+            OsString::new(),
+            path.as_os_str().to_os_string(),
+        ],
+    }]
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn local_open_command_candidates(_path: &Path) -> Vec<LocalOpenCommand> {
+    Vec::new()
 }
 
 fn selected_path_for_refresh(app: &baidupcsr_tui::TuiApp) -> Option<String> {
@@ -2171,6 +2437,9 @@ fn task_summary_line(task: &baidupcsr_core::TaskSnapshot) -> String {
     let (kind, local_name) = match &task.kind {
         baidupcsr_core::TaskKind::Download { local_path, .. } => {
             ("download", file_name_label(local_path))
+        }
+        baidupcsr_core::TaskKind::LocalOpen { local_path, .. } => {
+            ("open", file_name_label(local_path))
         }
         baidupcsr_core::TaskKind::Upload { local_path, .. } => {
             ("upload", file_name_label(local_path))
@@ -2537,11 +2806,12 @@ mod tests {
 
     use super::{
         active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
-        download_target_path, fetch_first_successful_dlink_range, is_video_entry,
-        list_remote_directory, pan_user_agent_for_config, parse_remote_command,
+        download_target_path, fetch_first_successful_dlink_range, is_local_open_size_allowed,
+        is_video_entry, list_remote_directory, local_open_command_candidates,
+        local_open_target_path, pan_user_agent_for_config, parse_remote_command,
         partial_download_path, persist_workdir_if_active, preview_key_for_entry,
         selected_path_for_refresh, task_summary_line, tui_preview_kind, video_budget_from_config,
-        DlinkRangeAttempt, ParsedRemoteCommand,
+        DlinkRangeAttempt, ParsedRemoteCommand, LOCAL_OPEN_MAX_BYTES,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -2748,6 +3018,40 @@ mod tests {
     }
 
     #[test]
+    fn local_open_target_uses_file_identity_under_temp_root() {
+        let mut entry = file(42, 1024);
+        entry.server_filename = "../cover/image.png".to_string();
+        entry.mtime = 99;
+
+        let target = local_open_target_path(Path::new("/tmp/baidupcsr-open"), 7, &entry, 1024);
+
+        assert_eq!(
+            target,
+            Path::new("/tmp/baidupcsr-open").join("7/42-99-1024-.._cover_image.png")
+        );
+    }
+
+    #[test]
+    fn local_open_rejects_files_at_or_above_100_mib() {
+        assert!(is_local_open_size_allowed(LOCAL_OPEN_MAX_BYTES - 1));
+        assert!(!is_local_open_size_allowed(LOCAL_OPEN_MAX_BYTES));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn linux_local_open_candidates_try_xdg_open_then_gio_open() {
+        let commands = local_open_command_candidates(Path::new("/tmp/baidupcsr-open/photo.jpg"));
+
+        assert_eq!(commands[0].program, "xdg-open");
+        assert_eq!(
+            commands[0].args[0].to_string_lossy(),
+            "/tmp/baidupcsr-open/photo.jpg"
+        );
+        assert_eq!(commands[1].program, "gio");
+        assert_eq!(commands[1].args[0].to_string_lossy(), "open");
+    }
+
+    #[test]
     fn task_summary_uses_local_name_without_remote_path() -> Result<(), baidupcsr_core::TaskError> {
         let mut manager = baidupcsr_core::TaskManager::new();
         let id = manager.enqueue_download("/private/remote/secret.txt", "/tmp/out.txt", 1024);
@@ -2758,6 +3062,26 @@ mod tests {
         let line = task_summary_line(&task);
 
         assert!(line.contains("#1 download running 512/1024 out.txt"));
+        assert!(!line.contains("/private/remote"));
+        Ok(())
+    }
+
+    #[test]
+    fn task_summary_labels_local_open_without_remote_path() -> Result<(), baidupcsr_core::TaskError>
+    {
+        let mut manager = baidupcsr_core::TaskManager::new();
+        let id = manager.enqueue_local_open(
+            "/private/remote/photo.jpg",
+            "/tmp/baidupcsr-open/photo.jpg",
+            1024,
+        );
+        manager.start(id)?;
+        manager.update_progress(id, 1024, 1)?;
+        let task = manager.snapshots().remove(0);
+
+        let line = task_summary_line(&task);
+
+        assert!(line.contains("#1 open running 1024/1024 photo.jpg"));
         assert!(!line.contains("/private/remote"));
         Ok(())
     }

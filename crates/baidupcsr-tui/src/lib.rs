@@ -44,6 +44,8 @@ const THEME_ERROR: Color = Color::Rgb(248, 113, 113);
 const PAGE_STEP: usize = 10;
 const HALF_PAGE_STEP: usize = 5;
 const MOUSE_WHEEL_STEP: usize = 3;
+const DOUBLE_CLICK_TICKS: u64 = 5;
+const MARQUEE_EDGE_PAUSE_TICKS: u64 = 8;
 const HEADER_BRAND: &str = "baidupcsr";
 const HEADER_GAP: &str = "  ";
 const BREADCRUMB_SEPARATOR: &str = " > ";
@@ -67,6 +69,12 @@ pub enum PanelFocus {
 enum ConfirmKind {
     Operation,
     Quit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileClick {
+    index: usize,
+    tick: u64,
 }
 
 impl AppMode {
@@ -248,6 +256,9 @@ pub struct TuiApp {
     help_visible: bool,
     pending_g: bool,
     scroll_offset: usize,
+    preview_scroll_offset: usize,
+    marquee_tick: u64,
+    last_file_click: Option<FileClick>,
     focus: PanelFocus,
 }
 
@@ -276,6 +287,9 @@ impl TuiApp {
             help_visible: false,
             pending_g: false,
             scroll_offset: 0,
+            preview_scroll_offset: 0,
+            marquee_tick: 0,
+            last_file_click: None,
             focus: PanelFocus::Files,
         }
     }
@@ -393,12 +407,14 @@ impl TuiApp {
         self.preview_title = title.to_string();
         self.preview_lines = vec![message.to_string()];
         self.preview_budget = default_preview_budget();
+        self.preview_scroll_offset = 0;
     }
 
     pub fn finish_preview_text(&mut self, title: &str, content: &str, budget: PreviewBudget) {
         self.preview_title = title.to_string();
         self.preview_lines = content.lines().map(str::to_string).collect();
         self.preview_budget = budget;
+        self.preview_scroll_offset = 0;
     }
 
     pub fn finish_preview_metadata(
@@ -411,12 +427,14 @@ impl TuiApp {
         self.preview_title = title.to_string();
         self.preview_lines = vec![format!("metadata: {}", reason.into())];
         self.preview_budget = PreviewBudget { kind, ..budget };
+        self.preview_scroll_offset = 0;
     }
 
     pub fn finish_preview_error(&mut self, title: &str, message: impl Into<String>) {
         self.preview_title = title.to_string();
         self.preview_lines = vec![format!("preview_error: {}", message.into())];
         self.preview_budget = default_preview_budget();
+        self.preview_scroll_offset = 0;
     }
 
     pub fn finish_preview_video(&mut self, title: &str, lines: Vec<String>, budget: PreviewBudget) {
@@ -426,6 +444,7 @@ impl TuiApp {
             kind: PreviewKind::Video,
             ..budget
         };
+        self.preview_scroll_offset = 0;
     }
 
     pub fn finish_preview_image_metadata(
@@ -440,6 +459,7 @@ impl TuiApp {
             kind: PreviewKind::Image,
             ..budget
         };
+        self.preview_scroll_offset = 0;
     }
 
     pub fn handle_key(&mut self, event: KeyEvent) {
@@ -457,49 +477,93 @@ impl TuiApp {
             return None;
         }
 
+        let full = full_layout(input.area);
+        let layout = browser_layout(full.body);
+        let files_inner = inner_rect(layout.files);
+        let preview_inner = inner_rect(layout.preview);
+
         match input.kind {
             MouseInputKind::ScrollUp => {
-                let layout = tui_layout(input.area);
-                let rows = usize::from(inner_rect(layout.files).height);
-                self.scroll_view_by(-(MOUSE_WHEEL_STEP as isize), rows)
-                    .then_some(TuiRuntimeEvent::Action(KeyAction::Select))
+                if rect_contains(files_inner, input.column, input.row) {
+                    self.focus = PanelFocus::Files;
+                    return self
+                        .scroll_files_by_wheel(-(MOUSE_WHEEL_STEP as isize))
+                        .then_some(TuiRuntimeEvent::Action(KeyAction::Select));
+                }
+                if rect_contains(preview_inner, input.column, input.row) {
+                    self.focus = PanelFocus::Preview;
+                    self.scroll_preview_by(
+                        -(MOUSE_WHEEL_STEP as isize),
+                        usize::from(preview_inner.height),
+                    );
+                }
+                None
             }
             MouseInputKind::ScrollDown => {
-                let layout = tui_layout(input.area);
-                let rows = usize::from(inner_rect(layout.files).height);
-                self.scroll_view_by(MOUSE_WHEEL_STEP as isize, rows)
-                    .then_some(TuiRuntimeEvent::Action(KeyAction::Select))
+                if rect_contains(files_inner, input.column, input.row) {
+                    self.focus = PanelFocus::Files;
+                    return self
+                        .scroll_files_by_wheel(MOUSE_WHEEL_STEP as isize)
+                        .then_some(TuiRuntimeEvent::Action(KeyAction::Select));
+                }
+                if rect_contains(preview_inner, input.column, input.row) {
+                    self.focus = PanelFocus::Preview;
+                    self.scroll_preview_by(
+                        MOUSE_WHEEL_STEP as isize,
+                        usize::from(preview_inner.height),
+                    );
+                }
+                None
             }
             MouseInputKind::LeftClick | MouseInputKind::DoubleClick => {
-                let layout = full_layout(input.area);
                 if let Some(path) =
-                    breadcrumb_path_at(self.path(), layout.header, input.column, input.row)
+                    breadcrumb_path_at(self.path(), full.header, input.column, input.row)
                 {
                     return (path.as_str() != self.path.as_str())
                         .then_some(TuiRuntimeEvent::PathRequested(path));
                 }
 
-                let layout = browser_layout(layout.body);
-                let files_inner = inner_rect(layout.files);
+                if rect_contains(preview_inner, input.column, input.row) {
+                    self.focus = PanelFocus::Preview;
+                    return None;
+                }
+
                 if !rect_contains(files_inner, input.column, input.row) {
                     return None;
                 }
+                self.focus = PanelFocus::Files;
 
                 let row_offset = usize::from(input.row.saturating_sub(files_inner.y));
                 let visible_indices = self.filtered_indices();
                 let range = self.visible_entry_range(usize::from(files_inner.height));
                 let visible_index = range.start.saturating_add(row_offset);
                 let index = visible_indices.get(visible_index).copied()?;
-                self.selected_index = Some(index);
-                if input.kind == MouseInputKind::DoubleClick
-                    && self.selected_entry().is_some_and(|entry| entry.is_dir)
-                {
-                    Some(TuiRuntimeEvent::Action(KeyAction::Enter))
+                let is_double_click = input.kind == MouseInputKind::DoubleClick
+                    || self.last_file_click.is_some_and(|click| {
+                        click.index == index
+                            && self.marquee_tick.saturating_sub(click.tick) <= DOUBLE_CLICK_TICKS
+                    });
+                self.select_index(Some(index));
+                if is_double_click {
+                    self.last_file_click = None;
+                    if self.selected_entry().is_some_and(|entry| entry.is_dir) {
+                        Some(TuiRuntimeEvent::Action(KeyAction::Enter))
+                    } else {
+                        Some(TuiRuntimeEvent::Action(KeyAction::Preview))
+                    }
                 } else {
+                    self.last_file_click = Some(FileClick {
+                        index,
+                        tick: self.marquee_tick,
+                    });
                     Some(TuiRuntimeEvent::Action(KeyAction::Select))
                 }
             }
         }
+    }
+
+    pub fn advance_tick(&mut self) {
+        self.marquee_tick = self.marquee_tick.wrapping_add(1);
     }
 
     pub fn handle_key_event(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
@@ -603,6 +667,10 @@ impl TuiApp {
         self.preview_budget
     }
 
+    pub const fn preview_scroll_offset(&self) -> usize {
+        self.preview_scroll_offset
+    }
+
     pub const fn cache_source(&self) -> CacheSource {
         self.cache_source
     }
@@ -671,7 +739,7 @@ impl TuiApp {
         let Some(index) = indices.first().copied() else {
             return;
         };
-        self.selected_index = Some(index);
+        self.select_index(Some(index));
         self.scroll_offset = 0;
     }
 
@@ -680,7 +748,7 @@ impl TuiApp {
         let Some(index) = indices.last().copied() else {
             return;
         };
-        self.selected_index = Some(index);
+        self.select_index(Some(index));
         self.scroll_offset = indices.len().saturating_sub(1);
     }
 
@@ -695,44 +763,58 @@ impl TuiApp {
         } else {
             position.saturating_add(delta as usize).min(last)
         };
-        self.selected_index = indices.get(next).copied();
+        self.select_index(indices.get(next).copied());
         self.scroll_offset = next.saturating_sub(1);
     }
 
-    fn scroll_view_by(&mut self, delta: isize, rows: usize) -> bool {
-        let indices = self.filtered_indices();
-        let total = indices.len();
-        if total == 0 || rows == 0 {
-            self.scroll_offset = 0;
-            self.selected_index = None;
-            return false;
-        }
+    fn scroll_files_by_wheel(&mut self, delta: isize) -> bool {
         let old_offset = self.scroll_offset;
         let old_selection = self.selected_index;
-        let rows = rows.min(total);
-        let last_start = total.saturating_sub(rows);
-        self.scroll_offset = if delta.is_negative() {
-            self.scroll_offset.saturating_sub(delta.unsigned_abs())
+        self.move_visible_by(delta);
+        old_offset != self.scroll_offset || old_selection != self.selected_index
+    }
+
+    fn scroll_preview_by(&mut self, delta: isize, rows: usize) -> bool {
+        let old_offset = self.preview_scroll_offset;
+        let total = self.preview_render_line_count();
+        if total == 0 || rows == 0 {
+            self.preview_scroll_offset = 0;
+            return old_offset != self.preview_scroll_offset;
+        }
+        let last_start = total.saturating_sub(rows.min(total));
+        self.preview_scroll_offset = if delta.is_negative() {
+            self.preview_scroll_offset
+                .saturating_sub(delta.unsigned_abs())
         } else {
-            self.scroll_offset
+            self.preview_scroll_offset
                 .saturating_add(delta as usize)
                 .min(last_start)
         };
-        let range = visible_range_from_offset(total, self.scroll_offset, rows);
-        let selected_position = self.selected_visible_position(&indices);
-        let selection_outside_view = match selected_position {
-            Some(position) => !range.contains(&position),
-            None => true,
-        };
-        if selection_outside_view {
-            let anchor = if delta.is_negative() {
-                range.end.saturating_sub(1)
-            } else {
-                range.start
-            };
-            self.selected_index = indices.get(anchor).copied();
+        old_offset != self.preview_scroll_offset
+    }
+
+    fn select_index(&mut self, index: Option<usize>) {
+        if self.selected_index != index {
+            self.preview_scroll_offset = 0;
+            self.marquee_tick = 0;
+            self.last_file_click = None;
         }
-        old_offset != self.scroll_offset || old_selection != self.selected_index
+        self.selected_index = index;
+    }
+
+    fn preview_render_line_count(&self) -> usize {
+        let detail_count = if self.selected_entry().is_some() {
+            8
+        } else {
+            3
+        };
+        if self.preview_budget.kind == PreviewKind::Text && !self.preview_lines.is_empty() {
+            return 4 + 2 + self.preview_lines.len();
+        }
+        if self.preview_budget.kind == PreviewKind::Video && !self.preview_lines.is_empty() {
+            return detail_count + 3 + self.preview_lines.len();
+        }
+        detail_count + 2 + self.preview_lines.len()
     }
 
     fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
@@ -958,9 +1040,11 @@ impl TuiApp {
     ) {
         sort_entries(&mut entries);
         self.entries = entries;
-        self.selected_index = preferred_selection_path
+        self.last_file_click = None;
+        let selected_index = preferred_selection_path
             .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
             .or_else(|| (!self.entries.is_empty()).then_some(0));
+        self.select_index(selected_index);
         self.sync_selection_to_filter();
     }
 
@@ -990,7 +1074,7 @@ impl TuiApp {
     fn sync_selection_to_filter(&mut self) {
         let indices = self.filtered_indices();
         if indices.is_empty() {
-            self.selected_index = None;
+            self.select_index(None);
             self.scroll_offset = 0;
             return;
         }
@@ -998,7 +1082,7 @@ impl TuiApp {
             self.scroll_offset = position.saturating_sub(1);
             return;
         }
-        self.selected_index = indices.first().copied();
+        self.select_index(indices.first().copied());
         self.scroll_offset = 0;
     }
 
@@ -1137,10 +1221,6 @@ fn browser_layout(body: Rect) -> TuiLayout {
     }
 }
 
-fn tui_layout(area: Rect) -> TuiLayout {
-    browser_layout(full_layout(area).body)
-}
-
 fn inner_rect(area: Rect) -> Rect {
     Rect {
         x: area.x.saturating_add(1),
@@ -1161,7 +1241,10 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     let browser = browser_layout(layout.body);
     frame.render_widget(header_widget(app), layout.header);
     render_files_pane(frame, app, browser.files);
-    frame.render_widget(preview_widget(app, preview), browser.preview);
+    frame.render_widget(
+        preview_widget(app, preview, browser.preview),
+        browser.preview,
+    );
     frame.render_widget(tasks_widget(app), layout.tasks);
     frame.render_widget(status_widget(app), layout.status);
     if app.help_visible() {
@@ -1202,6 +1285,7 @@ where
     F: FnMut(&mut TuiApp, TuiRuntimeEvent),
 {
     loop {
+        app.advance_tick();
         handler(app, TuiRuntimeEvent::Tick);
         terminal.draw(|frame| {
             render_app(frame, app, None);
@@ -1350,6 +1434,13 @@ fn themed_block(title: impl Into<String>, active: bool) -> Block<'static> {
         .title(Line::from(Span::styled(title.into(), title_style(active))))
 }
 
+fn detail_value_width(inner_width: usize, label: &str) -> usize {
+    inner_width
+        .saturating_sub(UnicodeWidthStr::width(label))
+        .saturating_sub(1)
+        .max(1)
+}
+
 fn detail_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::styled(label, meta_label_style()),
@@ -1386,11 +1477,12 @@ fn help_widget() -> Paragraph<'static> {
         content_line("  ? help             Esc close/cancel"),
         content_line("  space mark         r refresh"),
         content_line("  d download         x cancel task"),
-        content_line("  p preview video    q quit"),
+        content_line("  p preview/open     q quit"),
         content_line("  y/n                confirm / cancel"),
         Line::raw("").style(surface_style()),
         help_section_line("Mouse"),
-        content_line("  file click selects wheel scrolls"),
+        content_line("  file click selects double-click opens"),
+        content_line("  wheel follows mouse pane"),
         content_line("  path click jumps"),
     ])
     .block(themed_block("Shortcuts", true))
@@ -1559,8 +1651,12 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
                     .saturating_sub(UnicodeWidthStr::width(size.as_str()))
                     .saturating_sub(2)
                     .max(4);
-                let name =
-                    truncate_cells(&format!("{}{}", entry.server_filename, suffix), name_width);
+                let name_value = format!("{}{}", entry.server_filename, suffix);
+                let name = if selected {
+                    marquee_cells(name_value.as_str(), name_width, app.marquee_tick)
+                } else {
+                    truncate_cells(name_value.as_str(), name_width)
+                };
                 let base_style = if selected {
                     Style::new()
                         .fg(THEME_TEXT)
@@ -1637,7 +1733,9 @@ fn files_widget(app: &TuiApp, area: Rect) -> List<'_> {
         .style(surface_style())
 }
 
-fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_> {
+fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> Paragraph<'_> {
+    let inner = inner_rect(area);
+    let inner_width = usize::from(inner.width);
     let selected = app.selected_entry();
     let title = if app.preview_title.is_empty() {
         selected
@@ -1650,17 +1748,26 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
     let budget = preview.unwrap_or(app.preview_budget);
 
     let mut lines = selected
-        .map(|entry| preview_detail_lines(entry, app.cache_source(), budget))
+        .map(|entry| {
+            preview_detail_lines(
+                entry,
+                app.cache_source(),
+                budget,
+                inner_width,
+                app.marquee_tick,
+            )
+        })
         .unwrap_or_else(|| {
+            let name_width = detail_value_width(inner_width, "Name:");
             vec![
-                detail_line("Name:", middle_truncate_cells(title, 48)),
+                detail_line("Name:", marquee_cells(title, name_width, app.marquee_tick)),
                 detail_line("Kind:", "none".to_string()),
                 detail_line("Cache:", app.cache_source().user_label().to_string()),
             ]
         });
     lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
-        push_limited_lines(&mut lines, &app.preview_lines, 10, "", content_style());
+        push_plain_lines(&mut lines, &app.preview_lines, "", content_style());
         lines.push(Line::raw("").style(surface_style()));
         lines.push(detail_line(
             "Buffer:",
@@ -1682,16 +1789,21 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>) -> Paragraph<'_>
             ),
         ));
         lines.push(Line::raw("").style(surface_style()));
-        push_limited_lines(&mut lines, &app.preview_lines, 10, "", content_style());
+        push_plain_lines(&mut lines, &app.preview_lines, "", content_style());
     } else {
         lines.push(detail_line("Preview:", budget.kind.label().to_string()));
         lines.push(Line::raw("").style(surface_style()));
-        push_limited_lines(&mut lines, &app.preview_lines, 8, "", content_style());
+        push_plain_lines(&mut lines, &app.preview_lines, "", content_style());
     }
 
+    let scroll = app
+        .preview_scroll_offset
+        .min(lines.len().saturating_sub(usize::from(inner.height)))
+        .min(usize::from(u16::MAX)) as u16;
     Paragraph::new(lines)
         .block(themed_block("Preview", app.focus() == PanelFocus::Preview))
         .style(surface_style())
+        .scroll((scroll, 0))
         .wrap(Wrap { trim: true })
 }
 
@@ -1699,19 +1811,34 @@ fn preview_detail_lines(
     entry: &FileEntry,
     source: CacheSource,
     budget: PreviewBudget,
+    inner_width: usize,
+    marquee_tick: u64,
 ) -> Vec<Line<'static>> {
     let item_type = if entry.is_dir { "directory" } else { "file" };
+    let action = if entry.is_dir {
+        "l enter directory"
+    } else if budget.kind == PreviewKind::Video {
+        "p preview video"
+    } else {
+        "p open local copy (<100MiB)"
+    };
+    let name_width = detail_value_width(inner_width, "Name:");
+    let path_width = detail_value_width(inner_width, "Path:");
     vec![
         detail_line(
             "Name:",
-            middle_truncate_cells(entry.server_filename.as_str(), 52),
+            marquee_cells(entry.server_filename.as_str(), name_width, marquee_tick),
         ),
         detail_line("Kind:", format!("{item_type} · {}", budget.kind.label())),
         detail_line("Size:", file_size_label(entry)),
         detail_line("Modified:", modified_time_label(entry.mtime)),
         detail_line("Cache:", source.user_label().to_string()),
         detail_line("ID:", entry.fs_id.to_string()),
-        detail_line("Path:", middle_truncate_cells(entry.path.as_str(), 56)),
+        detail_line(
+            "Path:",
+            marquee_cells(entry.path.as_str(), path_width, marquee_tick),
+        ),
+        detail_line("Action:", action.to_string()),
     ]
 }
 
@@ -1746,6 +1873,19 @@ fn push_limited_lines(
     if source.len() > limit {
         output.push(Line::raw(format!("+{} more", source.len() - shown)).style(meta_value_style()));
     }
+}
+
+fn push_plain_lines(
+    output: &mut Vec<Line<'static>>,
+    source: &[String],
+    prefix: &str,
+    style: Style,
+) {
+    output.extend(
+        source
+            .iter()
+            .map(|line| Line::raw(format!("{prefix}{line}")).style(style)),
+    );
 }
 
 fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
@@ -2016,40 +2156,72 @@ fn truncate_cells(value: &str, max_width: usize) -> String {
     output
 }
 
-fn middle_truncate_cells(value: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(value) <= max_width {
+fn marquee_cells(value: &str, max_width: usize, tick: u64) -> String {
+    let width = UnicodeWidthStr::width(value);
+    if width <= max_width {
         return value.to_string();
     }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
+    if max_width == 0 {
+        return String::new();
     }
 
-    let left_budget = (max_width - 3) / 2;
-    let right_budget = max_width - 3 - left_budget;
-    let mut left = String::new();
-    let mut left_width = 0;
+    let offset = marquee_offset(width, max_width, tick);
+    cell_window(value, offset, max_width)
+}
+
+fn marquee_offset(width: usize, max_width: usize, tick: u64) -> usize {
+    let overflow = width.saturating_sub(max_width);
+    if overflow == 0 {
+        return 0;
+    }
+
+    let speed = 1 + (overflow / 32).min(4);
+    let move_ticks = overflow.div_ceil(speed).max(1) as u64;
+    let pause = MARQUEE_EDGE_PAUSE_TICKS;
+    let cycle = pause
+        .saturating_add(move_ticks)
+        .saturating_add(pause)
+        .saturating_add(move_ticks);
+    let mut phase = tick % cycle.max(1);
+    if phase < pause {
+        return 0;
+    }
+    phase = phase.saturating_sub(pause);
+    if phase < move_ticks {
+        return (phase as usize).saturating_mul(speed).min(overflow);
+    }
+    phase = phase.saturating_sub(move_ticks);
+    if phase < pause {
+        return overflow;
+    }
+    phase = phase.saturating_sub(pause);
+    overflow.saturating_sub((phase as usize).saturating_mul(speed).min(overflow))
+}
+
+fn cell_window(value: &str, start: usize, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut cursor: usize = 0;
+    let mut used: usize = 0;
     for ch in value.chars() {
         let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if left_width + width > left_budget {
+        let next_cursor = cursor.saturating_add(width);
+        if width > 0 && next_cursor <= start {
+            cursor = next_cursor;
+            continue;
+        }
+        if used.saturating_add(width) > max_width {
             break;
         }
-        left.push(ch);
-        left_width += width;
+        output.push(ch);
+        used = used.saturating_add(width);
+        cursor = next_cursor;
     }
 
-    let mut right_chars = Vec::new();
-    let mut right_width = 0;
-    for ch in value.chars().rev() {
-        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if right_width + width > right_budget {
-            break;
-        }
-        right_chars.push(ch);
-        right_width += width;
-    }
-    right_chars.reverse();
-
-    format!("{left}...{}", right_chars.into_iter().collect::<String>())
+    output
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

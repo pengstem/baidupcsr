@@ -37,7 +37,7 @@ Verify the output includes:
 - active UID and credential presence only, never raw token values
 
 The `video_preview` line should also expose the player profile and cache budget,
-for example `profile=user chunk=8388608 chunks=16 budget=134217728`.
+for example `profile=user chunk=4194304 chunks=32 budget=134217728`.
 
 If config loading fails, `doctor` must print a repair hint that starts with
 `repair: set BAIDUPCS_GO_CONFIG_DIR`.

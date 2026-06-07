@@ -171,8 +171,8 @@ impl Default for UiConfig {
         Self {
             video_preview: VideoPreviewConfig {
                 enabled: true,
-                chunk_size_bytes: 8 * 1024 * 1024,
-                max_chunks: 16,
+                chunk_size_bytes: 4 * 1024 * 1024,
+                max_chunks: 32,
                 player_profile: VideoPlayerProfile::User,
             },
         }

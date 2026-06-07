@@ -154,7 +154,116 @@ fn mouse_wheel_scrolls_view_and_keeps_selection_visible() {
         Some(TuiRuntimeEvent::Action(KeyAction::Select))
     );
     assert_eq!(app.selected_index(), Some(3));
-    assert_eq!(app.visible_entry_range(4), 3..7);
+    assert_eq!(app.visible_entry_range(4), 2..6);
+}
+
+#[test]
+fn mouse_wheel_moves_selection_even_when_all_entries_are_visible() {
+    let mut app = TuiApp::new("/docs");
+    let entries: Vec<FileEntry> = (0..5)
+        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+        .collect();
+    app.set_entries(entries);
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::ScrollDown,
+        column: 24,
+        row: 5,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    });
+
+    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+    assert_eq!(app.selected_index(), Some(3));
+}
+
+#[test]
+fn mouse_double_click_enters_directories_and_previews_files() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![
+        directory(1, "/docs/videos"),
+        file(2, "/docs/readme.md"),
+    ]);
+
+    let directory_click = baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 24,
+        row: 4,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    };
+    assert_eq!(
+        app.handle_mouse_event(directory_click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Select))
+    );
+    assert_eq!(
+        app.handle_mouse_event(directory_click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Enter))
+    );
+
+    let file_click = baidupcsr_tui::MouseInput {
+        row: 5,
+        ..directory_click
+    };
+    assert_eq!(
+        app.handle_mouse_event(file_click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Select))
+    );
+    assert_eq!(
+        app.handle_mouse_event(file_click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Preview))
+    );
+}
+
+#[test]
+fn mouse_second_click_after_timeout_stays_a_selection() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/readme.md")]);
+    let click = baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 24,
+        row: 4,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    };
+
+    assert_eq!(
+        app.handle_mouse_event(click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Select))
+    );
+    for _ in 0..6 {
+        app.advance_tick();
+    }
+
+    assert_eq!(
+        app.handle_mouse_event(click),
+        Some(TuiRuntimeEvent::Action(KeyAction::Select))
+    );
+}
+
+#[test]
+fn preview_mouse_wheel_scrolls_preview_without_changing_selection() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/readme.md"), file(2, "/docs/todo.md")]);
+    app.finish_preview_text(
+        "readme.md",
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 36,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::ScrollDown,
+        column: 70,
+        row: 5,
+        area: ratatui::layout::Rect::new(0, 0, 96, 16),
+    });
+
+    assert_eq!(event, None);
+    assert_eq!(app.selected_index(), Some(0));
+    assert!(app.preview_scroll_offset() > 0);
 }
 
 #[test]

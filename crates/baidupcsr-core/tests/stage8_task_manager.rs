@@ -109,3 +109,25 @@ fn upload_task_records_conflict_policy_without_starting_network_work() -> Result
     assert_eq!(task.state, TaskState::Queued);
     Ok(())
 }
+
+#[test]
+fn local_open_task_tracks_temp_file_target_and_size() -> Result<(), TaskError> {
+    let mut manager = TaskManager::new();
+    let id = manager.enqueue_local_open("/remote/photo.jpg", "/tmp/baidupcsr-open/photo.jpg", 4096);
+    let task = manager
+        .snapshots()
+        .into_iter()
+        .find(|task| task.id == id)
+        .ok_or(TaskError::UnknownTask)?;
+
+    assert_eq!(
+        task.kind,
+        TaskKind::LocalOpen {
+            remote_path: "/remote/photo.jpg".to_string(),
+            local_path: "/tmp/baidupcsr-open/photo.jpg".to_string(),
+            size_bytes: 4096,
+        }
+    );
+    assert_eq!(task.progress.bytes_total, Some(4096));
+    Ok(())
+}

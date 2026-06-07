@@ -472,6 +472,11 @@ pub enum TaskKind {
         local_path: String,
         size_bytes: u64,
     },
+    LocalOpen {
+        remote_path: String,
+        local_path: String,
+        size_bytes: u64,
+    },
     Upload {
         local_path: String,
         remote_path: String,
@@ -544,6 +549,23 @@ impl TaskManager {
     ) -> TaskId {
         self.insert_task(
             TaskKind::Download {
+                remote_path: remote_path.into(),
+                local_path: local_path.into(),
+                size_bytes,
+            },
+            Some(size_bytes),
+            None,
+        )
+    }
+
+    pub fn enqueue_local_open(
+        &mut self,
+        remote_path: impl Into<String>,
+        local_path: impl Into<String>,
+        size_bytes: u64,
+    ) -> TaskId {
+        self.insert_task(
+            TaskKind::LocalOpen {
                 remote_path: remote_path.into(),
                 local_path: local_path.into(),
                 size_bytes,

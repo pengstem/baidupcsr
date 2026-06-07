@@ -140,11 +140,20 @@ fn preview_panel_wraps_long_name_without_losing_suffix() {
         false,
     )]);
 
-    let screen = draw(&app, 108, 24);
+    let first = draw(&app, 108, 24);
 
-    assert!(screen.contains("A.Knight"));
-    assert!(screen.contains(".mkv"));
-    assert!(!screen.contains("name=A.Knight"));
+    assert!(first.contains("A.Knight"));
+    assert!(!first.contains("name=A.Knight"));
+
+    let mut suffix_visible = first.contains(".mkv");
+    for _ in 0..80 {
+        app.advance_tick();
+        if draw(&app, 108, 24).contains(".mkv") {
+            suffix_visible = true;
+            break;
+        }
+    }
+    assert!(suffix_visible);
 }
 
 #[test]

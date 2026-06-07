@@ -195,7 +195,7 @@ fn ratatui_render_keeps_cursor_and_mark_columns_separate() {
 }
 
 #[test]
-fn ratatui_render_truncates_long_wide_names_without_breaking_layout() {
+fn ratatui_render_marquees_selected_long_wide_names_without_breaking_layout() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![file_with_name(
         1,
@@ -205,13 +205,18 @@ fn ratatui_render_truncates_long_wide_names_without_breaking_layout() {
         false,
     )]);
 
-    let screen = buffer_to_text(&draw_buffer(&app, None, 64, 16));
+    let first = buffer_to_text(&draw_buffer(&app, None, 64, 16));
+    for _ in 0..24 {
+        app.advance_tick();
+    }
+    let later = buffer_to_text(&draw_buffer(&app, None, 64, 16));
 
-    assert!(screen.contains("一 个"));
-    assert!(screen.contains("..."));
-    assert!(screen.contains("with-a-long-tail.txt"));
-    assert!(screen.contains("Preview"));
-    assert!(screen.contains("1/1"));
+    assert_ne!(first, later);
+    assert!(!first.contains("..."));
+    assert!(!later.contains("..."));
+    assert!(first.contains("Preview"));
+    assert!(later.contains("Preview"));
+    assert!(later.contains("1/1"));
 }
 
 #[test]
@@ -257,8 +262,36 @@ fn help_overlay_is_hidden_until_question_mark() {
     assert!(help.contains("gg/G"));
     assert!(help.contains("Esc"));
     assert!(help.contains("y/n"));
+    assert!(help.contains("p preview/open"));
     assert!(help.contains("Mouse"));
+    assert!(help.contains("file click selects"));
+    assert!(help.contains("double-click opens"));
+    assert!(help.contains("wheel follows mouse"));
     assert!(help.contains("path click jumps"));
+}
+
+#[test]
+fn ratatui_render_marquees_preview_name_and_path() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file_with_name(
+        1,
+        "/docs/一个非常非常非常非常非常长的中文文件名-with-a-long-tail.txt",
+        "一个非常非常非常非常非常长的中文文件名-with-a-long-tail.txt",
+        2048,
+        false,
+    )]);
+
+    let first = buffer_to_text(&draw_buffer(&app, None, 80, 18));
+    for _ in 0..24 {
+        app.advance_tick();
+    }
+    let later = buffer_to_text(&draw_buffer(&app, None, 80, 18));
+
+    assert_ne!(first, later);
+    assert!(first.contains("Name:"));
+    assert!(later.contains("Name:"));
+    assert!(first.contains("Path:"));
+    assert!(later.contains("Path:"));
 }
 
 #[test]
@@ -376,7 +409,7 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
 }
 
 #[test]
-fn ratatui_render_marks_truncated_preview_and_task_lists() {
+fn ratatui_render_keeps_full_preview_content_and_truncates_task_lists() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![file(1, "/docs/notes.md", 128, false)]);
     app.finish_preview_text(
@@ -397,7 +430,8 @@ fn ratatui_render_marks_truncated_preview_and_task_lists() {
     ]);
 
     let tall = buffer_to_text(&draw_buffer(&app, None, 96, 30));
-    assert!(tall.contains("+3 more"));
+    assert!(tall.contains("l12"));
+    assert!(tall.contains("+2 more"));
 
     let normal = draw_to_text(&app, None);
     assert!(normal.contains("+2 more"));
