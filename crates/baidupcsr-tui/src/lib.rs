@@ -526,7 +526,7 @@ impl TuiApp {
             return None;
         }
 
-        let full = full_layout(input.area);
+        let full = full_layout(input.area, self.has_transfer_area());
         let layout = browser_layout(full.body);
         let files_inner = inner_rect(layout.files);
         let preview_inner = inner_rect(layout.preview);
@@ -757,6 +757,10 @@ impl TuiApp {
 
     pub fn task_items(&self) -> &[TaskPanelItem] {
         &self.task_items
+    }
+
+    fn has_transfer_area(&self) -> bool {
+        !self.task_items.is_empty()
     }
 
     pub fn preload_lines(&self) -> &[String] {
@@ -1362,10 +1366,31 @@ struct FullLayout {
     header: Rect,
     body: Rect,
     tasks: Rect,
+    transfer: Rect,
     status: Rect,
 }
 
-fn full_layout(area: Rect) -> FullLayout {
+fn full_layout(area: Rect, has_transfer_area: bool) -> FullLayout {
+    if has_transfer_area {
+        let [header, body, tasks, transfer, status] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(3),
+                Constraint::Min(4),
+                Constraint::Length(4),
+                Constraint::Length(4),
+                Constraint::Length(1),
+            ])
+            .areas(area);
+        return FullLayout {
+            header,
+            body,
+            tasks,
+            transfer,
+            status,
+        };
+    }
+
     let [header, body, tasks, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1379,6 +1404,7 @@ fn full_layout(area: Rect) -> FullLayout {
         header,
         body,
         tasks,
+        transfer: Rect::default(),
         status,
     }
 }
@@ -1479,12 +1505,13 @@ fn proportional_position(value: usize, max_value: usize, max_input: usize) -> us
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
     frame.render_widget(Block::new().style(surface_style()), frame.area());
 
-    let layout = full_layout(frame.area());
+    let layout = full_layout(frame.area(), app.has_transfer_area());
     let browser = browser_layout(layout.body);
     frame.render_widget(header_widget(app), layout.header);
     render_files_pane(frame, app, browser.files);
     render_preview_pane(frame, app, preview, browser.preview);
     render_tasks_pane(frame, app, layout.tasks);
+    render_transfer_pane(frame, app, layout.transfer);
     frame.render_widget(status_widget(app), layout.status);
     if app.help_visible() {
         let area = centered_rect(frame.area(), 58, 22);
@@ -2236,28 +2263,27 @@ fn render_tasks_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         return;
     }
 
-    let metrics_height = if inner.height >= 3 { 2 } else { 0 };
-    let table_height = inner.height.saturating_sub(metrics_height).max(1);
-    let [table_area, metrics_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(table_height), Constraint::Min(0)])
-        .areas(inner);
+    frame.render_widget(task_table_widget(app, usize::from(inner.height)), inner);
+}
 
-    frame.render_widget(
-        task_table_widget(app, usize::from(table_height)),
-        table_area,
-    );
-    if metrics_height == 0 {
-        return;
-    }
-
+fn render_transfer_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
     let Some(task) = app.task_items.first() else {
         return;
     };
+    if area.is_empty() {
+        return;
+    }
+
+    frame.render_widget(themed_block("Transfer", false), area);
+    let inner = inner_rect(area);
+    if inner.height == 0 {
+        return;
+    }
+
     let [progress_area, speed_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
-        .areas(metrics_area);
+        .areas(inner);
     render_task_progress(frame, task, progress_area);
     render_task_speed(frame, task, speed_area);
 }

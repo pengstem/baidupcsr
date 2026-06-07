@@ -85,6 +85,20 @@ fn bottom_rows_have_fg(buffer: &Buffer, color: Color) -> bool {
         .any(|y| (buffer.area.left()..buffer.area.right()).any(|x| buffer[(x, y)].fg == color))
 }
 
+fn line_index_containing(buffer: &Buffer, text: &str) -> Option<u16> {
+    for y in buffer.area.top()..buffer.area.bottom() {
+        let mut line = String::new();
+        for x in buffer.area.left()..buffer.area.right() {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        if line.contains(text) {
+            return Some(y);
+        }
+    }
+
+    None
+}
+
 fn infallible<T>(result: Result<T, Infallible>) -> T {
     match result {
         Ok(value) => value,
@@ -529,6 +543,12 @@ fn ratatui_render_draws_structured_tasks_with_progress_and_speed_history() {
     assert!(screen.contains("movie.mkv"));
     assert!(screen.contains("75%"));
     assert!(screen.contains("2.0 MiB/s"));
+    assert!(screen.contains("Tasks"));
+    assert!(screen.contains("Transfer"));
+    assert!(line_index_containing(&buffer, "Tasks") < line_index_containing(&buffer, "Transfer"));
+    assert!(
+        line_index_containing(&buffer, "Transfer") < line_index_containing(&buffer, "2.0 MiB/s")
+    );
     assert!(bottom_rows_have_fg(&buffer, Color::Rgb(52, 211, 153)));
 }
 
