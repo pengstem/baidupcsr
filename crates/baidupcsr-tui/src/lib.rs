@@ -43,6 +43,10 @@ const THEME_SUCCESS: Color = Color::Rgb(52, 211, 153);
 const THEME_ERROR: Color = Color::Rgb(248, 113, 113);
 const PAGE_STEP: usize = 10;
 const HALF_PAGE_STEP: usize = 5;
+const MOUSE_WHEEL_STEP: usize = 3;
+const HEADER_BRAND: &str = "baidupcsr";
+const HEADER_GAP: &str = "  ";
+const BREADCRUMB_SEPARATOR: &str = " > ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppMode {
@@ -140,6 +144,7 @@ pub enum TuiRuntimeEvent {
     Tick,
     Action(KeyAction),
     CommandSubmitted(String),
+    PathRequested(String),
     ConfirmAccepted,
     ConfirmRejected,
 }
@@ -454,15 +459,27 @@ impl TuiApp {
 
         match input.kind {
             MouseInputKind::ScrollUp => {
-                self.scroll_view_by(-(PAGE_STEP as isize));
-                None
+                let layout = tui_layout(input.area);
+                let rows = usize::from(inner_rect(layout.files).height);
+                self.scroll_view_by(-(MOUSE_WHEEL_STEP as isize), rows)
+                    .then_some(TuiRuntimeEvent::Action(KeyAction::Select))
             }
             MouseInputKind::ScrollDown => {
-                self.scroll_view_by(PAGE_STEP as isize);
-                None
+                let layout = tui_layout(input.area);
+                let rows = usize::from(inner_rect(layout.files).height);
+                self.scroll_view_by(MOUSE_WHEEL_STEP as isize, rows)
+                    .then_some(TuiRuntimeEvent::Action(KeyAction::Select))
             }
             MouseInputKind::LeftClick | MouseInputKind::DoubleClick => {
-                let layout = tui_layout(input.area);
+                let layout = full_layout(input.area);
+                if let Some(path) =
+                    breadcrumb_path_at(self.path(), layout.header, input.column, input.row)
+                {
+                    return (path.as_str() != self.path.as_str())
+                        .then_some(TuiRuntimeEvent::PathRequested(path));
+                }
+
+                let layout = browser_layout(layout.body);
                 let files_inner = inner_rect(layout.files);
                 if !rect_contains(files_inner, input.column, input.row) {
                     return None;
@@ -682,18 +699,40 @@ impl TuiApp {
         self.scroll_offset = next.saturating_sub(1);
     }
 
-    fn scroll_view_by(&mut self, delta: isize) {
-        let total = self.filtered_indices().len();
-        if total == 0 {
+    fn scroll_view_by(&mut self, delta: isize, rows: usize) -> bool {
+        let indices = self.filtered_indices();
+        let total = indices.len();
+        if total == 0 || rows == 0 {
             self.scroll_offset = 0;
-            return;
+            self.selected_index = None;
+            return false;
         }
-        let last = total.saturating_sub(1);
+        let old_offset = self.scroll_offset;
+        let old_selection = self.selected_index;
+        let rows = rows.min(total);
+        let last_start = total.saturating_sub(rows);
         self.scroll_offset = if delta.is_negative() {
             self.scroll_offset.saturating_sub(delta.unsigned_abs())
         } else {
-            self.scroll_offset.saturating_add(delta as usize).min(last)
+            self.scroll_offset
+                .saturating_add(delta as usize)
+                .min(last_start)
         };
+        let range = visible_range_from_offset(total, self.scroll_offset, rows);
+        let selected_position = self.selected_visible_position(&indices);
+        let selection_outside_view = match selected_position {
+            Some(position) => !range.contains(&position),
+            None => true,
+        };
+        if selection_outside_view {
+            let anchor = if delta.is_negative() {
+                range.end.saturating_sub(1)
+            } else {
+                range.start
+            };
+            self.selected_index = indices.get(anchor).copied();
+        }
+        old_offset != self.scroll_offset || old_selection != self.selected_index
     }
 
     fn handle_normal_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
@@ -1050,8 +1089,16 @@ struct TuiLayout {
     preview: Rect,
 }
 
-fn tui_layout(area: Rect) -> TuiLayout {
-    let [_header, body, _tasks, _status] = Layout::default()
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FullLayout {
+    header: Rect,
+    body: Rect,
+    tasks: Rect,
+    status: Rect,
+}
+
+fn full_layout(area: Rect) -> FullLayout {
+    let [header, body, tasks, status] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
@@ -1060,7 +1107,15 @@ fn tui_layout(area: Rect) -> TuiLayout {
             Constraint::Length(1),
         ])
         .areas(area);
+    FullLayout {
+        header,
+        body,
+        tasks,
+        status,
+    }
+}
 
+fn browser_layout(body: Rect) -> TuiLayout {
     if body.width >= 88 {
         let [files, preview] = Layout::default()
             .direction(Direction::Horizontal)
@@ -1080,6 +1135,10 @@ fn tui_layout(area: Rect) -> TuiLayout {
             .areas(body);
         TuiLayout { files, preview }
     }
+}
+
+fn tui_layout(area: Rect) -> TuiLayout {
+    browser_layout(full_layout(area).body)
 }
 
 fn inner_rect(area: Rect) -> Rect {
@@ -1098,43 +1157,15 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
     frame.render_widget(Block::new().style(surface_style()), frame.area());
 
-    let [header, body, tasks, status] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(4),
-            Constraint::Length(1),
-        ])
-        .areas(frame.area());
-
-    frame.render_widget(header_widget(app), header);
-    if body.width >= 88 {
-        let [files, preview_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(48), Constraint::Min(42)])
-            .areas(body);
-        render_files_pane(frame, app, files);
-        frame.render_widget(preview_widget(app, preview), preview_area);
-    } else if body.width >= 56 {
-        let [files, preview_area] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(54), Constraint::Percentage(46)])
-            .areas(body);
-        render_files_pane(frame, app, files);
-        frame.render_widget(preview_widget(app, preview), preview_area);
-    } else {
-        let [files, preview_area] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-            .areas(body);
-        render_files_pane(frame, app, files);
-        frame.render_widget(preview_widget(app, preview), preview_area);
-    }
-    frame.render_widget(tasks_widget(app), tasks);
-    frame.render_widget(status_widget(app), status);
+    let layout = full_layout(frame.area());
+    let browser = browser_layout(layout.body);
+    frame.render_widget(header_widget(app), layout.header);
+    render_files_pane(frame, app, browser.files);
+    frame.render_widget(preview_widget(app, preview), browser.preview);
+    frame.render_widget(tasks_widget(app), layout.tasks);
+    frame.render_widget(status_widget(app), layout.status);
     if app.help_visible() {
-        let area = centered_rect(frame.area(), 58, 20);
+        let area = centered_rect(frame.area(), 58, 22);
         frame.render_widget(Clear, area);
         frame.render_widget(help_widget(), area);
     }
@@ -1359,25 +1390,104 @@ fn help_widget() -> Paragraph<'static> {
         content_line("  y/n                confirm / cancel"),
         Line::raw("").style(surface_style()),
         help_section_line("Mouse"),
-        content_line("  click selects      wheel scrolls"),
+        content_line("  file click selects wheel scrolls"),
+        content_line("  path click jumps"),
     ])
     .block(themed_block("Shortcuts", true))
     .style(surface_style())
     .wrap(Wrap { trim: true })
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BreadcrumbSegment {
+    label: String,
+    target: String,
+}
+
+fn breadcrumb_segments(path: &str) -> Vec<BreadcrumbSegment> {
+    let normalized = normalize_path(path);
+    let mut segments = vec![BreadcrumbSegment {
+        label: "/".to_string(),
+        target: "/".to_string(),
+    }];
+    let mut target = String::new();
+    for part in normalized
+        .trim_matches('/')
+        .split('/')
+        .filter(|part| !part.is_empty())
+    {
+        target.push('/');
+        target.push_str(part);
+        segments.push(BreadcrumbSegment {
+            label: part.to_string(),
+            target: target.clone(),
+        });
+    }
+    segments
+}
+
+fn breadcrumb_spans(path: &str) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, segment) in breadcrumb_segments(path).into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(
+                BREADCRUMB_SEPARATOR,
+                Style::new().fg(THEME_DIM).bg(THEME_BG),
+            ));
+        }
+        spans.push(Span::styled(
+            format!(" {} ", segment.label),
+            Style::new()
+                .fg(THEME_TEXT)
+                .bg(THEME_MARKED)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
+}
+
+fn breadcrumb_path_at(path: &str, header: Rect, column: u16, row: u16) -> Option<String> {
+    let inner = inner_rect(header);
+    if row != inner.y || column < inner.x || column >= inner.right() {
+        return None;
+    }
+
+    let mut cursor = inner
+        .x
+        .saturating_add(text_width_u16(HEADER_BRAND))
+        .saturating_add(text_width_u16(HEADER_GAP));
+    for (index, segment) in breadcrumb_segments(path).into_iter().enumerate() {
+        if index > 0 {
+            cursor = cursor.saturating_add(text_width_u16(BREADCRUMB_SEPARATOR));
+        }
+        let label_width = text_width_u16(segment.label.as_str()).saturating_add(2);
+        let end = cursor.saturating_add(label_width);
+        if column >= cursor && column < end {
+            return Some(segment.target);
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn text_width_u16(value: &str) -> u16 {
+    UnicodeWidthStr::width(value).min(usize::from(u16::MAX)) as u16
+}
+
 fn header_widget(app: &TuiApp) -> Paragraph<'_> {
-    Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
-            "baidupcsr",
+            HEADER_BRAND,
             Style::new()
                 .fg(THEME_ACCENT)
                 .bg(THEME_BG)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", surface_style()),
-        Span::styled(app.path(), Style::new().fg(THEME_TEXT).bg(THEME_BG)),
-        Span::styled("  ", surface_style()),
+        Span::styled(HEADER_GAP, surface_style()),
+    ];
+    spans.extend(breadcrumb_spans(app.path()));
+    spans.extend([
+        Span::styled(HEADER_GAP, surface_style()),
         Span::styled(
             app.request_state.user_label(),
             Style::new()
@@ -1385,9 +1495,11 @@ fn header_widget(app: &TuiApp) -> Paragraph<'_> {
                 .bg(THEME_BG)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]))
-    .block(themed_block("Session", false))
-    .style(surface_style())
+    ]);
+
+    Paragraph::new(Line::from(spans))
+        .block(themed_block("Session", false))
+        .style(surface_style())
 }
 
 fn render_files_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {

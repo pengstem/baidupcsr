@@ -137,7 +137,7 @@ fn mouse_click_selects_visible_file_row() {
 }
 
 #[test]
-fn mouse_wheel_scrolls_view_without_moving_selection() {
+fn mouse_wheel_scrolls_view_and_keeps_selection_visible() {
     let mut app = TuiApp::new("/docs");
     let entries: Vec<FileEntry> = (0..20)
         .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
@@ -151,10 +151,27 @@ fn mouse_wheel_scrolls_view_without_moving_selection() {
             row: 5,
             area: ratatui::layout::Rect::new(0, 0, 96, 24),
         }),
-        None
+        Some(TuiRuntimeEvent::Action(KeyAction::Select))
     );
-    assert_eq!(app.selected_index(), Some(0));
-    assert_eq!(app.visible_entry_range(4), 10..14);
+    assert_eq!(app.selected_index(), Some(3));
+    assert_eq!(app.visible_entry_range(4), 3..7);
+}
+
+#[test]
+fn mouse_click_on_header_breadcrumb_requests_that_path() {
+    let mut app = TuiApp::new("/docs/videos/2026");
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 20,
+        row: 1,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    });
+
+    assert_eq!(
+        event,
+        Some(TuiRuntimeEvent::PathRequested("/docs".to_string()))
+    );
 }
 
 #[test]

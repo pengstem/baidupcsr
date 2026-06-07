@@ -373,6 +373,9 @@ impl BrowserRuntime {
             baidupcsr_tui::TuiRuntimeEvent::CommandSubmitted(command) => {
                 self.handle_remote_command(app, command);
             }
+            baidupcsr_tui::TuiRuntimeEvent::PathRequested(path) => {
+                self.handle_path_request(app, path);
+            }
             baidupcsr_tui::TuiRuntimeEvent::ConfirmAccepted => {
                 self.confirm_pending_remote_operation(app);
             }
@@ -438,6 +441,14 @@ impl BrowserRuntime {
             | baidupcsr_tui::KeyAction::None => {}
         }
         self.refresh_task_panel(app);
+    }
+
+    fn handle_path_request(&mut self, app: &mut baidupcsr_tui::TuiApp, path: String) {
+        if path == app.path() {
+            return;
+        }
+        let preferred = breadcrumb_preferred_selection(app.path(), path.as_str());
+        self.start_directory_load(app, path, preferred);
     }
 
     fn handle_remote_command(&mut self, app: &mut baidupcsr_tui::TuiApp, command: String) {
@@ -2328,6 +2339,34 @@ fn persist_workdir_if_active(
     baidupcsr_config::save_active_user_workdir(config_path, current_path)
 }
 
+fn breadcrumb_preferred_selection(current_path: &str, target_path: &str) -> Option<String> {
+    if current_path == target_path {
+        return None;
+    }
+    let current = if current_path == "/" {
+        "/"
+    } else {
+        current_path.trim_end_matches('/')
+    };
+    let target = if target_path == "/" {
+        "/"
+    } else {
+        target_path.trim_end_matches('/')
+    };
+    if current.is_empty() || target.is_empty() {
+        return None;
+    }
+
+    if target == "/" {
+        let child = current.trim_start_matches('/').split('/').next()?;
+        return Some(format!("/{child}"));
+    }
+
+    let rest = current.strip_prefix(target)?.strip_prefix('/')?;
+    let child = rest.split('/').next()?;
+    Some(format!("{target}/{child}"))
+}
+
 fn bduss_from_user(user: &baidupcsr_config::BaiduUser) -> Option<String> {
     if !user.bduss.is_empty() {
         return Some(user.bduss.clone());
@@ -2497,12 +2536,12 @@ mod tests {
     use baidupcsr_pcs::FileEntry;
 
     use super::{
-        active_player_log_line, bduss_from_user, build_pcs_client, download_target_path,
-        fetch_first_successful_dlink_range, is_video_entry, list_remote_directory,
-        pan_user_agent_for_config, parse_remote_command, partial_download_path,
-        persist_workdir_if_active, preview_key_for_entry, selected_path_for_refresh,
-        task_summary_line, tui_preview_kind, video_budget_from_config, DlinkRangeAttempt,
-        ParsedRemoteCommand,
+        active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
+        download_target_path, fetch_first_successful_dlink_range, is_video_entry,
+        list_remote_directory, pan_user_agent_for_config, parse_remote_command,
+        partial_download_path, persist_workdir_if_active, preview_key_for_entry,
+        selected_path_for_refresh, task_summary_line, tui_preview_kind, video_budget_from_config,
+        DlinkRangeAttempt, ParsedRemoteCommand,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -2563,6 +2602,19 @@ mod tests {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_dir(dir);
         Ok(())
+    }
+
+    #[test]
+    fn breadcrumb_navigation_prefers_the_next_child_under_target() {
+        assert_eq!(
+            breadcrumb_preferred_selection("/docs/videos/2026", "/docs"),
+            Some("/docs/videos".to_string())
+        );
+        assert_eq!(
+            breadcrumb_preferred_selection("/docs/videos/2026", "/"),
+            Some("/docs".to_string())
+        );
+        assert_eq!(breadcrumb_preferred_selection("/docs", "/docs"), None);
     }
 
     fn expect_operation(

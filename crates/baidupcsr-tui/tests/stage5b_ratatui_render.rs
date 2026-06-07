@@ -119,6 +119,15 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
 }
 
 #[test]
+fn ratatui_render_draws_path_as_breadcrumb_blocks() {
+    let app = TuiApp::new("/docs/videos");
+
+    let screen = draw_to_text(&app, None);
+
+    assert!(screen.contains(" /  >  docs  >  videos "));
+}
+
+#[test]
 fn ratatui_render_keeps_selection_visible_after_navigation() {
     let mut app = TuiApp::new("/");
     app.set_entries(vec![
@@ -249,6 +258,7 @@ fn help_overlay_is_hidden_until_question_mark() {
     assert!(help.contains("Esc"));
     assert!(help.contains("y/n"));
     assert!(help.contains("Mouse"));
+    assert!(help.contains("path click jumps"));
 }
 
 #[test]
