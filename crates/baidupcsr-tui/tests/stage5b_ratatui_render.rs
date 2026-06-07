@@ -1,5 +1,5 @@
 use baidupcsr_pcs::FileEntry;
-use baidupcsr_tui::{render_app, PreviewBudget, PreviewKind, TaskPanelItem, TuiApp};
+use baidupcsr_tui::{render_app, KeyEvent, PreviewBudget, PreviewKind, TaskPanelItem, TuiApp};
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 use std::convert::Infallible;
 
@@ -177,6 +177,20 @@ fn ratatui_render_scrolls_long_lists_and_highlights_selected_row() {
     ));
     assert!(screen.contains("Files 18-"));
     assert!(screen.contains("/30"));
+}
+
+#[test]
+fn ratatui_render_files_scrollbar_thumb_reaches_bottom_at_list_end() {
+    let mut app = TuiApp::new("/");
+    let entries: Vec<FileEntry> = (0..40)
+        .map(|index| file(index, &format!("/item-{index:02}.txt"), 512, false))
+        .collect();
+    app.set_entries(entries);
+    app.handle_key(KeyEvent::End);
+
+    let buffer = draw_buffer(&app, None, 96, 24);
+
+    assert_eq!(buffer[(44, 15)].fg, Color::Rgb(94, 234, 212));
 }
 
 #[test]

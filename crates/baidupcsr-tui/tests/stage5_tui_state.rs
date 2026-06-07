@@ -177,6 +177,53 @@ fn mouse_wheel_moves_selection_even_when_all_entries_are_visible() {
 }
 
 #[test]
+fn mouse_click_on_files_scrollbar_moves_view_to_bottom() {
+    let mut app = TuiApp::new("/docs");
+    let entries: Vec<FileEntry> = (0..40)
+        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+        .collect();
+    app.set_entries(entries);
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 44,
+        row: 16,
+        area: ratatui::layout::Rect::new(0, 0, 96, 24),
+    });
+
+    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+    assert_eq!(app.visible_entry_range(13), 27..40);
+    assert_eq!(app.selected_index(), Some(27));
+}
+
+#[test]
+fn mouse_drag_on_files_scrollbar_keeps_controlling_files_after_leaving_column() {
+    let mut app = TuiApp::new("/docs");
+    let entries: Vec<FileEntry> = (0..40)
+        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+        .collect();
+    app.set_entries(entries);
+
+    let area = ratatui::layout::Rect::new(0, 0, 96, 24);
+    let _ = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 44,
+        row: 4,
+        area,
+    });
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftDrag,
+        column: 40,
+        row: 16,
+        area,
+    });
+
+    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+    assert_eq!(app.visible_entry_range(13), 27..40);
+}
+
+#[test]
 fn mouse_double_click_enters_directories_and_previews_files() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![
@@ -264,6 +311,33 @@ fn preview_mouse_wheel_scrolls_preview_without_changing_selection() {
     assert_eq!(event, None);
     assert_eq!(app.selected_index(), Some(0));
     assert!(app.preview_scroll_offset() > 0);
+}
+
+#[test]
+fn mouse_click_on_preview_scrollbar_moves_preview_to_bottom() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file(1, "/docs/readme.md")]);
+    app.finish_preview_text(
+        "readme.md",
+        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
+        PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 48,
+            memory_limit_bytes: 16 * 1024 * 1024,
+            truncated: false,
+            disk_backed: false,
+        },
+    );
+
+    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
+        kind: baidupcsr_tui::MouseInputKind::LeftClick,
+        column: 94,
+        row: 10,
+        area: ratatui::layout::Rect::new(0, 0, 96, 18),
+    });
+
+    assert_eq!(event, None);
+    assert_eq!(app.preview_scroll_offset(), 15);
 }
 
 #[test]

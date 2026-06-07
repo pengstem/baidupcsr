@@ -77,6 +77,12 @@ struct FileClick {
     tick: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollbarDragTarget {
+    Files,
+    Preview,
+}
+
 impl AppMode {
     const fn label(self) -> &'static str {
         match self {
@@ -135,6 +141,8 @@ pub enum KeyAction {
 pub enum MouseInputKind {
     LeftClick,
     DoubleClick,
+    LeftDrag,
+    LeftRelease,
     ScrollUp,
     ScrollDown,
 }
@@ -274,6 +282,7 @@ pub struct TuiApp {
     preview_scroll_offset: usize,
     marquee_tick: u64,
     last_file_click: Option<FileClick>,
+    scrollbar_drag: Option<ScrollbarDragTarget>,
     focus: PanelFocus,
 }
 
@@ -307,6 +316,7 @@ impl TuiApp {
             preview_scroll_offset: 0,
             marquee_tick: 0,
             last_file_click: None,
+            scrollbar_drag: None,
             focus: PanelFocus::Files,
         }
     }
@@ -501,10 +511,15 @@ impl TuiApp {
     }
 
     pub fn handle_mouse_event(&mut self, input: MouseInput) -> Option<TuiRuntimeEvent> {
+        if input.kind == MouseInputKind::LeftRelease {
+            self.scrollbar_drag = None;
+            return None;
+        }
+
         if self.help_visible {
             if matches!(
                 input.kind,
-                MouseInputKind::LeftClick | MouseInputKind::DoubleClick
+                MouseInputKind::LeftClick | MouseInputKind::DoubleClick | MouseInputKind::LeftDrag
             ) {
                 self.help_visible = false;
             }
@@ -515,9 +530,12 @@ impl TuiApp {
         let layout = browser_layout(full.body);
         let files_inner = inner_rect(layout.files);
         let preview_inner = inner_rect(layout.preview);
+        let files_scrollbar = vertical_scrollbar_rect(files_inner);
+        let preview_scrollbar = vertical_scrollbar_rect(preview_inner);
 
         match input.kind {
             MouseInputKind::ScrollUp => {
+                self.scrollbar_drag = None;
                 if rect_contains(files_inner, input.column, input.row) {
                     self.focus = PanelFocus::Files;
                     return self
@@ -534,6 +552,7 @@ impl TuiApp {
                 None
             }
             MouseInputKind::ScrollDown => {
+                self.scrollbar_drag = None;
                 if rect_contains(files_inner, input.column, input.row) {
                     self.focus = PanelFocus::Files;
                     return self
@@ -549,7 +568,69 @@ impl TuiApp {
                 }
                 None
             }
+            MouseInputKind::LeftDrag => match self.scrollbar_drag {
+                Some(ScrollbarDragTarget::Files) => self.handle_files_scrollbar_pointer(
+                    input.row,
+                    files_scrollbar?,
+                    usize::from(files_inner.height),
+                ),
+                Some(ScrollbarDragTarget::Preview) => {
+                    self.handle_preview_scrollbar_pointer(
+                        input.row,
+                        preview_scrollbar?,
+                        usize::from(preview_inner.height),
+                    );
+                    None
+                }
+                None => {
+                    if let Some(scrollbar) = files_scrollbar
+                        .filter(|scrollbar| rect_contains(*scrollbar, input.column, input.row))
+                    {
+                        self.scrollbar_drag = Some(ScrollbarDragTarget::Files);
+                        return self.handle_files_scrollbar_pointer(
+                            input.row,
+                            scrollbar,
+                            usize::from(files_inner.height),
+                        );
+                    }
+                    if let Some(scrollbar) = preview_scrollbar
+                        .filter(|scrollbar| rect_contains(*scrollbar, input.column, input.row))
+                    {
+                        self.scrollbar_drag = Some(ScrollbarDragTarget::Preview);
+                        self.handle_preview_scrollbar_pointer(
+                            input.row,
+                            scrollbar,
+                            usize::from(preview_inner.height),
+                        );
+                    }
+                    None
+                }
+            },
             MouseInputKind::LeftClick | MouseInputKind::DoubleClick => {
+                if let Some(scrollbar) = files_scrollbar
+                    .filter(|scrollbar| rect_contains(*scrollbar, input.column, input.row))
+                {
+                    self.scrollbar_drag = Some(ScrollbarDragTarget::Files);
+                    return self.handle_files_scrollbar_pointer(
+                        input.row,
+                        scrollbar,
+                        usize::from(files_inner.height),
+                    );
+                }
+                if let Some(scrollbar) = preview_scrollbar
+                    .filter(|scrollbar| rect_contains(*scrollbar, input.column, input.row))
+                {
+                    self.scrollbar_drag = Some(ScrollbarDragTarget::Preview);
+                    self.handle_preview_scrollbar_pointer(
+                        input.row,
+                        scrollbar,
+                        usize::from(preview_inner.height),
+                    );
+                    return None;
+                }
+
+                self.scrollbar_drag = None;
+
                 if let Some(path) =
                     breadcrumb_path_at(self.path(), full.header, input.column, input.row)
                 {
@@ -593,6 +674,7 @@ impl TuiApp {
                     Some(TuiRuntimeEvent::Action(KeyAction::Select))
                 }
             }
+            MouseInputKind::LeftRelease => None,
         }
     }
 
@@ -812,6 +894,35 @@ impl TuiApp {
         old_offset != self.scroll_offset || old_selection != self.selected_index
     }
 
+    fn scroll_files_to_offset(&mut self, offset: usize, rows: usize) -> bool {
+        let old_offset = self.scroll_offset;
+        let old_selection = self.selected_index;
+        let indices = self.filtered_indices();
+        if indices.is_empty() {
+            self.scroll_offset = 0;
+            self.select_index(None);
+            return old_offset != self.scroll_offset || old_selection != self.selected_index;
+        }
+        if rows == 0 {
+            return false;
+        }
+
+        let rows = rows.min(indices.len());
+        let start = offset.min(indices.len().saturating_sub(rows));
+        let end = start.saturating_add(rows);
+        self.scroll_offset = start;
+
+        let target_position = match self.selected_visible_position(&indices) {
+            Some(position) if position >= start && position < end => position,
+            Some(position) if position < start => start,
+            Some(_) => end.saturating_sub(1),
+            None => start,
+        };
+        self.select_index(indices.get(target_position).copied());
+
+        old_offset != self.scroll_offset || old_selection != self.selected_index
+    }
+
     fn scroll_preview_by(&mut self, delta: isize, rows: usize) -> bool {
         let old_offset = self.preview_scroll_offset;
         let total = self.preview_render_line_count();
@@ -829,6 +940,41 @@ impl TuiApp {
                 .min(last_start)
         };
         old_offset != self.preview_scroll_offset
+    }
+
+    fn scroll_preview_to_offset(&mut self, offset: usize, rows: usize) -> bool {
+        let old_offset = self.preview_scroll_offset;
+        let total = self.preview_render_line_count();
+        if total == 0 || rows == 0 {
+            self.preview_scroll_offset = 0;
+            return old_offset != self.preview_scroll_offset;
+        }
+
+        let last_start = total.saturating_sub(rows.min(total));
+        self.preview_scroll_offset = offset.min(last_start);
+        old_offset != self.preview_scroll_offset
+    }
+
+    fn handle_files_scrollbar_pointer(
+        &mut self,
+        row: u16,
+        scrollbar: Rect,
+        rows: usize,
+    ) -> Option<TuiRuntimeEvent> {
+        let offset = scrollbar_offset_at_row(self.filtered_entry_count(), rows, scrollbar, row)?;
+        self.focus = PanelFocus::Files;
+        self.scroll_files_to_offset(offset, rows)
+            .then_some(TuiRuntimeEvent::Action(KeyAction::Select))
+    }
+
+    fn handle_preview_scrollbar_pointer(&mut self, row: u16, scrollbar: Rect, rows: usize) {
+        let Some(offset) =
+            scrollbar_offset_at_row(self.preview_render_line_count(), rows, scrollbar, row)
+        else {
+            return;
+        };
+        self.focus = PanelFocus::Preview;
+        self.scroll_preview_to_offset(offset, rows);
     }
 
     fn select_index(&mut self, index: Option<usize>) {
@@ -1272,6 +1418,64 @@ fn rect_contains(area: Rect, column: u16, row: u16) -> bool {
     column >= area.x && column < area.right() && row >= area.y && row < area.bottom()
 }
 
+fn vertical_scrollbar_rect(inner: Rect) -> Option<Rect> {
+    (inner.width > 0 && inner.height > 0)
+        .then(|| Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height))
+}
+
+fn scrollbar_position_for_offset(total: usize, rows: usize, offset: usize) -> usize {
+    if total == 0 || rows == 0 {
+        return 0;
+    }
+
+    let rows = rows.min(total);
+    let max_start = total.saturating_sub(rows);
+    if max_start == 0 {
+        return 0;
+    }
+
+    proportional_position(offset.min(max_start), total.saturating_sub(1), max_start)
+}
+
+fn scrollbar_offset_at_row(total: usize, rows: usize, area: Rect, row: u16) -> Option<usize> {
+    if total == 0 || rows == 0 || total <= rows {
+        return None;
+    }
+
+    let rows = rows.min(total);
+    let max_start = total.saturating_sub(rows);
+    if row <= area.y {
+        return Some(0);
+    }
+
+    let last_row = area.bottom().saturating_sub(1);
+    if row >= last_row {
+        return Some(max_start);
+    }
+
+    let track_len = usize::from(area.height.saturating_sub(2));
+    if track_len <= 1 {
+        return Some(max_start / 2);
+    }
+
+    let track_row =
+        usize::from(row.saturating_sub(area.y.saturating_add(1))).min(track_len.saturating_sub(1));
+    Some(proportional_position(
+        track_row,
+        max_start,
+        track_len.saturating_sub(1),
+    ))
+}
+
+fn proportional_position(value: usize, max_value: usize, max_input: usize) -> usize {
+    if value == 0 || max_value == 0 || max_input == 0 {
+        return 0;
+    }
+
+    (((value as u128) * (max_value as u128) + ((max_input as u128) / 2)) / (max_input as u128))
+        as usize
+}
+
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
     frame.render_widget(Block::new().style(surface_style()), frame.area());
 
@@ -1363,6 +1567,8 @@ where
 fn map_crossterm_mouse_kind(kind: MouseEventKind) -> Option<MouseInputKind> {
     match kind {
         MouseEventKind::Down(MouseButton::Left) => Some(MouseInputKind::LeftClick),
+        MouseEventKind::Up(MouseButton::Left) => Some(MouseInputKind::LeftRelease),
+        MouseEventKind::Drag(MouseButton::Left) => Some(MouseInputKind::LeftDrag),
         MouseEventKind::ScrollUp => Some(MouseInputKind::ScrollUp),
         MouseEventKind::ScrollDown => Some(MouseInputKind::ScrollDown),
         _ => None,
@@ -1648,7 +1854,7 @@ fn render_files_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
 
     let range = app.visible_entry_range(rows);
     let mut state = ScrollbarState::new(total)
-        .position(range.start)
+        .position(scrollbar_position_for_offset(total, rows, range.start))
         .viewport_content_length(rows);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -1922,7 +2128,11 @@ fn render_preview_pane(
     }
 
     let mut state = ScrollbarState::new(total)
-        .position(app.preview_scroll_offset)
+        .position(scrollbar_position_for_offset(
+            total,
+            rows,
+            app.preview_scroll_offset,
+        ))
         .viewport_content_length(rows);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
