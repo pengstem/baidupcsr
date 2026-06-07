@@ -114,7 +114,6 @@ version = "0.1.0"
 name = "baidupcsr-tui"
 version = "0.1.0"
 dependencies = [
- "baidupcsr-core",
  "baidupcsr-pcs",
  "ratatui",
  "time",
