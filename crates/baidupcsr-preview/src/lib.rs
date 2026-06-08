@@ -11,10 +11,6 @@ use std::{
     time::Duration,
 };
 
-pub const fn crate_name() -> &'static str {
-    "baidupcsr-preview"
-}
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PreviewKey {
     pub account_uid: u64,
@@ -432,10 +428,6 @@ impl VideoUpstream {
             Err(VideoPreviewError::InvalidUpstreamUrl)
         }
     }
-
-    fn as_str(&self) -> &str {
-        &self.url
-    }
 }
 
 impl fmt::Debug for VideoUpstream {
@@ -548,13 +540,17 @@ impl VideoRange {
     }
 
     pub fn len(&self) -> u64 {
-        self.end_inclusive
-            .saturating_sub(self.start)
-            .saturating_add(1)
+        if self.is_empty() {
+            0
+        } else {
+            self.end_inclusive
+                .saturating_sub(self.start)
+                .saturating_add(1)
+        }
     }
 
     pub const fn is_empty(&self) -> bool {
-        false
+        self.start > self.end_inclusive
     }
 
     pub fn contains(&self, other: Self) -> bool {
@@ -630,116 +626,6 @@ impl RequestedVideoRange {
 impl From<VideoRange> for RequestedVideoRange {
     fn from(range: VideoRange) -> Self {
         Self::Explicit(range)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct VideoChunkCache {
-    budget: VideoCacheBudget,
-    used_bytes: u64,
-    chunks: HashMap<u64, Vec<u8>>,
-    lru: VecDeque<u64>,
-}
-
-impl VideoChunkCache {
-    pub fn new(budget: VideoCacheBudget) -> Self {
-        Self {
-            budget,
-            used_bytes: 0,
-            chunks: HashMap::new(),
-            lru: VecDeque::new(),
-        }
-    }
-
-    pub fn put(&mut self, offset: u64, bytes: Vec<u8>) -> Result<(), VideoPreviewError> {
-        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if len > self.budget.chunk_size_bytes {
-            return Err(VideoPreviewError::VideoChunkTooLarge);
-        }
-
-        self.remove(offset);
-        self.used_bytes = self.used_bytes.saturating_add(len);
-        self.chunks.insert(offset, bytes);
-        self.touch(offset);
-        self.evict_until_within_budget();
-        Ok(())
-    }
-
-    pub fn get(&mut self, offset: u64) -> Option<&[u8]> {
-        if !self.chunks.contains_key(&offset) {
-            return None;
-        }
-        self.touch(offset);
-        self.chunks.get(&offset).map(Vec::as_slice)
-    }
-
-    pub const fn used_bytes(&self) -> u64 {
-        self.used_bytes
-    }
-
-    pub fn window(&self) -> Option<VideoRange> {
-        let mut start = u64::MAX;
-        let mut end = 0;
-        for (offset, bytes) in &self.chunks {
-            start = start.min(*offset);
-            let chunk_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            end = end.max(offset.saturating_add(chunk_len).saturating_sub(1));
-        }
-
-        if start == u64::MAX {
-            None
-        } else {
-            Some(VideoRange {
-                start,
-                end_inclusive: end,
-            })
-        }
-    }
-
-    pub fn retain_window(&mut self, window_start: u64, window_len: u64) {
-        let window_end = window_start.saturating_add(window_len);
-        let stale_offsets: Vec<u64> = self
-            .chunks
-            .iter()
-            .filter_map(|(offset, bytes)| {
-                let chunk_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                let chunk_end = offset.saturating_add(chunk_len);
-                if chunk_end <= window_start || *offset >= window_end {
-                    Some(*offset)
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for offset in stale_offsets {
-            self.remove(offset);
-        }
-    }
-
-    fn remove(&mut self, offset: u64) {
-        if let Some(bytes) = self.chunks.remove(&offset) {
-            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-            self.used_bytes = self.used_bytes.saturating_sub(len);
-        }
-        self.lru.retain(|item| item != &offset);
-    }
-
-    fn touch(&mut self, offset: u64) {
-        self.lru.retain(|item| item != &offset);
-        self.lru.push_back(offset);
-    }
-
-    fn evict_until_within_budget(&mut self) {
-        while self.used_bytes > self.budget.memory_limit_bytes() {
-            let Some(offset) = self.lru.pop_front() else {
-                break;
-            };
-            if let Some(bytes) = self.chunks.remove(&offset) {
-                let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-                self.used_bytes = self.used_bytes.saturating_sub(len);
-            }
-        }
     }
 }
 
@@ -1111,7 +997,6 @@ impl VideoPreviewSession {
             return Err(VideoPreviewError::InvalidVideoToken);
         }
 
-        let _upstream_url = self.upstream.as_str();
         match request.method {
             VideoProxyMethod::Head => Ok(VideoProxyResponse::Head {
                 content_length: self.key.size,

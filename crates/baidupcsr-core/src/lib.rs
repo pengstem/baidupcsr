@@ -7,10 +7,6 @@ use std::{
 use baidupcsr_pcs::FileEntry;
 use serde::{Deserialize, Serialize};
 
-pub const fn crate_name() -> &'static str {
-    "baidupcsr-core"
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RefreshGeneration(u64);
 
@@ -407,45 +403,6 @@ impl CacheEntry {
             status: DirectoryStatus::Empty,
             generation: RefreshGeneration(0),
         }
-    }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct SessionState {
-    current_path: Option<String>,
-    recent_paths: Vec<String>,
-    favorite_paths: Vec<String>,
-}
-
-impl SessionState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn visit(&mut self, path: &str) {
-        self.current_path = Some(path.to_string());
-        self.recent_paths.retain(|item| item != path);
-        self.recent_paths.insert(0, path.to_string());
-    }
-
-    pub fn toggle_favorite(&mut self, path: &str) {
-        if self.favorite_paths.iter().any(|item| item == path) {
-            self.favorite_paths.retain(|item| item != path);
-        } else {
-            self.favorite_paths.push(path.to_string());
-        }
-    }
-
-    pub fn current_path(&self) -> Option<&str> {
-        self.current_path.as_deref()
-    }
-
-    pub fn recent_paths(&self) -> Vec<&str> {
-        self.recent_paths.iter().map(String::as_str).collect()
-    }
-
-    pub fn favorite_paths(&self) -> Vec<&str> {
-        self.favorite_paths.iter().map(String::as_str).collect()
     }
 }
 

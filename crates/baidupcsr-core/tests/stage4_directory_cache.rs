@@ -1,4 +1,4 @@
-use baidupcsr_core::{DirectoryCache, DirectoryChange, DirectoryStatus, SessionState};
+use baidupcsr_core::{DirectoryCache, DirectoryChange, DirectoryStatus};
 use baidupcsr_pcs::FileEntry;
 
 fn file(fs_id: i64, path: &str, size: i64, mtime: i64) -> FileEntry {
@@ -91,18 +91,4 @@ fn refresh_reports_added_removed_and_modified_entries() {
             DirectoryChange::Modified { fs_id: 2 },
         ]
     );
-}
-
-#[test]
-fn session_state_tracks_recent_and_favorite_paths() {
-    let mut session = SessionState::new();
-
-    session.visit("/one");
-    session.visit("/two");
-    session.visit("/one");
-    session.toggle_favorite("/one");
-
-    assert_eq!(session.current_path(), Some("/one"));
-    assert_eq!(session.recent_paths(), vec!["/one", "/two"]);
-    assert_eq!(session.favorite_paths(), vec!["/one"]);
 }

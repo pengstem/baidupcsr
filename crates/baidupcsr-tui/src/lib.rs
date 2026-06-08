@@ -20,10 +20,6 @@ use std::{cmp::Ordering, collections::BTreeMap, io, ops::Range, time::Duration};
 use time::{macros::format_description, OffsetDateTime};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub const fn crate_name() -> &'static str {
-    "baidupcsr-tui"
-}
-
 pub const DEFAULT_KEYMAP: KeyMap = KeyMap;
 
 const THEME_BG: Color = Color::Rgb(15, 23, 42);

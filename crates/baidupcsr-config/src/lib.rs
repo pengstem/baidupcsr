@@ -13,10 +13,6 @@ pub const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
 pub const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
 pub const ENV_CACHE_DIR: &str = "BAIDUPCSR_CACHE_DIR";
 
-pub const fn crate_name() -> &'static str {
-    "baidupcsr-config"
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TargetOs {
     Unix,

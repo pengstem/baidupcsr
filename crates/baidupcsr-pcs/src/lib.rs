@@ -10,10 +10,6 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest as Sha1Digest, Sha1};
 use url::form_urlencoded;
 
-pub const fn crate_name() -> &'static str {
-    "baidupcsr-pcs"
-}
-
 const PAN_APP_ID: i64 = 250528;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -349,16 +345,6 @@ impl PcsAuth {
 }
 
 impl BlockingPcsClientOptions {
-    pub fn new(user_agent: impl Into<String>, proxy: Option<String>) -> Self {
-        let user_agent = user_agent.into();
-        Self {
-            pan_user_agent: user_agent.clone(),
-            user_agent,
-            proxy,
-            timeout: Duration::from_secs(15),
-        }
-    }
-
     pub fn new_with_pan(
         user_agent: impl Into<String>,
         pan_user_agent: impl Into<String>,
@@ -407,10 +393,6 @@ impl BlockingPcsClient {
         }
 
         parse_file_list(&text)
-    }
-
-    pub fn download_range(&self, path: &str, range: ByteRange) -> Result<Vec<u8>, PcsError> {
-        self.download_range_with_cancel(path, range, || false)
     }
 
     pub fn locate_download_urls(
@@ -864,7 +846,7 @@ pub fn select_download_urls(info: &LocateDownloadInfo, https: bool) -> Vec<Strin
 pub fn dev_uid(feature: &str) -> String {
     let mut md5 = Md5::new();
     Md5Digest::update(&mut md5, feature.as_bytes());
-    format!("{}|0", hex_upper(&Md5Digest::finalize(md5)))
+    format!("{:X}|0", Md5Digest::finalize(md5))
 }
 
 pub fn locatedownload_sign_with(
@@ -875,7 +857,7 @@ pub fn locatedownload_sign_with(
 ) -> LocateDownloadSign {
     let mut bduss_sha1 = Sha1::new();
     Sha1Digest::update(&mut bduss_sha1, bduss.as_bytes());
-    let bduss_sha1_hex = hex_lower(&Sha1Digest::finalize(bduss_sha1));
+    let bduss_sha1_hex = format!("{:x}", Sha1Digest::finalize(bduss_sha1));
 
     let mut rand_sha1 = Sha1::new();
     Sha1Digest::update(&mut rand_sha1, bduss_sha1_hex.as_bytes());
@@ -886,7 +868,7 @@ pub fn locatedownload_sign_with(
 
     LocateDownloadSign {
         time,
-        rand: hex_lower(&Sha1Digest::finalize(rand_sha1)),
+        rand: format!("{:x}", Sha1Digest::finalize(rand_sha1)),
         devuid: devuid.to_string(),
     }
 }
@@ -1017,30 +999,4 @@ fn now_unix_seconds() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn hex_lower(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        push_hex(&mut out, *byte, false);
-    }
-    out
-}
-
-fn hex_upper(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        push_hex(&mut out, *byte, true);
-    }
-    out
-}
-
-fn push_hex(out: &mut String, byte: u8, upper: bool) {
-    let alphabet = if upper {
-        b"0123456789ABCDEF"
-    } else {
-        b"0123456789abcdef"
-    };
-    out.push(char::from(alphabet[usize::from(byte >> 4)]));
-    out.push(char::from(alphabet[usize::from(byte & 0x0f)]));
 }

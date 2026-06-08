@@ -1,9 +1,9 @@
 use baidupcsr_preview::{
     parse_video_range_header, LoopbackEndpoint, MpvLaunchProfile, PlaybackProgress, PlaybackState,
     PlayerBackend, PlayerLogRing, PreviewKey, RequestedVideoRange, VideoCacheBudget,
-    VideoChunkCache, VideoGatewayPolicy, VideoIntervalBuffer, VideoLoopbackServer,
-    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
-    VideoProxyResponse, VideoRange, VideoToken, VideoUpstream,
+    VideoGatewayPolicy, VideoIntervalBuffer, VideoLoopbackServer, VideoPreviewError,
+    VideoPreviewSession, VideoProxyMethod, VideoProxyRequest, VideoProxyResponse, VideoRange,
+    VideoToken, VideoUpstream,
 };
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -265,39 +265,6 @@ fn proxy_head_response_reports_range_capability_without_fetching_body(
 }
 
 #[test]
-fn video_chunk_cache_enforces_budget_and_seek_window() -> Result<(), VideoPreviewError> {
-    let budget = VideoCacheBudget::new(4, 2)?;
-    let mut cache = VideoChunkCache::new(budget);
-
-    cache.put(0, b"aaaa".to_vec())?;
-    cache.put(4, b"bbbb".to_vec())?;
-    cache.put(8, b"cccc".to_vec())?;
-
-    assert!(cache.get(0).is_none());
-    assert_eq!(cache.get(4), Some(&b"bbbb"[..]));
-    assert_eq!(cache.get(8), Some(&b"cccc"[..]));
-    assert_eq!(cache.used_bytes(), 8);
-
-    cache.retain_window(8, 4);
-    assert!(cache.get(4).is_none());
-    assert_eq!(cache.get(8), Some(&b"cccc"[..]));
-    assert_eq!(cache.used_bytes(), 4);
-    Ok(())
-}
-
-#[test]
-fn chunk_cache_rejects_chunks_larger_than_budget_chunk_size() -> Result<(), VideoPreviewError> {
-    let budget = VideoCacheBudget::new(4, 2)?;
-    let mut cache = VideoChunkCache::new(budget);
-
-    assert_eq!(
-        cache.put(0, b"too large".to_vec()),
-        Err(VideoPreviewError::VideoChunkTooLarge)
-    );
-    Ok(())
-}
-
-#[test]
 fn loopback_server_serves_head_and_range_without_exposing_upstream() -> Result<(), String> {
     let fetches = Arc::new(AtomicUsize::new(0));
     let fetches_for_server = Arc::clone(&fetches);
@@ -309,7 +276,7 @@ fn loopback_server_serves_head_and_range_without_exposing_upstream() -> Result<(
         VideoCacheBudget::new(64, 2).map_err(debug)?,
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -362,7 +329,7 @@ fn loopback_server_serves_open_ended_far_seek_as_bounded_chunk() -> Result<(), S
                 .lock()
                 .map_err(|_| VideoPreviewError::LoopbackServerIo)?
                 .push(range);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -396,7 +363,7 @@ fn loopback_server_prefetches_after_open_ended_far_seek() -> Result<(), String> 
         VideoGatewayPolicy { prefetch_chunks: 2 },
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -424,7 +391,7 @@ fn loopback_server_rejects_wrong_token_without_fetching_upstream() -> Result<(),
         VideoCacheBudget::new(64, 2).map_err(debug)?,
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -452,7 +419,7 @@ fn loopback_server_reuses_chunk_cache_and_reports_stats() -> Result<(), String> 
         VideoCacheBudget::new(64, 2).map_err(debug)?,
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -501,7 +468,7 @@ fn loopback_server_handles_helper_request_while_fetch_is_blocked() -> Result<(),
                         .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
                 }
             }
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -548,7 +515,7 @@ fn loopback_server_prefetches_forward_window_without_exceeding_budget() -> Resul
         VideoGatewayPolicy { prefetch_chunks: 2 },
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -579,7 +546,7 @@ fn loopback_server_serves_prefetched_subrange_from_interval_buffer() -> Result<(
         VideoGatewayPolicy { prefetch_chunks: 1 },
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -618,7 +585,7 @@ fn loopback_server_does_not_prefetch_far_seek_thumbnail_requests() -> Result<(),
         VideoGatewayPolicy { prefetch_chunks: 2 },
         move |range| {
             fetches_for_server.fetch_add(1, Ordering::AcqRel);
-            bytes_for_range(range)
+            Ok(bytes_for_range(range))
         },
     )
     .map_err(debug)?;
@@ -643,12 +610,12 @@ fn loopback_server_does_not_prefetch_far_seek_thumbnail_requests() -> Result<(),
     Ok(())
 }
 
-fn bytes_for_range(range: VideoRange) -> Result<Vec<u8>, VideoPreviewError> {
+fn bytes_for_range(range: VideoRange) -> Vec<u8> {
     let len = range
         .end_inclusive
         .saturating_sub(range.start)
         .saturating_add(1);
-    Ok(vec![b'v'; usize::try_from(len).unwrap_or(usize::MAX)])
+    vec![b'v'; usize::try_from(len).unwrap_or(usize::MAX)]
 }
 
 fn wait_for_fetches(fetches: &AtomicUsize, expected: usize) -> Result<(), String> {

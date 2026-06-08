@@ -182,7 +182,7 @@ fn download_range_can_be_cancelled_before_network_work() {
             enable_https: true,
         }),
         PcsAuth::from_cookie_header("BDUSS=redacted"),
-        BlockingPcsClientOptions::new("baidupcsr-test", None),
+        BlockingPcsClientOptions::new_with_pan("baidupcsr-test", "baidupcsr-test", None),
     );
 
     assert_eq!(

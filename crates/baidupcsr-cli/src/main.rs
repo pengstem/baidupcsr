@@ -1101,7 +1101,7 @@ impl BrowserRuntime {
                         app.set_notice(format!("open_complete: #{}", id.value()));
                     } else {
                         app.set_notice(format!("download_complete: #{}", id.value()));
-                        let preferred = selected_path_for_refresh(app);
+                        let preferred = app.selected_entry().map(|entry| entry.path.clone());
                         self.start_directory_load(app, app.path().to_string(), preferred);
                     }
                 }
@@ -1183,7 +1183,7 @@ impl BrowserRuntime {
             if dir == app.path() {
                 if !refreshed_current {
                     refreshed_current = true;
-                    let preferred = selected_path_for_refresh(app);
+                    let preferred = app.selected_entry().map(|entry| entry.path.clone());
                     self.start_directory_load(app, dir, preferred);
                 }
             } else {
@@ -1321,7 +1321,10 @@ impl BrowserRuntime {
             );
             return;
         }
-        let budget = match video_budget_from_config(&self.video_config) {
+        let budget = match baidupcsr_preview::VideoCacheBudget::new(
+            self.video_config.chunk_size_bytes,
+            self.video_config.max_chunks,
+        ) {
             Ok(budget) => budget,
             Err(err) => {
                 app.finish_preview_error(
@@ -1721,7 +1724,7 @@ fn build_pcs_client(
         baidupcsr_pcs::BlockingPcsClientOptions::new_with_pan(
             user_agent,
             pan_user_agent,
-            optional_string(config.proxy.as_str()),
+            (!config.proxy.is_empty()).then(|| config.proxy.clone()),
         ),
     ))
 }
@@ -1777,7 +1780,9 @@ fn run_download_worker(worker: DownloadWorker) {
     let id = worker.id;
     let tx = worker.tx.clone();
     let result = match worker.mode {
-        TransferWorkerMode::Download => download_worker_body(&worker),
+        TransferWorkerMode::Download => {
+            download_remote_file(&worker, ExistingTargetPolicy::FailIfExists)
+        }
         TransferWorkerMode::LocalOpen => local_open_worker_body(&worker),
     };
     let event = match result {
@@ -1786,10 +1791,6 @@ fn run_download_worker(worker: DownloadWorker) {
         DownloadWorkerResult::Failed(message) => TransferTaskEvent::Failed { id, message },
     };
     let _ = tx.send(event);
-}
-
-fn download_worker_body(worker: &DownloadWorker) -> DownloadWorkerResult {
-    download_remote_file(worker, ExistingTargetPolicy::FailIfExists)
 }
 
 fn local_open_worker_body(worker: &DownloadWorker) -> DownloadWorkerResult {
@@ -1975,12 +1976,6 @@ fn is_video_entry(entry: &baidupcsr_pcs::FileEntry) -> bool {
     !entry.is_dir
         && baidupcsr_preview::preview_kind_from_name(entry.server_filename.as_str())
             == baidupcsr_preview::PreviewKind::Video
-}
-
-fn video_budget_from_config(
-    config: &baidupcsr_config::VideoPreviewConfig,
-) -> Result<baidupcsr_preview::VideoCacheBudget, baidupcsr_preview::VideoPreviewError> {
-    baidupcsr_preview::VideoCacheBudget::new(config.chunk_size_bytes, config.max_chunks)
 }
 
 fn video_memory_limit_from_config(config: &baidupcsr_config::VideoPreviewConfig) -> u64 {
@@ -2177,10 +2172,6 @@ fn local_open_command_candidates(path: &Path) -> Vec<LocalOpenCommand> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn local_open_command_candidates(_path: &Path) -> Vec<LocalOpenCommand> {
     Vec::new()
-}
-
-fn selected_path_for_refresh(app: &baidupcsr_tui::TuiApp) -> Option<String> {
-    app.selected_entry().map(|entry| entry.path.clone())
 }
 
 fn parse_remote_command(
@@ -2683,14 +2674,6 @@ fn cookie_value<'a>(cookies: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
-fn optional_string(value: &str) -> Option<String> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}
-
 fn pcs_error_label(err: &baidupcsr_pcs::PcsError) -> String {
     match err {
         baidupcsr_pcs::PcsError::Cancelled { .. } => "cancelled".to_string(),
@@ -2757,13 +2740,6 @@ fn print_doctor(config_dir: Option<PathBuf>) {
             );
         }
     }
-
-    println!("crates:");
-    println!("  - {}", baidupcsr_config::crate_name());
-    println!("  - {}", baidupcsr_core::crate_name());
-    println!("  - {}", baidupcsr_pcs::crate_name());
-    println!("  - {}", baidupcsr_preview::crate_name());
-    println!("  - {}", baidupcsr_tui::crate_name());
 }
 
 fn config_permission_label(path: &Path) -> String {
@@ -2837,9 +2813,8 @@ mod tests {
         download_target_path, fetch_first_successful_dlink_range, is_local_open_size_allowed,
         is_video_entry, list_remote_directory, local_open_command_candidates,
         local_open_target_path, pan_user_agent_for_config, parse_remote_command,
-        partial_download_path, persist_workdir_if_active, preview_key_for_entry,
-        selected_path_for_refresh, task_summary_line, tui_preview_kind, video_budget_from_config,
-        DlinkRangeAttempt, ParsedRemoteCommand, LOCAL_OPEN_MAX_BYTES,
+        partial_download_path, persist_workdir_if_active, preview_key_for_entry, task_summary_line,
+        tui_preview_kind, DlinkRangeAttempt, ParsedRemoteCommand, LOCAL_OPEN_MAX_BYTES,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -3115,26 +3090,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_path_for_refresh_uses_current_selection() {
-        let mut app = baidupcsr_tui::TuiApp::new("/docs");
-        app.set_entries(vec![
-            file(1, 12),
-            FileEntry {
-                fs_id: 2,
-                path: "/docs/second.md".to_string(),
-                server_filename: "second.md".to_string(),
-                ..file(2, 34)
-            },
-        ]);
-        app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
-
-        assert_eq!(
-            selected_path_for_refresh(&app),
-            Some("/docs/second.md".to_string())
-        );
-    }
-
-    #[test]
     fn remote_command_mkdir_resolves_relative_path_under_current_directory() -> Result<(), String> {
         let app = baidupcsr_tui::TuiApp::new("/docs");
 
@@ -3349,21 +3304,5 @@ mod tests {
         entry.server_filename = "folder.mp4".to_string();
         entry.is_dir = true;
         assert!(!is_video_entry(&entry));
-    }
-
-    #[test]
-    fn video_budget_uses_sidecar_values() -> Result<(), baidupcsr_preview::VideoPreviewError> {
-        let config = baidupcsr_config::VideoPreviewConfig {
-            enabled: true,
-            chunk_size_bytes: 128 * 1024,
-            max_chunks: 3,
-            player_profile: baidupcsr_config::VideoPlayerProfile::Isolated,
-        };
-        let budget = video_budget_from_config(&config)?;
-
-        assert_eq!(budget.chunk_size_bytes, 128 * 1024);
-        assert_eq!(budget.max_chunks, 3);
-        assert_eq!(budget.memory_limit_bytes(), 384 * 1024);
-        Ok(())
     }
 }
