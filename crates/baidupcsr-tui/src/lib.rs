@@ -68,6 +68,20 @@ enum ConfirmKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputPopupAnchor {
+    TopCenter,
+    SelectedFile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InputPopup<'a> {
+    title: &'static str,
+    prompt: &'static str,
+    input: &'a str,
+    anchor: InputPopupAnchor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct FileClick {
     index: usize,
     tick: u64,
@@ -1546,6 +1560,9 @@ impl TuiApp {
     }
 
     fn status_hint(&self) -> Option<String> {
+        if self.is_text_input_mode() {
+            return None;
+        }
         if let Some(state) = self.search_results_state() {
             let status = if state.running { "searching" } else { "search" };
             return Some(format!(
@@ -1571,6 +1588,13 @@ impl TuiApp {
             )),
             DirectoryRequestState::Idle => None,
         }
+    }
+
+    const fn is_text_input_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            AppMode::Command | AppMode::Filter | AppMode::Search | AppMode::Rename
+        )
     }
 }
 
@@ -1807,6 +1831,11 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     render_tasks_pane(frame, app, layout.tasks);
     render_transfer_pane(frame, app, layout.transfer);
     frame.render_widget(status_widget(app), layout.status);
+    if let Some(input) = input_popup(app) {
+        let area = input_popup_area(frame.area(), browser.files, app, input.anchor);
+        frame.render_widget(Clear, area);
+        frame.render_widget(input_popup_widget(input), area);
+    }
     if app.help_visible {
         let area = centered_rect(frame.area(), 58, 22);
         frame.render_widget(Clear, area);
@@ -1926,6 +1955,17 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn top_centered_rect(area: Rect, width: u16, height: u16, y_offset: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + y_offset.min(area.height.saturating_sub(height)),
         width,
         height,
     }
@@ -2792,20 +2832,112 @@ fn sort_widget(app: &TuiApp) -> Paragraph<'_> {
         .style(surface_style())
 }
 
-fn status_widget(app: &TuiApp) -> Paragraph<'_> {
-    if app.mode == AppMode::Command {
-        return input_status_widget(":", &app.command_input);
+fn input_popup(app: &TuiApp) -> Option<InputPopup<'_>> {
+    match app.mode {
+        AppMode::Command => Some(InputPopup {
+            title: "Command",
+            prompt: ":",
+            input: &app.command_input,
+            anchor: InputPopupAnchor::TopCenter,
+        }),
+        AppMode::Filter => Some(InputPopup {
+            title: "Filter",
+            prompt: "",
+            input: &app.filter_input,
+            anchor: InputPopupAnchor::TopCenter,
+        }),
+        AppMode::Search => Some(InputPopup {
+            title: "Search",
+            prompt: "",
+            input: &app.search_input,
+            anchor: InputPopupAnchor::TopCenter,
+        }),
+        AppMode::Rename => Some(InputPopup {
+            title: "Rename",
+            prompt: "",
+            input: &app.rename_input,
+            anchor: InputPopupAnchor::SelectedFile,
+        }),
+        AppMode::Normal | AppMode::Sort | AppMode::Confirm => None,
     }
-    if app.mode == AppMode::Filter {
-        return input_status_widget("f", &app.filter_input);
-    }
-    if app.mode == AppMode::Search {
-        return input_status_widget("s", &app.search_input);
-    }
-    if app.mode == AppMode::Rename {
-        return input_status_widget("rename ", &app.rename_input);
+}
+
+fn input_popup_area(root: Rect, files: Rect, app: &TuiApp, anchor: InputPopupAnchor) -> Rect {
+    const WIDTH: u16 = 50;
+    const HEIGHT: u16 = 3;
+    const TOP_OFFSET: u16 = 2;
+    const HOVERED_Y_OFFSET: u16 = 1;
+
+    if anchor == InputPopupAnchor::SelectedFile {
+        if let Some(area) =
+            selected_file_input_area(root, files, app, WIDTH, HEIGHT, HOVERED_Y_OFFSET)
+        {
+            return area;
+        }
     }
 
+    top_centered_rect(root, WIDTH, HEIGHT, TOP_OFFSET)
+}
+
+fn selected_file_input_area(
+    root: Rect,
+    files: Rect,
+    app: &TuiApp,
+    width: u16,
+    height: u16,
+    y_offset: u16,
+) -> Option<Rect> {
+    let rows = files_visible_rows(files);
+    let visible_indices = app.filtered_indices();
+    let range = app.visible_entry_range(rows);
+    let selected_row = app.selected_index().and_then(|selected| {
+        visible_indices[range.clone()]
+            .iter()
+            .position(|index| *index == selected)
+    })?;
+    let files_inner = inner_rect(files);
+    let y = files_inner
+        .y
+        .saturating_add(selected_row as u16)
+        .saturating_add(y_offset);
+    if y.saturating_add(height) > files.bottom() {
+        return None;
+    }
+
+    let width = width.min(root.width);
+    let height = height.min(root.height);
+    let centered_x = files.x + files.width.saturating_sub(width) / 2;
+    let max_x = root.right().saturating_sub(width);
+    Some(Rect {
+        x: centered_x.min(max_x),
+        y,
+        width,
+        height,
+    })
+}
+
+fn input_popup_widget(input: InputPopup<'_>) -> Paragraph<'_> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(input.prompt, confirm_style()),
+        Span::styled(input.input, content_style()),
+        Span::styled("|", confirm_style()),
+    ]))
+    .block(
+        Block::bordered()
+            .style(surface_style())
+            .border_style(Style::new().fg(THEME_ACCENT).bg(THEME_BG))
+            .title(Line::from(Span::styled(
+                input.title,
+                Style::new()
+                    .fg(THEME_ACCENT)
+                    .bg(THEME_BG)
+                    .add_modifier(Modifier::BOLD),
+            ))),
+    )
+    .style(surface_style())
+}
+
+fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     let mut spans = vec![
         Span::styled(
             app.mode.label(),
@@ -2848,15 +2980,6 @@ fn status_widget(app: &TuiApp) -> Paragraph<'_> {
         ));
     }
     Paragraph::new(Line::from(spans)).style(Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG))
-}
-
-fn input_status_widget(prompt: &str, input: &str) -> Paragraph<'static> {
-    Paragraph::new(Line::raw(format!("{prompt}{input}|"))).style(
-        Style::new()
-            .fg(THEME_ACCENT)
-            .bg(THEME_BG)
-            .add_modifier(Modifier::BOLD),
-    )
 }
 
 fn request_state_color(state: DirectoryRequestState) -> Color {

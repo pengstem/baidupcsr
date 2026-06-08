@@ -99,6 +99,21 @@ fn line_index_containing(buffer: &Buffer, text: &str) -> Option<u16> {
     None
 }
 
+fn line_indices_containing(buffer: &Buffer, text: &str) -> Vec<u16> {
+    let mut indices = Vec::new();
+    for y in buffer.area.top()..buffer.area.bottom() {
+        let mut line = String::new();
+        for x in buffer.area.left()..buffer.area.right() {
+            line.push_str(buffer[(x, y)].symbol());
+        }
+        if line.contains(text) {
+            indices.push(y);
+        }
+    }
+
+    indices
+}
+
 fn infallible<T>(result: Result<T, Infallible>) -> T {
     match result {
         Ok(value) => value,
@@ -462,7 +477,7 @@ fn ratatui_render_distinguishes_loading_empty_and_error_file_states() {
 }
 
 #[test]
-fn ratatui_render_shows_filter_input_in_bottom_modeline() {
+fn ratatui_render_shows_filter_input_in_popup_block() {
     let mut app = TuiApp::new("/");
     app.set_entries(vec![
         file(1, "/notes.md", 1024, false),
@@ -474,10 +489,70 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
     let screen = draw_to_text(&app, None);
     let last_line = screen.lines().last().unwrap_or_default();
 
-    assert!(last_line.contains("fn|"));
+    assert!(screen.contains("Filter"));
+    assert!(screen.contains("n|"));
+    assert!(!last_line.contains("n|"));
+    assert!(!last_line.contains("filter \"n\""));
     assert!(screen.contains("Files 1-1/1 of 2"));
     assert!(screen.contains("notes.md"));
     assert!(!screen.contains("photo.jpg"));
+}
+
+#[test]
+fn ratatui_render_shows_search_input_in_popup_block() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![file(1, "/notes.md", 1024, false)]);
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('s'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('n'));
+
+    let screen = draw_to_text(&app, None);
+    let last_line = screen.lines().last().unwrap_or_default();
+
+    assert!(screen.contains("Search"));
+    assert!(screen.contains("n|"));
+    assert!(!last_line.contains("n|"));
+}
+
+#[test]
+fn ratatui_render_shows_command_input_in_popup_block() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![file(1, "/notes.md", 1024, false)]);
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char(':'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('d'));
+
+    let screen = draw_to_text(&app, None);
+    let last_line = screen.lines().last().unwrap_or_default();
+
+    assert!(screen.contains("Command"));
+    assert!(screen.contains(":d|"));
+    assert!(!last_line.contains(":d|"));
+}
+
+#[test]
+fn ratatui_render_shows_rename_input_near_selected_file() {
+    let mut app = TuiApp::new("/docs");
+    app.set_entries(vec![file_with_name(
+        1,
+        "/docs/notes.md",
+        "notes.md",
+        1024,
+        false,
+    )]);
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('r'));
+
+    let buffer = draw_buffer(&app, None, 96, 24);
+    let screen = buffer_to_text(&buffer);
+    let last_line = screen.lines().last().unwrap_or_default();
+
+    let rename_y = line_index_containing(&buffer, "Rename").unwrap_or_default();
+    let files_y = line_index_containing(&buffer, "Files").unwrap_or_default();
+    let input_rows = line_indices_containing(&buffer, "notes.md|");
+
+    assert!(screen.contains("Rename"));
+    assert!(screen.contains("notes.md|"));
+    assert!(!last_line.contains("notes.md|"));
+    assert!(rename_y > files_y);
+    assert!(input_rows.iter().any(|row| *row > files_y));
 }
 
 #[test]
