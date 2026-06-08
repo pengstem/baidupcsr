@@ -49,6 +49,8 @@ enum AppMode {
     Normal,
     Filter,
     Search,
+    Rename,
+    Sort,
     Command,
     Confirm,
 }
@@ -83,9 +85,64 @@ impl AppMode {
             Self::Normal => "NORMAL",
             Self::Filter => "FILTER",
             Self::Search => "SEARCH",
+            Self::Rename => "RENAME",
+            Self::Sort => "SORT",
             Self::Command => "COMMAND",
             Self::Confirm => "CONFIRM",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SortKey {
+    Name,
+    Modified,
+    Size,
+    Type,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SortMode {
+    key: SortKey,
+    direction: SortDirection,
+}
+
+impl SortKey {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Modified => "modified",
+            Self::Size => "size",
+            Self::Type => "type",
+        }
+    }
+}
+
+impl SortDirection {
+    const fn marker(self) -> &'static str {
+        match self {
+            Self::Ascending => "asc",
+            Self::Descending => "desc",
+        }
+    }
+}
+
+impl SortMode {
+    const fn default() -> Self {
+        Self {
+            key: SortKey::Name,
+            direction: SortDirection::Ascending,
+        }
+    }
+
+    fn label(self) -> String {
+        format!("sort {} {}", self.key.label(), self.direction.marker())
     }
 }
 
@@ -117,6 +174,9 @@ pub enum KeyAction {
     Search,
     Command,
     Refresh,
+    Rename,
+    Delete,
+    Sort,
     Preview,
     Download,
     CancelTask,
@@ -155,6 +215,7 @@ pub enum TuiRuntimeEvent {
     Action(KeyAction),
     CommandSubmitted(String),
     SearchSubmitted(String),
+    RenameSubmitted(String),
     PathRequested(String),
     ConfirmAccepted,
     ConfirmRejected,
@@ -240,10 +301,13 @@ const fn key_action_for(event: KeyEvent) -> Option<KeyAction> {
         KeyEvent::Char('/') | KeyEvent::Char('f') => Some(KeyAction::Filter),
         KeyEvent::Char('s') => Some(KeyAction::Search),
         KeyEvent::Char(':') => Some(KeyAction::Command),
-        KeyEvent::Char('r') => Some(KeyAction::Refresh),
+        KeyEvent::Char('r') => Some(KeyAction::Rename),
+        KeyEvent::Char('u') => Some(KeyAction::Refresh),
         KeyEvent::Char('p') => Some(KeyAction::Preview),
         KeyEvent::Char('d') => Some(KeyAction::Download),
-        KeyEvent::Char('x') => Some(KeyAction::CancelTask),
+        KeyEvent::Char('x') => Some(KeyAction::Delete),
+        KeyEvent::Char('c') => Some(KeyAction::CancelTask),
+        KeyEvent::Char(',') => Some(KeyAction::Sort),
         KeyEvent::Char(' ') => Some(KeyAction::ToggleSelect),
         KeyEvent::Char('q') => Some(KeyAction::Quit),
         KeyEvent::Esc
@@ -275,6 +339,8 @@ pub struct TuiApp {
     command_input: String,
     filter_input: String,
     search_input: String,
+    rename_input: String,
+    sort_mode: SortMode,
     file_list_mode: FileListMode,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
@@ -310,6 +376,8 @@ impl TuiApp {
             command_input: String::new(),
             filter_input: String::new(),
             search_input: String::new(),
+            rename_input: String::new(),
+            sort_mode: SortMode::default(),
             file_list_mode: FileListMode::Directory,
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
@@ -425,6 +493,10 @@ impl TuiApp {
         self.notice = Some(notice.into());
     }
 
+    pub fn sort_mode_label(&self) -> String {
+        self.sort_mode.label()
+    }
+
     pub fn begin_search_results(&mut self, root_path: &str, keyword: &str) {
         let restore_selection_path = self.selected_entry().map(|entry| entry.path.clone());
         let restore_entries = self.entries.clone();
@@ -467,6 +539,7 @@ impl TuiApp {
         state.scanned_entries = scanned_entries;
         state.matches = state.matches.saturating_add(entries.len());
         self.entries.extend(entries);
+        self.sort_entries_preserving_selection();
         if self.selected_index.is_none() && !self.entries.is_empty() {
             self.select_index(Some(0));
         }
@@ -524,6 +597,40 @@ impl TuiApp {
             FileListMode::Directory => None,
             FileListMode::SearchResults(state) => Some(state.root_path.as_str()),
         }
+    }
+
+    fn begin_rename_input(&mut self) {
+        let Some(name) = self
+            .selected_entry()
+            .map(|entry| entry.server_filename.clone())
+        else {
+            self.notice = Some("rename_error: no selected entry".to_string());
+            return;
+        };
+        self.mode = AppMode::Rename;
+        self.rename_input = name;
+    }
+
+    fn begin_sort_menu(&mut self) {
+        self.mode = AppMode::Sort;
+    }
+
+    fn choose_sort_key(&mut self, key: SortKey) {
+        if self.sort_mode.key == key {
+            self.sort_mode.direction = match self.sort_mode.direction {
+                SortDirection::Ascending => SortDirection::Descending,
+                SortDirection::Descending => SortDirection::Ascending,
+            };
+        } else {
+            self.sort_mode = SortMode {
+                key,
+                direction: default_sort_direction(key),
+            };
+        }
+        self.mode = AppMode::Normal;
+        self.sort_entries_preserving_selection();
+        self.sync_selection_to_filter();
+        self.notice = Some(self.sort_mode.label());
     }
 
     pub fn set_cache_age_seconds(&mut self, value: Option<u64>) {
@@ -778,6 +885,8 @@ impl TuiApp {
             AppMode::Command => self.handle_command_key(event),
             AppMode::Filter => self.handle_filter_key(event),
             AppMode::Search => self.handle_search_key(event),
+            AppMode::Rename => self.handle_rename_key(event),
+            AppMode::Sort => self.handle_sort_key(event),
             AppMode::Confirm => self.handle_confirm_key(event),
         }
     }
@@ -1085,6 +1194,8 @@ impl TuiApp {
                 self.mode = AppMode::Search;
                 self.search_input.clear();
             }
+            KeyAction::Rename => self.begin_rename_input(),
+            KeyAction::Sort => self.begin_sort_menu(),
             KeyAction::Command => {
                 self.mode = AppMode::Command;
                 self.command_input.clear();
@@ -1100,6 +1211,7 @@ impl TuiApp {
             KeyAction::Back
             | KeyAction::Enter
             | KeyAction::Refresh
+            | KeyAction::Delete
             | KeyAction::Preview
             | KeyAction::Download
             | KeyAction::CancelTask
@@ -1221,6 +1333,82 @@ impl TuiApp {
         }
     }
 
+    fn handle_rename_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                self.rename_input.clear();
+                None
+            }
+            KeyEvent::Backspace => {
+                self.rename_input.pop();
+                None
+            }
+            KeyEvent::Enter => {
+                let input = self.rename_input.trim().to_string();
+                self.rename_input.clear();
+                self.mode = AppMode::Normal;
+                if input.is_empty() {
+                    None
+                } else {
+                    Some(TuiRuntimeEvent::RenameSubmitted(input))
+                }
+            }
+            KeyEvent::Char(ch) => {
+                self.rename_input.push(ch);
+                None
+            }
+            KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
+        }
+    }
+
+    fn handle_sort_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                None
+            }
+            KeyEvent::Char('n' | 'N') => {
+                self.choose_sort_key(SortKey::Name);
+                None
+            }
+            KeyEvent::Char('m' | 'M') => {
+                self.choose_sort_key(SortKey::Modified);
+                None
+            }
+            KeyEvent::Char('z' | 'Z') => {
+                self.choose_sort_key(SortKey::Size);
+                None
+            }
+            KeyEvent::Char('t' | 'T') => {
+                self.choose_sort_key(SortKey::Type);
+                None
+            }
+            KeyEvent::Enter
+            | KeyEvent::Backspace
+            | KeyEvent::Char(_)
+            | KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
+        }
+    }
+
     fn handle_confirm_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
         match event {
             KeyEvent::Char('y' | 'Y') => {
@@ -1273,7 +1461,7 @@ impl TuiApp {
         mut entries: Vec<FileEntry>,
         preferred_selection_path: Option<&str>,
     ) {
-        sort_entries(&mut entries);
+        sort_entries(&mut entries, self.sort_mode);
         self.entries = entries;
         self.last_file_click = None;
         let selected_index = preferred_selection_path
@@ -1281,6 +1469,16 @@ impl TuiApp {
             .or_else(|| (!self.entries.is_empty()).then_some(0));
         self.select_index(selected_index);
         self.sync_selection_to_filter();
+    }
+
+    fn sort_entries_preserving_selection(&mut self) {
+        let selected_path = self.selected_entry().map(|entry| entry.path.clone());
+        sort_entries(&mut self.entries, self.sort_mode);
+        self.select_index(
+            selected_path
+                .as_deref()
+                .and_then(|path| self.entries.iter().position(|entry| entry.path == path)),
+        );
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
@@ -1386,15 +1584,58 @@ fn normalize_path(path: &str) -> String {
     }
 }
 
-fn sort_entries(entries: &mut [FileEntry]) {
+fn sort_entries(entries: &mut [FileEntry], mode: SortMode) {
     entries.sort_by(|left, right| match right.is_dir.cmp(&left.is_dir) {
-        Ordering::Equal => left
-            .server_filename
-            .to_lowercase()
-            .cmp(&right.server_filename.to_lowercase())
-            .then_with(|| left.server_filename.cmp(&right.server_filename)),
+        Ordering::Equal => sort_entry_order(left, right, mode),
         order => order,
     });
+}
+
+fn sort_entry_order(left: &FileEntry, right: &FileEntry, mode: SortMode) -> Ordering {
+    let order = match mode.key {
+        SortKey::Name => name_order(left, right),
+        SortKey::Modified => left
+            .mtime
+            .cmp(&right.mtime)
+            .then_with(|| name_order(left, right)),
+        SortKey::Size => left
+            .size
+            .cmp(&right.size)
+            .then_with(|| name_order(left, right)),
+        SortKey::Type => entry_type_key(left)
+            .cmp(&entry_type_key(right))
+            .then_with(|| name_order(left, right)),
+    };
+    match mode.direction {
+        SortDirection::Ascending => order,
+        SortDirection::Descending => order.reverse(),
+    }
+}
+
+fn name_order(left: &FileEntry, right: &FileEntry) -> Ordering {
+    left.server_filename
+        .to_lowercase()
+        .cmp(&right.server_filename.to_lowercase())
+        .then_with(|| left.server_filename.cmp(&right.server_filename))
+        .then_with(|| left.path.cmp(&right.path))
+}
+
+fn entry_type_key(entry: &FileEntry) -> String {
+    if entry.is_dir {
+        return "directory".to_string();
+    }
+    entry
+        .server_filename
+        .rsplit_once('.')
+        .map_or("", |(_, suffix)| suffix)
+        .to_lowercase()
+}
+
+const fn default_sort_direction(key: SortKey) -> SortDirection {
+    match key {
+        SortKey::Modified => SortDirection::Descending,
+        SortKey::Name | SortKey::Size | SortKey::Type => SortDirection::Ascending,
+    }
 }
 
 fn visible_range_from_offset(total: usize, offset: usize, rows: usize) -> Range<usize> {
@@ -1576,6 +1817,11 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
         let area = centered_rect(frame.area(), 64, body_lines.saturating_add(4).clamp(7, 14));
         frame.render_widget(Clear, area);
         frame.render_widget(confirm_widget(app), area);
+    }
+    if app.mode == AppMode::Sort {
+        let area = centered_rect(frame.area(), 48, 9);
+        frame.render_widget(Clear, area);
+        frame.render_widget(sort_widget(app), area);
     }
 }
 
@@ -1769,15 +2015,15 @@ fn help_widget() -> Paragraph<'static> {
         help_section_line("Actions"),
         content_line("  f filter  s search : command"),
         content_line("  ? help             Esc close/cancel"),
-        content_line("  space mark         r refresh"),
-        content_line("  d download         x cancel task"),
-        content_line("  p preview/open     q quit"),
+        content_line("  space mark         u refresh"),
+        content_line("  x delete           r rename"),
+        content_line("  , sort             c cancel task"),
+        content_line("  d download         p preview/open  q quit"),
         content_line("  y/n                confirm / cancel"),
         Line::raw("").style(surface_style()),
         help_section_line("Mouse"),
         content_line("  file click selects double-click opens"),
-        content_line("  wheel follows mouse pane"),
-        content_line("  path click jumps"),
+        content_line("  wheel follows mouse pane  path click jumps"),
     ])
     .block(themed_block("Shortcuts", true))
     .style(surface_style())
@@ -2504,6 +2750,48 @@ fn confirm_body_lines(app: &TuiApp) -> Vec<String> {
     lines
 }
 
+fn sort_widget(app: &TuiApp) -> Paragraph<'_> {
+    let options = [
+        (SortKey::Name, "n", "Name"),
+        (SortKey::Modified, "m", "Modified"),
+        (SortKey::Size, "z", "Size"),
+        (SortKey::Type, "t", "Type"),
+    ];
+    let mut lines = vec![Line::raw(app.sort_mode.label()).style(confirm_style())];
+    lines.push(Line::raw("").style(surface_style()));
+    for (key, shortcut, label) in options {
+        let active = app.sort_mode.key == key;
+        let marker = if active {
+            app.sort_mode.direction.marker()
+        } else {
+            "select"
+        };
+        let style = if active {
+            confirm_style()
+        } else {
+            content_style()
+        };
+        lines.push(Line::raw(format!("[{shortcut}] {label:<8} {marker}")).style(style));
+    }
+    lines.push(Line::raw("").style(surface_style()));
+    lines.push(Line::raw("Esc cancel").style(meta_value_style()));
+
+    Paragraph::new(lines)
+        .block(
+            Block::bordered()
+                .style(surface_style())
+                .border_style(Style::new().fg(THEME_ACCENT).bg(THEME_BG))
+                .title(Line::from(Span::styled(
+                    "Sort",
+                    Style::new()
+                        .fg(THEME_ACCENT)
+                        .bg(THEME_BG)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+        )
+        .style(surface_style())
+}
+
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     if app.mode == AppMode::Command {
         return input_status_widget(":", &app.command_input);
@@ -2513,6 +2801,9 @@ fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     }
     if app.mode == AppMode::Search {
         return input_status_widget("s", &app.search_input);
+    }
+    if app.mode == AppMode::Rename {
+        return input_status_widget("rename ", &app.rename_input);
     }
 
     let mut spans = vec![
@@ -2531,6 +2822,11 @@ fn status_widget(app: &TuiApp) -> Paragraph<'_> {
         Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
         Span::styled(
             format!("{} selected", app.selected_paths.len()),
+            Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG),
+        ),
+        Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
+        Span::styled(
+            app.sort_mode.label(),
             Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG),
         ),
         Span::styled("  ", Style::new().fg(THEME_STATUS_TEXT).bg(THEME_BG)),
@@ -2862,10 +3158,17 @@ mod tests {
             key_action_for(KeyEvent::Char('d')),
             Some(KeyAction::Download)
         );
+        assert_eq!(key_action_for(KeyEvent::Char('x')), Some(KeyAction::Delete));
         assert_eq!(
-            key_action_for(KeyEvent::Char('x')),
+            key_action_for(KeyEvent::Char('c')),
             Some(KeyAction::CancelTask)
         );
+        assert_eq!(key_action_for(KeyEvent::Char('r')), Some(KeyAction::Rename));
+        assert_eq!(
+            key_action_for(KeyEvent::Char('u')),
+            Some(KeyAction::Refresh)
+        );
+        assert_eq!(key_action_for(KeyEvent::Char(',')), Some(KeyAction::Sort));
         assert_eq!(
             key_action_for(KeyEvent::PageDown),
             Some(KeyAction::PageDown)
@@ -3112,6 +3415,94 @@ mod tests {
         );
         assert_eq!(app.mode, AppMode::Normal);
         assert_eq!(app.search_input, "");
+    }
+
+    #[test]
+    fn r_prefills_selected_name_and_submits_rename_input() {
+        let mut app = TuiApp::new("/docs");
+        let mut entry = file(1, "/docs/notes.md");
+        entry.server_filename = "notes.md".to_string();
+        app.set_entries(vec![entry]);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('r')), None);
+        assert_eq!(app.mode, AppMode::Rename);
+        assert_eq!(app.rename_input, "notes.md");
+        for _ in 0.."notes.md".len() {
+            app.handle_key_event(KeyEvent::Backspace);
+        }
+        for ch in "renamed.md".chars() {
+            app.handle_key_event(KeyEvent::Char(ch));
+        }
+
+        assert_eq!(
+            app.handle_key_event(KeyEvent::Enter),
+            Some(TuiRuntimeEvent::RenameSubmitted("renamed.md".to_string()))
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.rename_input.is_empty());
+    }
+
+    #[test]
+    fn comma_sort_menu_changes_order_and_toggles_direction() {
+        let mut older = file(1, "/docs/older.txt");
+        older.server_filename = "older.txt".to_string();
+        older.mtime = 10;
+        let mut newer = file(2, "/docs/newer.txt");
+        newer.server_filename = "newer.txt".to_string();
+        newer.mtime = 20;
+
+        let mut app = TuiApp::new("/docs");
+        app.set_entries(vec![older, newer]);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char(',')), None);
+        assert_eq!(app.mode, AppMode::Sort);
+        assert_eq!(app.handle_key_event(KeyEvent::Char('m')), None);
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.sort_mode.key, SortKey::Modified);
+        assert_eq!(app.sort_mode.direction, SortDirection::Descending);
+        assert_eq!(
+            app.entries()
+                .iter()
+                .map(|entry| entry.server_filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["newer.txt", "older.txt"]
+        );
+
+        app.handle_key_event(KeyEvent::Char(','));
+        app.handle_key_event(KeyEvent::Char('m'));
+        assert_eq!(app.sort_mode.direction, SortDirection::Ascending);
+        assert_eq!(
+            app.entries()
+                .iter()
+                .map(|entry| entry.server_filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["older.txt", "newer.txt"]
+        );
+    }
+
+    #[test]
+    fn type_sort_groups_by_extension_after_directories() {
+        let mut archive = file(1, "/docs/archive.zip");
+        archive.server_filename = "archive.zip".to_string();
+        let mut image = file(2, "/docs/photo.jpg");
+        image.server_filename = "photo.jpg".to_string();
+        let mut text = file(3, "/docs/readme.txt");
+        text.server_filename = "readme.txt".to_string();
+        let mut dir = directory(4, "/docs/folder");
+        dir.server_filename = "folder".to_string();
+
+        let mut app = TuiApp::new("/docs");
+        app.set_entries(vec![text, image, archive, dir]);
+        app.handle_key_event(KeyEvent::Char(','));
+        app.handle_key_event(KeyEvent::Char('t'));
+
+        assert_eq!(
+            app.entries()
+                .iter()
+                .map(|entry| entry.server_filename.as_str())
+                .collect::<Vec<_>>(),
+            vec!["folder", "photo.jpg", "readme.txt", "archive.zip"]
+        );
     }
 
     #[test]

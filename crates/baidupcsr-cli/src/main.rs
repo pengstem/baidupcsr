@@ -415,6 +415,9 @@ impl BrowserRuntime {
                     RemoteSearchMode::RecursiveList,
                 );
             }
+            baidupcsr_tui::TuiRuntimeEvent::RenameSubmitted(name) => {
+                self.start_rename_selected(app, name.as_str());
+            }
             baidupcsr_tui::TuiRuntimeEvent::PathRequested(path) => {
                 self.handle_path_request(app, path);
             }
@@ -462,6 +465,9 @@ impl BrowserRuntime {
                 let preferred = app.selected_entry().map(|entry| entry.path.clone());
                 self.start_directory_load(app, app.path().to_string(), preferred.as_deref());
             }
+            baidupcsr_tui::KeyAction::Delete => {
+                self.confirm_delete_selection(app);
+            }
             baidupcsr_tui::KeyAction::Up
             | baidupcsr_tui::KeyAction::Down
             | baidupcsr_tui::KeyAction::PageUp
@@ -485,11 +491,39 @@ impl BrowserRuntime {
             }
             baidupcsr_tui::KeyAction::Filter
             | baidupcsr_tui::KeyAction::Search
+            | baidupcsr_tui::KeyAction::Rename
+            | baidupcsr_tui::KeyAction::Sort
             | baidupcsr_tui::KeyAction::Command
             | baidupcsr_tui::KeyAction::ToggleSelect
             | baidupcsr_tui::KeyAction::Quit => {}
         }
         self.refresh_task_panel(app);
+    }
+
+    fn confirm_delete_selection(&mut self, app: &mut baidupcsr_tui::TuiApp) {
+        match delete_plan_for_selection(app) {
+            Ok(plan) => self.begin_remote_operation_confirm(app, plan),
+            Err(message) => app.set_notice(format!("delete_error: {message}")),
+        }
+    }
+
+    fn start_rename_selected(&mut self, app: &mut baidupcsr_tui::TuiApp, target_name: &str) {
+        match rename_plan_for_selected(app, target_name) {
+            Ok(Some(plan)) => self.start_remote_operation_task(app, plan),
+            Ok(None) => app.set_notice("rename_skipped: unchanged"),
+            Err(message) => app.set_notice(format!("rename_error: {message}")),
+        }
+    }
+
+    fn begin_remote_operation_confirm(
+        &mut self,
+        app: &mut baidupcsr_tui::TuiApp,
+        plan: baidupcsr_core::RemoteOperationPlan,
+    ) {
+        self.pending_remote_operation = Some(plan.clone());
+        let mut lines = plan.dry_run_lines().to_vec();
+        lines.push("press y to confirm, n to cancel".to_string());
+        app.begin_confirm(lines);
     }
 
     fn handle_path_request(&mut self, app: &mut baidupcsr_tui::TuiApp, path: String) {
@@ -508,10 +542,7 @@ impl BrowserRuntime {
                 mode,
             }) => self.start_search_task(app, path, keyword, mode),
             Ok(ParsedRemoteCommand::Operation(plan)) if plan.is_destructive() => {
-                self.pending_remote_operation = Some(plan.clone());
-                let mut lines = plan.dry_run_lines().to_vec();
-                lines.push("press y to confirm, n to cancel".to_string());
-                app.begin_confirm(lines);
+                self.begin_remote_operation_confirm(app, plan);
             }
             Ok(ParsedRemoteCommand::Operation(plan)) => {
                 self.start_remote_operation_task(app, plan);
@@ -2359,6 +2390,36 @@ fn parse_remote_command(
     }
 }
 
+fn delete_plan_for_selection(
+    app: &baidupcsr_tui::TuiApp,
+) -> Result<baidupcsr_core::RemoteOperationPlan, String> {
+    baidupcsr_core::RemoteOperationPlan::delete(command_target_paths(app)?)
+}
+
+fn rename_plan_for_selected(
+    app: &baidupcsr_tui::TuiApp,
+    target_name: &str,
+) -> Result<Option<baidupcsr_core::RemoteOperationPlan>, String> {
+    let target_name = target_name.trim();
+    if target_name.is_empty() {
+        return Err("empty name".to_string());
+    }
+    let entry = app
+        .selected_entry()
+        .ok_or_else(|| "no selected entry".to_string())?;
+    let to = if target_name.starts_with('/') {
+        normalize_remote_command_path(target_name)
+    } else {
+        let parent_path = baidupcsr_tui::TuiApp::parent_path(entry.path.as_str())
+            .unwrap_or_else(|| "/".to_string());
+        join_remote_path(parent_path.as_str(), target_name)
+    };
+    if to == entry.path {
+        return Ok(None);
+    }
+    baidupcsr_core::RemoteOperationPlan::rename(entry.path.clone(), to).map(Some)
+}
+
 fn command_target_paths(app: &baidupcsr_tui::TuiApp) -> Result<Vec<String>, String> {
     if !app.selected_paths().is_empty() {
         return Ok(app.selected_paths().to_vec());
@@ -2814,12 +2875,12 @@ mod tests {
 
     use super::{
         active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
-        download_target_path, fetch_first_successful_dlink_range, is_local_open_size_allowed,
-        is_video_entry, local_open_command_candidates, local_open_target_path,
-        pan_user_agent_for_config, parse_remote_command, partial_download_path,
-        persist_workdir_if_active, preview_key_for_entry, search_remote_by_listing_with,
-        task_panel_item, tui_preview_kind, DlinkRangeAttempt, ParsedRemoteCommand,
-        RemoteSearchMode, LOCAL_OPEN_MAX_BYTES,
+        delete_plan_for_selection, download_target_path, fetch_first_successful_dlink_range,
+        is_local_open_size_allowed, is_video_entry, local_open_command_candidates,
+        local_open_target_path, pan_user_agent_for_config, parse_remote_command,
+        partial_download_path, persist_workdir_if_active, preview_key_for_entry,
+        rename_plan_for_selected, search_remote_by_listing_with, task_panel_item, tui_preview_kind,
+        DlinkRangeAttempt, ParsedRemoteCommand, RemoteSearchMode, LOCAL_OPEN_MAX_BYTES,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -3212,6 +3273,59 @@ mod tests {
                 "/docs/nested/b.md".to_string(),
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn delete_shortcut_plan_uses_multi_selection_then_current_entry() -> Result<(), String> {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![
+            file(1, 12),
+            FileEntry {
+                fs_id: 2,
+                path: "/docs/second.md".to_string(),
+                server_filename: "second.md".to_string(),
+                ..file(2, 34)
+            },
+        ]);
+
+        let current_plan = delete_plan_for_selection(&app)?;
+        assert_eq!(
+            current_plan.dry_run_lines(),
+            &[
+                "delete 1 remote entries".to_string(),
+                "/docs/notes.md".to_string(),
+            ]
+        );
+
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char(' '));
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char('j'));
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char(' '));
+        let selected_plan = delete_plan_for_selection(&app)?;
+        assert_eq!(
+            selected_plan.dry_run_lines(),
+            &[
+                "delete 2 remote entries".to_string(),
+                "/docs/notes.md".to_string(),
+                "/docs/second.md".to_string(),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rename_shortcut_plan_renames_selected_entry_in_place() -> Result<(), String> {
+        let mut app = baidupcsr_tui::TuiApp::new("/docs");
+        app.set_entries(vec![file(1, 12)]);
+
+        let plan = rename_plan_for_selected(&app, "renamed file.md")?
+            .ok_or_else(|| "rename unexpectedly skipped".to_string())?;
+
+        assert_eq!(
+            plan.dry_run_lines(),
+            &["rename /docs/notes.md -> /docs/renamed file.md".to_string()]
+        );
+        assert!(rename_plan_for_selected(&app, "notes.md")?.is_none());
         Ok(())
     }
 

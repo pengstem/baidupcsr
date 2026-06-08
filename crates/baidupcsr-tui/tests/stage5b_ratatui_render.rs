@@ -296,6 +296,10 @@ fn help_overlay_is_hidden_until_question_mark() {
     assert!(help.contains("Esc"));
     assert!(help.contains("y/n"));
     assert!(help.contains("p preview/open"));
+    assert!(help.contains("x delete"));
+    assert!(help.contains("r rename"));
+    assert!(help.contains(", sort"));
+    assert!(help.contains("c cancel task"));
     assert!(help.contains("Mouse"));
     assert!(help.contains("file click selects"));
     assert!(help.contains("double-click opens"));
@@ -306,6 +310,24 @@ fn help_overlay_is_hidden_until_question_mark() {
     let closed = draw_to_text(&app, None);
     assert!(!closed.contains("Shortcuts"));
     assert!(!closed.contains("Mouse"));
+}
+
+#[test]
+fn ratatui_render_shows_sort_menu_options() {
+    let mut app = TuiApp::new("/");
+    app.set_entries(vec![
+        file(1, "/notes.md", 1024, false),
+        file(2, "/photo.jpg", 2048, false),
+    ]);
+
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char(','));
+
+    let screen = draw_to_text(&app, None);
+    assert!(screen.contains("Sort"));
+    assert!(screen.contains("[n] Name"));
+    assert!(screen.contains("[m] Modified"));
+    assert!(screen.contains("[z] Size"));
+    assert!(screen.contains("[t] Type"));
 }
 
 #[test]
