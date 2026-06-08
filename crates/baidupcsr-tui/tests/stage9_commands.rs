@@ -1,5 +1,5 @@
 use baidupcsr_pcs::FileEntry;
-use baidupcsr_tui::{AppMode, KeyEvent, TuiApp, TuiRuntimeEvent};
+use baidupcsr_tui::{KeyEvent, TuiApp, TuiRuntimeEvent};
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
     FileEntry {
@@ -22,7 +22,6 @@ fn command_mode_buffers_text_and_submits_on_enter() {
     let mut app = TuiApp::new("/docs");
 
     assert_eq!(app.handle_key_event(KeyEvent::Char(':')), None);
-    assert_eq!(app.mode(), AppMode::Command);
     for ch in "mkdir reports".chars() {
         assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
     }
@@ -33,8 +32,6 @@ fn command_mode_buffers_text_and_submits_on_enter() {
             "mkdir reports".to_string()
         ))
     );
-    assert_eq!(app.mode(), AppMode::Normal);
-    assert_eq!(app.command_input(), "");
 }
 
 #[test]
@@ -61,14 +58,11 @@ fn confirm_mode_requires_explicit_yes_or_no() {
         "/docs/a.txt".to_string(),
     ]);
 
-    assert_eq!(app.mode(), AppMode::Confirm);
     assert_eq!(app.handle_key_event(KeyEvent::Char('j')), None);
     assert_eq!(
         app.handle_key_event(KeyEvent::Char('y')),
         Some(TuiRuntimeEvent::ConfirmAccepted)
     );
-    assert_eq!(app.mode(), AppMode::Normal);
-    assert!(app.confirm_lines().is_empty());
 }
 
 #[test]

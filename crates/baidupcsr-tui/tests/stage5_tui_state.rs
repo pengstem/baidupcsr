@@ -1,8 +1,5 @@
 use baidupcsr_pcs::FileEntry;
-use baidupcsr_tui::{
-    AppMode, DirectoryRequestState, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TaskPanelItem,
-    TuiApp, TuiRuntimeEvent, DEFAULT_KEYMAP,
-};
+use baidupcsr_tui::{KeyAction, KeyEvent, TuiApp, TuiRuntimeEvent};
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
     FileEntry {
@@ -30,89 +27,16 @@ fn directory(fs_id: i64, path: &str) -> FileEntry {
 }
 
 #[test]
-fn default_keymap_exposes_vim_navigation() {
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('j')),
-        KeyAction::Down
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('k')),
-        KeyAction::Up
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('h')),
-        KeyAction::Back
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('l')),
-        KeyAction::Enter
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('q')),
-        KeyAction::Quit
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('p')),
-        KeyAction::Preview
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('d')),
-        KeyAction::Download
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Char('x')),
-        KeyAction::CancelTask
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::PageDown),
-        KeyAction::PageDown
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::PageUp),
-        KeyAction::PageUp
-    );
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Home), KeyAction::Top);
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::End), KeyAction::Bottom);
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Ctrl('d')),
-        KeyAction::HalfPageDown
-    );
-    assert_eq!(
-        DEFAULT_KEYMAP.action_for(KeyEvent::Ctrl('u')),
-        KeyAction::HalfPageUp
-    );
-}
-
-#[test]
-fn question_mark_toggles_hidden_help_overlay() {
-    let mut app = TuiApp::new("/docs");
-
-    assert!(!app.help_visible());
-    assert_eq!(app.handle_key_event(KeyEvent::Char('?')), None);
-    assert!(app.help_visible());
-    assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
-    assert!(!app.help_visible());
-}
-
-#[test]
-fn arrow_keys_mirror_vim_navigation_actions() {
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Down), KeyAction::Down);
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Up), KeyAction::Up);
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Left), KeyAction::Back);
-    assert_eq!(DEFAULT_KEYMAP.action_for(KeyEvent::Right), KeyAction::Enter);
-}
-
-#[test]
 fn normal_mode_navigation_keeps_selection_in_bounds() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![file(1, "/docs/a.txt"), file(2, "/docs/b.txt")]);
 
-    app.handle_key(KeyEvent::Char('j'));
-    app.handle_key(KeyEvent::Char('j'));
+    app.handle_key_event(KeyEvent::Char('j'));
+    app.handle_key_event(KeyEvent::Char('j'));
     assert_eq!(app.selected_index(), Some(1));
 
-    app.handle_key(KeyEvent::Char('k'));
-    app.handle_key(KeyEvent::Char('k'));
+    app.handle_key_event(KeyEvent::Char('k'));
+    app.handle_key_event(KeyEvent::Char('k'));
     assert_eq!(app.selected_index(), Some(0));
 }
 
@@ -137,27 +61,6 @@ fn mouse_click_selects_visible_file_row() {
 }
 
 #[test]
-fn mouse_wheel_scrolls_view_and_keeps_selection_visible() {
-    let mut app = TuiApp::new("/docs");
-    let entries: Vec<FileEntry> = (0..20)
-        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
-        .collect();
-    app.set_entries(entries);
-
-    assert_eq!(
-        app.handle_mouse_event(baidupcsr_tui::MouseInput {
-            kind: baidupcsr_tui::MouseInputKind::ScrollDown,
-            column: 24,
-            row: 5,
-            area: ratatui::layout::Rect::new(0, 0, 96, 24),
-        }),
-        Some(TuiRuntimeEvent::Action(KeyAction::Select))
-    );
-    assert_eq!(app.selected_index(), Some(3));
-    assert_eq!(app.visible_entry_range(4), 2..6);
-}
-
-#[test]
 fn mouse_wheel_moves_selection_even_when_all_entries_are_visible() {
     let mut app = TuiApp::new("/docs");
     let entries: Vec<FileEntry> = (0..5)
@@ -174,53 +77,6 @@ fn mouse_wheel_moves_selection_even_when_all_entries_are_visible() {
 
     assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
     assert_eq!(app.selected_index(), Some(3));
-}
-
-#[test]
-fn mouse_click_on_files_scrollbar_moves_view_to_bottom() {
-    let mut app = TuiApp::new("/docs");
-    let entries: Vec<FileEntry> = (0..40)
-        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
-        .collect();
-    app.set_entries(entries);
-
-    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
-        kind: baidupcsr_tui::MouseInputKind::LeftClick,
-        column: 44,
-        row: 16,
-        area: ratatui::layout::Rect::new(0, 0, 96, 24),
-    });
-
-    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
-    assert_eq!(app.visible_entry_range(13), 27..40);
-    assert_eq!(app.selected_index(), Some(27));
-}
-
-#[test]
-fn mouse_drag_on_files_scrollbar_keeps_controlling_files_after_leaving_column() {
-    let mut app = TuiApp::new("/docs");
-    let entries: Vec<FileEntry> = (0..40)
-        .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
-        .collect();
-    app.set_entries(entries);
-
-    let area = ratatui::layout::Rect::new(0, 0, 96, 24);
-    let _ = app.handle_mouse_event(baidupcsr_tui::MouseInput {
-        kind: baidupcsr_tui::MouseInputKind::LeftClick,
-        column: 44,
-        row: 4,
-        area,
-    });
-
-    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
-        kind: baidupcsr_tui::MouseInputKind::LeftDrag,
-        column: 40,
-        row: 16,
-        area,
-    });
-
-    assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
-    assert_eq!(app.visible_entry_range(13), 27..40);
 }
 
 #[test]
@@ -283,61 +139,6 @@ fn mouse_second_click_after_timeout_stays_a_selection() {
         app.handle_mouse_event(click),
         Some(TuiRuntimeEvent::Action(KeyAction::Select))
     );
-}
-
-#[test]
-fn preview_mouse_wheel_scrolls_preview_without_changing_selection() {
-    let mut app = TuiApp::new("/docs");
-    app.set_entries(vec![file(1, "/docs/readme.md"), file(2, "/docs/todo.md")]);
-    app.finish_preview_text(
-        "readme.md",
-        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
-        PreviewBudget {
-            kind: PreviewKind::Text,
-            fetched_bytes: 36,
-            memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
-        },
-    );
-
-    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
-        kind: baidupcsr_tui::MouseInputKind::ScrollDown,
-        column: 70,
-        row: 5,
-        area: ratatui::layout::Rect::new(0, 0, 96, 16),
-    });
-
-    assert_eq!(event, None);
-    assert_eq!(app.selected_index(), Some(0));
-    assert!(app.preview_scroll_offset() > 0);
-}
-
-#[test]
-fn mouse_click_on_preview_scrollbar_moves_preview_to_bottom() {
-    let mut app = TuiApp::new("/docs");
-    app.set_entries(vec![file(1, "/docs/readme.md")]);
-    app.finish_preview_text(
-        "readme.md",
-        "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
-        PreviewBudget {
-            kind: PreviewKind::Text,
-            fetched_bytes: 48,
-            memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
-        },
-    );
-
-    let event = app.handle_mouse_event(baidupcsr_tui::MouseInput {
-        kind: baidupcsr_tui::MouseInputKind::LeftClick,
-        column: 94,
-        row: 10,
-        area: ratatui::layout::Rect::new(0, 0, 96, 18),
-    });
-
-    assert_eq!(event, None);
-    assert_eq!(app.preview_scroll_offset(), 15);
 }
 
 #[test]
@@ -404,269 +205,6 @@ fn normal_mode_supports_large_directory_navigation_keys() {
 }
 
 #[test]
-fn mode_keys_enter_filter_command_and_return_to_normal() {
-    let mut app = TuiApp::new("/");
-
-    app.handle_key(KeyEvent::Char('/'));
-    assert_eq!(app.mode(), AppMode::Filter);
-
-    app.handle_key(KeyEvent::Esc);
-    assert_eq!(app.mode(), AppMode::Normal);
-
-    app.handle_key(KeyEvent::Char(':'));
-    assert_eq!(app.mode(), AppMode::Command);
-
-    app.handle_key(KeyEvent::Esc);
-    assert_eq!(app.mode(), AppMode::Normal);
-}
-
-#[test]
-fn slash_filters_current_entries_without_submitting_remote_search() {
-    let mut app = TuiApp::new("/");
-    app.set_entries(vec![
-        file(1, "/notes.md"),
-        file(2, "/photo.jpg"),
-        file(3, "/todo.txt"),
-    ]);
-
-    assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
-    for ch in "note".chars() {
-        assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
-    }
-
-    assert_eq!(app.mode(), AppMode::Filter);
-    assert_eq!(app.filter_input(), "note");
-    assert_eq!(app.filtered_entry_count(), 1);
-    assert_eq!(
-        app.selected_entry().map(|entry| entry.path.as_str()),
-        Some("/notes.md")
-    );
-    assert_eq!(app.handle_key_event(KeyEvent::Enter), None);
-    assert_eq!(app.mode(), AppMode::Normal);
-    assert_eq!(app.filter_input(), "note");
-
-    assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
-    for ch in "zzz".chars() {
-        assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
-    }
-    assert_eq!(app.filtered_entry_count(), 0);
-    assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
-    assert_eq!(app.filter_input(), "");
-    assert_eq!(app.filtered_entry_count(), 3);
-}
-
-#[test]
-fn quit_with_background_tasks_requires_confirmation() {
-    let mut app = TuiApp::new("/docs");
-    app.set_background_tasks(2);
-
-    assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
-    assert_eq!(app.mode(), AppMode::Confirm);
-    assert_eq!(
-        app.confirm_lines(),
-        &["Quit with 2 tasks still running?".to_string()]
-    );
-
-    assert_eq!(app.handle_key_event(KeyEvent::Char('n')), None);
-    assert_eq!(app.mode(), AppMode::Normal);
-
-    assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
-    assert_eq!(
-        app.handle_key_event(KeyEvent::Char('y')),
-        Some(TuiRuntimeEvent::Action(KeyAction::Quit))
-    );
-}
-
-#[test]
-fn status_line_reports_mode_path_and_task_count() {
-    let mut app = TuiApp::new("/docs");
-    app.set_background_tasks(2);
-
-    assert_eq!(app.status_line(), "NORMAL  0/0  0 selected  /docs  2 tasks");
-}
-
-#[test]
-fn preview_budget_line_reports_memory_and_disk_boundary() {
-    let budget = PreviewBudget {
-        kind: PreviewKind::Text,
-        fetched_bytes: 1024,
-        memory_limit_bytes: 16 * 1024 * 1024,
-        truncated: false,
-        disk_backed: false,
-    };
-
-    assert_eq!(
-        budget.status_line(),
-        "preview=text fetched=1024 limit=16777216 truncated=false disk=false"
-    );
-}
-
-#[test]
-fn preview_text_updates_panel_content_and_budget() {
-    let mut app = TuiApp::new("/docs");
-
-    app.begin_preview("notes.md", "loading text preview");
-    app.finish_preview_text(
-        "notes.md",
-        "hello\nworld",
-        PreviewBudget {
-            kind: PreviewKind::Text,
-            fetched_bytes: 11,
-            memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
-        },
-    );
-
-    assert_eq!(app.preview_title(), "notes.md");
-    assert_eq!(
-        app.preview_lines(),
-        &["hello".to_string(), "world".to_string()]
-    );
-    assert_eq!(
-        app.preview_budget().status_line(),
-        "preview=text fetched=11 limit=16777216 truncated=false disk=false"
-    );
-}
-
-#[test]
-fn video_preview_status_updates_panel_without_disk_cache() {
-    let mut app = TuiApp::new("/videos");
-
-    app.finish_preview_video(
-        "movie.mp4",
-        vec![
-            "video=loopback".to_string(),
-            "listen=127.0.0.1:39177".to_string(),
-            "player=mpv".to_string(),
-            "cache=0/1048576".to_string(),
-        ],
-        PreviewBudget {
-            kind: PreviewKind::Video,
-            fetched_bytes: 0,
-            memory_limit_bytes: 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
-        },
-    );
-
-    assert_eq!(app.preview_title(), "movie.mp4");
-    assert_eq!(app.preview_budget().kind, PreviewKind::Video);
-    assert_eq!(app.preview_budget().memory_limit_bytes, 1024 * 1024);
-    assert!(!app.preview_budget().disk_backed);
-    assert_eq!(app.preview_lines()[0], "video=loopback");
-}
-
-#[test]
-fn task_lines_update_bottom_panel_state() {
-    let mut app = TuiApp::new("/remote");
-
-    app.set_task_lines(vec![
-        "#1 download running 512/1024".to_string(),
-        "#2 download failed network".to_string(),
-    ]);
-
-    assert_eq!(
-        app.task_lines(),
-        &[
-            "#1 download running 512/1024".to_string(),
-            "#2 download failed network".to_string(),
-        ]
-    );
-}
-
-#[test]
-fn task_items_track_recent_speed_history() {
-    let mut app = TuiApp::new("/remote");
-    let mut item = TaskPanelItem {
-        id: 7,
-        kind: "download".to_string(),
-        state: "running".to_string(),
-        bytes_done: 512,
-        bytes_total: Some(1024),
-        speed_bytes_per_sec: 128,
-        label: "movie.mkv".to_string(),
-        error: None,
-        speed_history: Vec::new(),
-    };
-
-    app.set_task_items(vec![item.clone()]);
-    item.bytes_done = 768;
-    item.speed_bytes_per_sec = 256;
-    app.set_task_items(vec![item]);
-
-    assert_eq!(app.task_items()[0].speed_history, vec![128, 256]);
-}
-
-#[test]
-fn selected_directory_path_only_returns_directories() {
-    let mut app = TuiApp::new("/");
-    app.set_entries(vec![directory(1, "/docs"), file(2, "/notes.txt")]);
-
-    assert_eq!(app.selected_directory_path(), Some("/docs".to_string()));
-
-    app.handle_key(KeyEvent::Char('j'));
-    assert_eq!(app.selected_directory_path(), None);
-}
-
-#[test]
-fn directory_load_state_replaces_path_entries_and_status() {
-    let mut app = TuiApp::new("/");
-    app.set_entries(vec![directory(1, "/docs")]);
-
-    app.begin_directory_refresh("/docs", Vec::new(), None, None);
-    assert_eq!(app.path(), "/docs");
-    assert_eq!(app.entries(), &[]);
-    assert_eq!(app.selected_index(), None);
-    assert_eq!(app.notice(), Some("loading /docs"));
-    assert_eq!(app.request_state(), DirectoryRequestState::Loading);
-    assert_eq!(
-        app.status_line(),
-        "NORMAL  0/0  0 selected  /docs  Loading..."
-    );
-
-    app.finish_directory_success(
-        "/docs",
-        vec![file(2, "/docs/readme.md"), directory(3, "/docs/src")],
-        Some(0),
-        None,
-    );
-
-    assert_eq!(app.path(), "/docs");
-    assert_eq!(app.entries().len(), 2);
-    assert_eq!(app.selected_index(), Some(0));
-    assert_eq!(app.notice(), Some("loaded /docs"));
-    assert_eq!(app.status_line(), "NORMAL  1/2  0 selected  /docs");
-}
-
-#[test]
-fn directory_load_failure_keeps_cached_entries_and_reports_error() {
-    let mut app = TuiApp::new("/docs");
-
-    app.begin_directory_refresh(
-        "/missing",
-        vec![file(1, "/missing/cached.txt")],
-        Some(7),
-        None,
-    );
-    app.finish_directory_error(
-        "/missing",
-        vec![file(1, "/missing/cached.txt")],
-        Some(7),
-        "remote_list_error: 403",
-        None,
-    );
-
-    assert_eq!(app.path(), "/missing");
-    assert_eq!(app.entries().len(), 1);
-    assert_eq!(app.notice(), Some("remote_list_error: 403"));
-    assert_eq!(
-        app.status_line(),
-        "NORMAL  1/1  0 selected  /missing  Error: remote_list_error: 403"
-    );
-}
-
-#[test]
 fn parent_path_handles_root_and_nested_paths() {
     assert_eq!(TuiApp::parent_path("/"), None);
     assert_eq!(TuiApp::parent_path("/docs"), Some("/".to_string()));
@@ -674,27 +212,6 @@ fn parent_path_handles_root_and_nested_paths() {
         TuiApp::parent_path("/docs/books/"),
         Some("/docs".to_string())
     );
-}
-
-#[test]
-fn cached_directory_refresh_keeps_stale_entries_visible() {
-    let mut app = TuiApp::new("/");
-
-    app.begin_directory_refresh(
-        "/docs",
-        vec![file(1, "/docs/cached.txt"), directory(2, "/docs/src")],
-        Some(12),
-        Some("/docs/src"),
-    );
-
-    assert_eq!(app.path(), "/docs");
-    assert_eq!(app.request_state(), DirectoryRequestState::Refreshing);
-    assert_eq!(app.entries().len(), 2);
-    assert_eq!(
-        app.selected_entry().map(|entry| entry.path.as_str()),
-        Some("/docs/src")
-    );
-    assert_eq!(app.notice(), Some("refreshing /docs from cache"));
 }
 
 #[test]

@@ -45,8 +45,6 @@ fn directory_cache_store_round_trips_entries_in_cache_dir() -> Result<(), Box<dy
         .read_snapshot(42, "/remote/docs")?
         .ok_or("missing cache snapshot")?;
 
-    assert_eq!(snapshot.account_uid, 42);
-    assert_eq!(snapshot.path, "/remote/docs");
     assert_eq!(snapshot.saved_at_unix_seconds, 1234);
     assert_eq!(snapshot.entries[0].server_filename, "readme.md");
     assert!(root.read_dir()?.next().is_some());

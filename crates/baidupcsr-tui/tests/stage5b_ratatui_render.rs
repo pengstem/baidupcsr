@@ -121,8 +121,6 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         }),
     );
 
@@ -158,7 +156,7 @@ fn ratatui_render_keeps_selection_visible_after_navigation() {
         file(1, "/alpha", 0, true),
         file(2, "/beta.txt", 512, false),
     ]);
-    app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('j'));
 
     let screen = draw_to_text(&app, None);
 
@@ -176,7 +174,7 @@ fn ratatui_render_scrolls_long_lists_and_highlights_selected_row() {
     app.set_entries(entries);
 
     for _ in 0..18 {
-        app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
+        app.handle_key_event(baidupcsr_tui::KeyEvent::Char('j'));
     }
 
     let buffer = draw_buffer(&app, None, 72, 16);
@@ -200,7 +198,7 @@ fn ratatui_render_files_scrollbar_thumb_reaches_bottom_at_list_end() {
         .map(|index| file(index, &format!("/item-{index:02}.txt"), 512, false))
         .collect();
     app.set_entries(entries);
-    app.handle_key(KeyEvent::End);
+    app.handle_key_event(KeyEvent::End);
 
     let buffer = draw_buffer(&app, None, 96, 24);
 
@@ -215,11 +213,11 @@ fn ratatui_render_keeps_cursor_and_mark_columns_separate() {
         file(2, "/b.txt", 512, false),
     ]);
 
-    app.handle_key(baidupcsr_tui::KeyEvent::Char(' '));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char(' '));
     let selected_marked = draw_to_text(&app, None);
     assert!(selected_marked.contains("> [x] a.txt"));
 
-    app.handle_key(baidupcsr_tui::KeyEvent::Char('j'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('j'));
     let buffer = draw_buffer(&app, None, 80, 16);
     let screen = buffer_to_text(&buffer);
 
@@ -268,8 +266,6 @@ fn ratatui_render_draws_text_preview_content() {
             kind: PreviewKind::Text,
             fetched_bytes: 11,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         },
     );
 
@@ -279,7 +275,6 @@ fn ratatui_render_draws_text_preview_content() {
     assert!(screen.contains("world"));
     assert!(screen.contains("Preview: text"));
     assert!(screen.contains("11 B fetched"));
-    assert!(screen.contains("memory only"));
     assert!(!screen.contains("16777216"));
     assert!(!screen.contains("disk false"));
 }
@@ -293,7 +288,7 @@ fn help_overlay_is_hidden_until_question_mark() {
     assert!(!normal.contains("Shortcuts"));
     assert!(!normal.contains("Mouse"));
 
-    app.handle_key(baidupcsr_tui::KeyEvent::Char('?'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('?'));
     let help = draw_to_text(&app, None);
     assert!(help.contains("Shortcuts"));
     assert!(help.contains("j/k"));
@@ -306,6 +301,11 @@ fn help_overlay_is_hidden_until_question_mark() {
     assert!(help.contains("double-click opens"));
     assert!(help.contains("wheel follows mouse"));
     assert!(help.contains("path click jumps"));
+
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Esc);
+    let closed = draw_to_text(&app, None);
+    assert!(!closed.contains("Shortcuts"));
+    assert!(!closed.contains("Mouse"));
 }
 
 #[test]
@@ -349,8 +349,6 @@ fn ratatui_render_keeps_video_playback_diagnostics_visible() {
             kind: PreviewKind::Video,
             fetched_bytes: 1024,
             memory_limit_bytes: 64 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         },
     );
 
@@ -377,8 +375,6 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
             kind: PreviewKind::Text,
             fetched_bytes: 96,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         },
     );
 
@@ -386,7 +382,6 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
 
     assert!(screen.contains("Preview: text"));
     assert!(screen.contains("96 B fetched"));
-    assert!(screen.contains("memory only"));
     assert!(screen.contains("line one"));
 }
 
@@ -432,7 +427,7 @@ fn ratatui_render_keeps_file_table_size_and_mtime_columns_stable() {
 #[test]
 fn ratatui_render_distinguishes_loading_empty_and_error_file_states() {
     let mut loading = TuiApp::new("/docs");
-    loading.begin_directory_load("/docs");
+    loading.begin_directory_refresh("/docs", Vec::new(), None, None);
     assert!(draw_to_text(&loading, None).contains("Loading..."));
 
     let empty = TuiApp::new("/empty");
@@ -451,8 +446,8 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
         file(1, "/notes.md", 1024, false),
         file(2, "/photo.jpg", 2048, false),
     ]);
-    app.handle_key(baidupcsr_tui::KeyEvent::Char('/'));
-    app.handle_key(baidupcsr_tui::KeyEvent::Char('n'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('/'));
+    app.handle_key_event(baidupcsr_tui::KeyEvent::Char('n'));
 
     let screen = draw_to_text(&app, None);
     let last_line = screen.lines().last().unwrap_or_default();
@@ -474,8 +469,6 @@ fn ratatui_render_keeps_full_preview_content_and_truncates_task_lists() {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: true,
-            disk_backed: false,
         },
     );
     app.set_preload_lines(vec![
@@ -503,8 +496,6 @@ fn ratatui_render_draws_preview_scrollbar_for_long_preview_content() {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         },
     );
 
@@ -524,8 +515,6 @@ fn ratatui_render_draws_structured_tasks_with_progress_and_speed_history() {
         bytes_total: Some(1024 * 1024),
         speed_bytes_per_sec: 1024 * 1024,
         label: "movie.mkv".to_string(),
-        error: None,
-        speed_history: Vec::new(),
     };
     app.set_task_items(vec![item.clone()]);
     app.set_task_items(vec![TaskPanelItem {
@@ -555,7 +544,6 @@ fn ratatui_render_draws_structured_tasks_with_progress_and_speed_history() {
 #[test]
 fn ratatui_render_shows_destructive_confirm_as_centered_modal() {
     let mut app = TuiApp::new("/docs");
-    app.set_task_lines(vec!["#7 remote done 0/? search".to_string()]);
     app.begin_confirm(vec![
         "delete 2 remote entries".to_string(),
         "/docs/a.txt".to_string(),

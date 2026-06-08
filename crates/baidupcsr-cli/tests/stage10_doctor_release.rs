@@ -1,18 +1,18 @@
 use std::path::Path;
 use std::process::Command;
 
-fn fixture_dir() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/config/doctor_minimal")
-        .display()
-        .to_string()
-}
-
 #[test]
 fn doctor_reports_release_readiness_paths_without_secrets() -> Result<(), Box<dyn std::error::Error>>
 {
+    let fixture_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/config/doctor_minimal");
     let output = Command::new(env!("CARGO_BIN_EXE_baidupcsr-cli"))
-        .args(["doctor", "--redact", "--config-dir", &fixture_dir()])
+        .args([
+            "doctor",
+            "--redact",
+            "--config-dir",
+            fixture_dir.to_string_lossy().as_ref(),
+        ])
         .output()?;
 
     assert!(output.status.success());

@@ -20,8 +20,6 @@ use std::{cmp::Ordering, collections::BTreeMap, io, ops::Range, time::Duration};
 use time::{macros::format_description, OffsetDateTime};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-pub const DEFAULT_KEYMAP: KeyMap = KeyMap;
-
 const THEME_BG: Color = Color::Rgb(15, 23, 42);
 const THEME_PANEL: Color = Color::Rgb(24, 32, 52);
 const THEME_BORDER: Color = Color::Rgb(51, 65, 85);
@@ -47,16 +45,15 @@ const HEADER_GAP: &str = "  ";
 const BREADCRUMB_SEPARATOR: &str = " > ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum AppMode {
+enum AppMode {
     Normal,
     Filter,
     Command,
     Confirm,
-    TaskFocus,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PanelFocus {
+enum PanelFocus {
     Files,
     Preview,
 }
@@ -86,7 +83,6 @@ impl AppMode {
             Self::Filter => "FILTER",
             Self::Command => "COMMAND",
             Self::Confirm => "CONFIRM",
-            Self::TaskFocus => "TASKS",
         }
     }
 }
@@ -130,7 +126,6 @@ pub enum KeyAction {
     Top,
     Bottom,
     Quit,
-    None,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -170,12 +165,10 @@ pub struct TaskPanelItem {
     pub bytes_total: Option<u64>,
     pub speed_bytes_per_sec: u64,
     pub label: String,
-    pub error: Option<String>,
-    pub speed_history: Vec<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DirectoryRequestState {
+enum DirectoryRequestState {
     Idle,
     Loading,
     Refreshing,
@@ -196,7 +189,6 @@ impl DirectoryRequestState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheSource {
     None,
-    Memory,
     Disk,
     Network,
 }
@@ -205,47 +197,38 @@ impl CacheSource {
     const fn user_label(self) -> &'static str {
         match self {
             Self::None => "none",
-            Self::Memory => "memory",
             Self::Disk => "disk",
             Self::Network => "network",
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct KeyMap;
-
-impl KeyMap {
-    pub const fn action_for(self, event: KeyEvent) -> KeyAction {
-        match event {
-            KeyEvent::Char('j') => KeyAction::Down,
-            KeyEvent::Char('k') => KeyAction::Up,
-            KeyEvent::Char('h') => KeyAction::Back,
-            KeyEvent::Char('l') => KeyAction::Enter,
-            KeyEvent::Down => KeyAction::Down,
-            KeyEvent::Up => KeyAction::Up,
-            KeyEvent::Left => KeyAction::Back,
-            KeyEvent::Right => KeyAction::Enter,
-            KeyEvent::PageUp => KeyAction::PageUp,
-            KeyEvent::PageDown => KeyAction::PageDown,
-            KeyEvent::Home => KeyAction::Top,
-            KeyEvent::End => KeyAction::Bottom,
-            KeyEvent::Ctrl('u') | KeyEvent::Ctrl('U') => KeyAction::HalfPageUp,
-            KeyEvent::Ctrl('d') | KeyEvent::Ctrl('D') => KeyAction::HalfPageDown,
-            KeyEvent::Char('/') => KeyAction::Search,
-            KeyEvent::Char(':') => KeyAction::Command,
-            KeyEvent::Char('G') => KeyAction::Bottom,
-            KeyEvent::Char('r') => KeyAction::Refresh,
-            KeyEvent::Char('p') => KeyAction::Preview,
-            KeyEvent::Char('d') => KeyAction::Download,
-            KeyEvent::Char('x') => KeyAction::CancelTask,
-            KeyEvent::Char(' ') => KeyAction::ToggleSelect,
-            KeyEvent::Char('q') => KeyAction::Quit,
-            KeyEvent::Esc => KeyAction::None,
-            KeyEvent::Enter | KeyEvent::Backspace | KeyEvent::Tab => KeyAction::None,
-            KeyEvent::Ctrl(_) => KeyAction::None,
-            KeyEvent::Char(_) => KeyAction::None,
-        }
+const fn key_action_for(event: KeyEvent) -> Option<KeyAction> {
+    match event {
+        KeyEvent::Char('j') | KeyEvent::Down => Some(KeyAction::Down),
+        KeyEvent::Char('k') | KeyEvent::Up => Some(KeyAction::Up),
+        KeyEvent::Char('h') | KeyEvent::Left => Some(KeyAction::Back),
+        KeyEvent::Char('l') | KeyEvent::Right => Some(KeyAction::Enter),
+        KeyEvent::PageUp => Some(KeyAction::PageUp),
+        KeyEvent::PageDown => Some(KeyAction::PageDown),
+        KeyEvent::Home => Some(KeyAction::Top),
+        KeyEvent::End | KeyEvent::Char('G') => Some(KeyAction::Bottom),
+        KeyEvent::Ctrl('u' | 'U') => Some(KeyAction::HalfPageUp),
+        KeyEvent::Ctrl('d' | 'D') => Some(KeyAction::HalfPageDown),
+        KeyEvent::Char('/') => Some(KeyAction::Search),
+        KeyEvent::Char(':') => Some(KeyAction::Command),
+        KeyEvent::Char('r') => Some(KeyAction::Refresh),
+        KeyEvent::Char('p') => Some(KeyAction::Preview),
+        KeyEvent::Char('d') => Some(KeyAction::Download),
+        KeyEvent::Char('x') => Some(KeyAction::CancelTask),
+        KeyEvent::Char(' ') => Some(KeyAction::ToggleSelect),
+        KeyEvent::Char('q') => Some(KeyAction::Quit),
+        KeyEvent::Esc
+        | KeyEvent::Enter
+        | KeyEvent::Backspace
+        | KeyEvent::Tab
+        | KeyEvent::Ctrl(_)
+        | KeyEvent::Char(_) => None,
     }
 }
 
@@ -263,7 +246,6 @@ pub struct TuiApp {
     preview_title: String,
     preview_lines: Vec<String>,
     preview_budget: PreviewBudget,
-    task_lines: Vec<String>,
     task_items: Vec<TaskPanelItem>,
     task_speed_history: BTreeMap<u64, Vec<u64>>,
     preload_lines: Vec<String>,
@@ -297,7 +279,6 @@ impl TuiApp {
             preview_title: String::new(),
             preview_lines: Vec::new(),
             preview_budget: default_preview_budget(),
-            task_lines: Vec::new(),
             task_items: Vec::new(),
             task_speed_history: BTreeMap::new(),
             preload_lines: Vec::new(),
@@ -319,17 +300,6 @@ impl TuiApp {
 
     pub fn set_entries(&mut self, entries: Vec<FileEntry>) {
         self.set_entries_with_selection(entries, None);
-    }
-
-    pub fn begin_directory_load(&mut self, path: &str) {
-        self.begin_directory_refresh(path, Vec::new(), None, None);
-    }
-
-    pub fn finish_directory_load(&mut self, path: &str, result: Result<Vec<FileEntry>, String>) {
-        match result {
-            Ok(entries) => self.finish_directory_success(path, entries, Some(0), None),
-            Err(message) => self.finish_directory_error(path, Vec::new(), None, message, None),
-        }
     }
 
     pub fn begin_directory_refresh(
@@ -396,15 +366,10 @@ impl TuiApp {
         self.background_tasks = count;
     }
 
-    pub fn set_task_lines(&mut self, lines: Vec<String>) {
-        self.task_lines = lines;
-    }
-
-    pub fn set_task_items(&mut self, mut items: Vec<TaskPanelItem>) {
-        let active_ids: Vec<u64> = items.iter().map(|item| item.id).collect();
+    pub fn set_task_items(&mut self, items: Vec<TaskPanelItem>) {
         self.task_speed_history
-            .retain(|id, _| active_ids.iter().any(|active_id| active_id == id));
-        for item in &mut items {
+            .retain(|id, _| items.iter().any(|item| item.id == *id));
+        for item in &items {
             let history = self.task_speed_history.entry(item.id).or_default();
             if item.speed_bytes_per_sec > 0 {
                 history.push(item.speed_bytes_per_sec);
@@ -412,7 +377,6 @@ impl TuiApp {
                     history.drain(0..history.len() - 20);
                 }
             }
-            item.speed_history = history.clone();
         }
         self.task_items = items;
     }
@@ -429,10 +393,6 @@ impl TuiApp {
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
-    }
-
-    pub fn clear_notice(&mut self) {
-        self.notice = None;
     }
 
     pub fn set_cache_age_seconds(&mut self, value: Option<u64>) {
@@ -502,10 +462,6 @@ impl TuiApp {
         self.preview_scroll_offset = 0;
     }
 
-    pub fn handle_key(&mut self, event: KeyEvent) {
-        let _ = self.handle_key_event(event);
-    }
-
     pub fn handle_mouse_event(&mut self, input: MouseInput) -> Option<TuiRuntimeEvent> {
         if input.kind == MouseInputKind::LeftRelease {
             self.scrollbar_drag = None;
@@ -522,7 +478,7 @@ impl TuiApp {
             return None;
         }
 
-        let full = full_layout(input.area, self.has_transfer_area());
+        let full = full_layout(input.area, !self.task_items.is_empty());
         let layout = browser_layout(full.body);
         let files_inner = inner_rect(layout.files);
         let preview_inner = inner_rect(layout.preview);
@@ -691,33 +647,11 @@ impl TuiApp {
             AppMode::Command => self.handle_command_key(event),
             AppMode::Filter => self.handle_filter_key(event),
             AppMode::Confirm => self.handle_confirm_key(event),
-            AppMode::TaskFocus => {
-                if event == KeyEvent::Esc {
-                    self.mode = AppMode::Normal;
-                }
-                None
-            }
         }
     }
 
     pub const fn selected_index(&self) -> Option<usize> {
         self.selected_index
-    }
-
-    pub const fn mode(&self) -> AppMode {
-        self.mode
-    }
-
-    pub const fn help_visible(&self) -> bool {
-        self.help_visible
-    }
-
-    pub const fn focus(&self) -> PanelFocus {
-        self.focus
-    }
-
-    pub const fn request_state(&self) -> DirectoryRequestState {
-        self.request_state
     }
 
     pub fn path(&self) -> &str {
@@ -733,45 +667,7 @@ impl TuiApp {
             .and_then(|index| self.entries.get(index))
     }
 
-    pub fn selected_directory_path(&self) -> Option<String> {
-        self.selected_entry()
-            .filter(|entry| entry.is_dir)
-            .map(|entry| normalize_path(entry.path.as_str()))
-    }
-
-    pub fn preview_title(&self) -> &str {
-        &self.preview_title
-    }
-
-    pub fn preview_lines(&self) -> &[String] {
-        &self.preview_lines
-    }
-
-    pub fn task_lines(&self) -> &[String] {
-        &self.task_lines
-    }
-
-    pub fn task_items(&self) -> &[TaskPanelItem] {
-        &self.task_items
-    }
-
-    fn has_transfer_area(&self) -> bool {
-        !self.task_items.is_empty()
-    }
-
-    pub fn preload_lines(&self) -> &[String] {
-        &self.preload_lines
-    }
-
-    pub fn command_input(&self) -> &str {
-        &self.command_input
-    }
-
-    pub fn filter_input(&self) -> &str {
-        &self.filter_input
-    }
-
-    pub fn filtered_entry_count(&self) -> usize {
+    fn filtered_entry_count(&self) -> usize {
         self.filtered_indices().len()
     }
 
@@ -779,40 +675,7 @@ impl TuiApp {
         &self.selected_paths
     }
 
-    pub fn confirm_lines(&self) -> &[String] {
-        &self.confirm_lines
-    }
-
-    pub const fn preview_budget(&self) -> PreviewBudget {
-        self.preview_budget
-    }
-
-    pub const fn preview_scroll_offset(&self) -> usize {
-        self.preview_scroll_offset
-    }
-
-    pub const fn cache_source(&self) -> CacheSource {
-        self.cache_source
-    }
-
-    pub fn notice(&self) -> Option<&str> {
-        self.notice.as_deref()
-    }
-
-    pub fn status_line(&self) -> String {
-        let mut parts = vec![
-            self.mode.label().to_string(),
-            self.position_label(),
-            format!("{} selected", self.selected_paths.len()),
-            self.path.clone(),
-        ];
-        if let Some(hint) = self.status_hint() {
-            parts.push(hint);
-        }
-        parts.join("  ")
-    }
-
-    pub fn visible_entry_range(&self, rows: usize) -> Range<usize> {
+    fn visible_entry_range(&self, rows: usize) -> Range<usize> {
         let indices = self.filtered_indices();
         visible_range_from_offset(indices.len(), self.scroll_offset, rows)
     }
@@ -824,34 +687,9 @@ impl TuiApp {
         }
 
         match trimmed.rfind('/') {
-            Some(0) => Some("/".to_string()),
+            Some(0) | None => Some("/".to_string()),
             Some(index) => Some(trimmed[..index].to_string()),
-            None => Some("/".to_string()),
         }
-    }
-
-    fn move_down(&mut self) {
-        self.move_visible_by(1);
-    }
-
-    fn move_up(&mut self) {
-        self.move_visible_by(-1);
-    }
-
-    fn move_page_down(&mut self) {
-        self.move_visible_by(PAGE_STEP as isize);
-    }
-
-    fn move_page_up(&mut self) {
-        self.move_visible_by(-(PAGE_STEP as isize));
-    }
-
-    fn move_half_page_down(&mut self) {
-        self.move_visible_by(HALF_PAGE_STEP as isize);
-    }
-
-    fn move_half_page_up(&mut self) {
-        self.move_visible_by(-(HALF_PAGE_STEP as isize));
     }
 
     fn move_to_top(&mut self) {
@@ -1029,29 +867,30 @@ impl TuiApp {
             return None;
         }
 
-        match DEFAULT_KEYMAP.action_for(event) {
+        let action = key_action_for(event)?;
+        match action {
             KeyAction::Down => {
-                self.move_down();
+                self.move_visible_by(1);
                 return Some(TuiRuntimeEvent::Action(KeyAction::Down));
             }
             KeyAction::Up => {
-                self.move_up();
+                self.move_visible_by(-1);
                 return Some(TuiRuntimeEvent::Action(KeyAction::Up));
             }
             KeyAction::PageDown => {
-                self.move_page_down();
+                self.move_visible_by(PAGE_STEP as isize);
                 return Some(TuiRuntimeEvent::Action(KeyAction::PageDown));
             }
             KeyAction::PageUp => {
-                self.move_page_up();
+                self.move_visible_by(-(PAGE_STEP as isize));
                 return Some(TuiRuntimeEvent::Action(KeyAction::PageUp));
             }
             KeyAction::HalfPageDown => {
-                self.move_half_page_down();
+                self.move_visible_by(HALF_PAGE_STEP as isize);
                 return Some(TuiRuntimeEvent::Action(KeyAction::HalfPageDown));
             }
             KeyAction::HalfPageUp => {
-                self.move_half_page_up();
+                self.move_visible_by(-(HALF_PAGE_STEP as isize));
                 return Some(TuiRuntimeEvent::Action(KeyAction::HalfPageUp));
             }
             KeyAction::Top => {
@@ -1086,9 +925,8 @@ impl TuiApp {
             | KeyAction::Download
             | KeyAction::CancelTask
             | KeyAction::Select => {
-                return Some(TuiRuntimeEvent::Action(DEFAULT_KEYMAP.action_for(event)));
+                return Some(TuiRuntimeEvent::Action(action));
             }
-            KeyAction::None => {}
         }
         None
     }
@@ -1168,7 +1006,7 @@ impl TuiApp {
 
     fn handle_confirm_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
         match event {
-            KeyEvent::Char('y') | KeyEvent::Char('Y') => {
+            KeyEvent::Char('y' | 'Y') => {
                 let kind = self.confirm_kind.take().unwrap_or(ConfirmKind::Operation);
                 self.mode = AppMode::Normal;
                 self.confirm_lines.clear();
@@ -1177,7 +1015,7 @@ impl TuiApp {
                     ConfirmKind::Quit => Some(TuiRuntimeEvent::Action(KeyAction::Quit)),
                 }
             }
-            KeyEvent::Char('n') | KeyEvent::Char('N') | KeyEvent::Esc => {
+            KeyEvent::Char('n' | 'N') | KeyEvent::Esc => {
                 let kind = self.confirm_kind.take().unwrap_or(ConfirmKind::Operation);
                 self.mode = AppMode::Normal;
                 self.confirm_lines.clear();
@@ -1211,10 +1049,6 @@ impl TuiApp {
         } else {
             self.selected_paths.push(path);
         }
-    }
-
-    fn path_is_marked(&self, path: &str) -> bool {
-        self.selected_paths.iter().any(|item| item == path)
     }
 
     fn set_entries_with_selection(
@@ -1303,8 +1137,7 @@ impl TuiApp {
             DirectoryRequestState::Failed => Some(
                 self.notice
                     .as_ref()
-                    .map(|notice| format!("Error: {notice}"))
-                    .unwrap_or_else(|| "Error".to_string()),
+                    .map_or_else(|| "Error".to_string(), |notice| format!("Error: {notice}")),
             ),
             DirectoryRequestState::Idle if !self.filter_input.is_empty() => {
                 Some(format!("filter \"{}\"", self.filter_input))
@@ -1501,7 +1334,7 @@ fn proportional_position(value: usize, max_value: usize, max_input: usize) -> us
 pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
     frame.render_widget(Block::new().style(surface_style()), frame.area());
 
-    let layout = full_layout(frame.area(), app.has_transfer_area());
+    let layout = full_layout(frame.area(), !app.task_items.is_empty());
     let browser = browser_layout(layout.body);
     frame.render_widget(header_widget(app), layout.header);
     render_files_pane(frame, app, browser.files);
@@ -1509,20 +1342,17 @@ pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBu
     render_tasks_pane(frame, app, layout.tasks);
     render_transfer_pane(frame, app, layout.transfer);
     frame.render_widget(status_widget(app), layout.status);
-    if app.help_visible() {
+    if app.help_visible {
         let area = centered_rect(frame.area(), 58, 22);
         frame.render_widget(Clear, area);
         frame.render_widget(help_widget(), area);
     }
-    if !app.confirm_lines().is_empty() {
-        let area = confirm_modal_rect(frame.area(), app);
+    if !app.confirm_lines.is_empty() {
+        let body_lines = confirm_body_lines(app).len() as u16;
+        let area = centered_rect(frame.area(), 64, body_lines.saturating_add(4).clamp(7, 14));
         frame.render_widget(Clear, area);
         frame.render_widget(confirm_widget(app), area);
     }
-}
-
-pub fn run_terminal_app(app: TuiApp) -> io::Result<()> {
-    run_terminal_app_with_handler(app, |_, _| {})
 }
 
 pub fn run_terminal_app_with_handler<F>(app: TuiApp, mut handler: F) -> io::Result<()>
@@ -1631,11 +1461,6 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-fn confirm_modal_rect(area: Rect, app: &TuiApp) -> Rect {
-    let body_lines = confirm_body_lines(app).len() as u16;
-    centered_rect(area, 64, body_lines.saturating_add(4).clamp(7, 14))
-}
-
 fn surface_style() -> Style {
     Style::new().fg(THEME_TEXT).bg(THEME_BG)
 }
@@ -1644,27 +1469,8 @@ fn content_style() -> Style {
     Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
 }
 
-fn meta_label_style() -> Style {
-    Style::new().fg(THEME_MUTED).bg(THEME_PANEL)
-}
-
 fn meta_value_style() -> Style {
     Style::new().fg(THEME_TEXT).bg(THEME_PANEL)
-}
-
-fn preload_style() -> Style {
-    Style::new().fg(THEME_DIRECTORY).bg(THEME_PANEL)
-}
-
-fn notice_style() -> Style {
-    Style::new().fg(THEME_WARNING).bg(THEME_PANEL)
-}
-
-fn warning_style() -> Style {
-    Style::new()
-        .fg(THEME_WARNING)
-        .bg(THEME_PANEL)
-        .add_modifier(Modifier::BOLD)
 }
 
 fn confirm_style() -> Style {
@@ -1707,7 +1513,7 @@ fn detail_value_width(inner_width: usize, label: &str) -> usize {
 
 fn detail_line(label: &'static str, value: String) -> Line<'static> {
     Line::from(vec![
-        Span::styled(label, meta_label_style()),
+        Span::styled(label, Style::new().fg(THEME_MUTED).bg(THEME_PANEL)),
         Span::styled(" ", surface_style()),
         Span::styled(value, meta_value_style()),
     ])
@@ -1946,7 +1752,7 @@ fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
             .map(|index| {
                 let entry = &app.entries()[*index];
                 let selected = app.selected_index() == Some(*index);
-                let marked = app.path_is_marked(entry.path.as_str());
+                let marked = app.selected_paths.contains(&entry.path);
                 let cursor_marker = if selected { ">" } else { " " };
                 let mark_marker = if marked { "[x]" } else { "[ ]" };
                 let suffix = if entry.is_dir { "/" } else { "" };
@@ -2028,12 +1834,12 @@ fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
 
     let total = visible_indices.len();
     let title = if total == 0 {
-        if app.filter_input().is_empty() {
+        if app.filter_input.is_empty() {
             "Files 0 items".to_string()
         } else {
             format!("Files 0/{} items", app.entries().len())
         }
-    } else if app.filter_input().is_empty() {
+    } else if app.filter_input.is_empty() {
         format!("Files {}-{}/{}", range.start + 1, range.end, total)
     } else {
         format!(
@@ -2050,7 +1856,7 @@ fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
         columns.widths
     };
     Table::new(items, widths)
-        .block(themed_block(title, app.focus() == PanelFocus::Files))
+        .block(themed_block(title, app.focus == PanelFocus::Files))
         .style(surface_style())
         .column_spacing(1)
         .highlight_spacing(HighlightSpacing::Never)
@@ -2069,31 +1875,32 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> P
     let title = if app.preview_title.is_empty() {
         selected
             .map(|entry| entry.server_filename.as_str())
-            .or_else(|| app.notice())
+            .or(app.notice.as_deref())
             .unwrap_or("metadata")
     } else {
         app.preview_title.as_str()
     };
     let budget = preview.unwrap_or(app.preview_budget);
 
-    let mut lines = selected
-        .map(|entry| {
-            preview_detail_lines(
-                entry,
-                app.cache_source(),
-                budget,
-                inner_width,
-                app.marquee_tick,
-            )
-        })
-        .unwrap_or_else(|| {
+    let mut lines = selected.map_or_else(
+        || {
             let name_width = detail_value_width(inner_width, "Name:");
             vec![
                 detail_line("Name:", marquee_cells(title, name_width, app.marquee_tick)),
                 detail_line("Kind:", "none".to_string()),
-                detail_line("Cache:", app.cache_source().user_label().to_string()),
+                detail_line("Cache:", app.cache_source.user_label().to_string()),
             ]
-        });
+        },
+        |entry| {
+            preview_detail_lines(
+                entry,
+                app.cache_source,
+                budget,
+                inner_width,
+                app.marquee_tick,
+            )
+        },
+    );
     lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
         push_plain_lines(&mut lines, &app.preview_lines, "", content_style());
@@ -2101,21 +1908,16 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> P
         lines.push(detail_line(
             "Buffer:",
             format!(
-                "{} / {} · {}",
+                "{} / {}",
                 bytes_label(budget.fetched_bytes),
-                bytes_label(budget.memory_limit_bytes),
-                cache_storage_label(budget.disk_backed)
+                bytes_label(budget.memory_limit_bytes)
             ),
         ));
     } else if budget.kind == PreviewKind::Text && !app.preview_lines.is_empty() {
         lines.truncate(4);
         lines.push(detail_line(
             "Preview:",
-            format!(
-                "text · {} fetched · {}",
-                bytes_label(budget.fetched_bytes),
-                cache_storage_label(budget.disk_backed)
-            ),
+            format!("text · {} fetched", bytes_label(budget.fetched_bytes)),
         ));
         lines.push(Line::raw("").style(surface_style()));
         push_plain_lines(&mut lines, &app.preview_lines, "", content_style());
@@ -2130,7 +1932,7 @@ fn preview_widget(app: &TuiApp, preview: Option<PreviewBudget>, area: Rect) -> P
         .min(lines.len().saturating_sub(usize::from(inner.height)))
         .min(usize::from(u16::MAX)) as u16;
     Paragraph::new(lines)
-        .block(themed_block("Preview", app.focus() == PanelFocus::Preview))
+        .block(themed_block("Preview", app.focus == PanelFocus::Preview))
         .style(surface_style())
         .scroll((scroll, 0))
         .wrap(Wrap { trim: true })
@@ -2206,8 +2008,6 @@ fn default_preview_budget() -> PreviewBudget {
         kind: PreviewKind::Metadata,
         fetched_bytes: 0,
         memory_limit_bytes: 16 * 1024 * 1024,
-        truncated: false,
-        disk_backed: false,
     }
 }
 
@@ -2280,8 +2080,12 @@ fn render_transfer_pane(frame: &mut Frame<'_>, app: &TuiApp, area: Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .areas(inner);
+    let speed_history = app
+        .task_speed_history
+        .get(&task.id)
+        .map_or(&[][..], Vec::as_slice);
     render_task_progress(frame, task, progress_area);
-    render_task_speed(frame, task, speed_area);
+    render_task_speed(frame, task, speed_history, speed_area);
 }
 
 fn task_table_widget(app: &TuiApp, rows: usize) -> Table<'_> {
@@ -2346,7 +2150,7 @@ fn render_task_progress(frame: &mut Frame<'_>, task: &TaskPanelItem, area: Rect)
     }
 }
 
-fn render_task_speed(frame: &mut Frame<'_>, task: &TaskPanelItem, area: Rect) {
+fn render_task_speed(frame: &mut Frame<'_>, task: &TaskPanelItem, history: &[u64], area: Rect) {
     if area.is_empty() {
         return;
     }
@@ -2362,12 +2166,12 @@ fn render_task_speed(frame: &mut Frame<'_>, task: &TaskPanelItem, area: Rect) {
         .style(meta_value_style()),
         label_area,
     );
-    if task.speed_history.is_empty() {
+    if history.is_empty() {
         return;
     }
     frame.render_widget(
         Sparkline::default()
-            .data(task.speed_history.iter().copied())
+            .data(history.iter().copied())
             .style(Style::new().fg(THEME_SUCCESS).bg(THEME_PANEL)),
         spark_area,
     );
@@ -2383,11 +2187,12 @@ fn tasks_widget(app: &TuiApp) -> Paragraph<'_> {
         &app.preload_lines,
         2,
         "preload ",
-        preload_style(),
+        Style::new().fg(THEME_DIRECTORY).bg(THEME_PANEL),
     );
-    push_limited_lines(&mut lines, &app.task_lines, 3, "", content_style());
-    if let Some(notice) = app.notice() {
-        lines.push(Line::raw(notice.to_string()).style(notice_style()));
+    if let Some(notice) = app.notice.as_deref() {
+        lines.push(
+            Line::raw(notice.to_string()).style(Style::new().fg(THEME_WARNING).bg(THEME_PANEL)),
+        );
     }
     if lines.is_empty() {
         lines.push(Line::raw("No active tasks").style(meta_value_style()));
@@ -2406,7 +2211,7 @@ fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
         } else {
             content_style()
         };
-        lines.push(Line::raw(line.to_string()).style(style));
+        lines.push(Line::raw(line.clone()).style(style));
     }
     if body_lines.len() > 9 {
         lines.push(Line::raw(format!("+{} more", body_lines.len() - 9)).style(meta_value_style()));
@@ -2415,7 +2220,13 @@ fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
     lines.push(Line::from(vec![
         Span::styled("[y] confirm", confirm_style()),
         Span::styled("    ", surface_style()),
-        Span::styled("[n] cancel", warning_style()),
+        Span::styled(
+            "[n] cancel",
+            Style::new()
+                .fg(THEME_WARNING)
+                .bg(THEME_PANEL)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]));
 
     Paragraph::new(lines)
@@ -2424,7 +2235,10 @@ fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
                 .style(surface_style())
                 .border_style(Style::new().fg(THEME_ERROR).bg(THEME_BG))
                 .title(Line::from(Span::styled(
-                    confirm_title(app),
+                    match app.confirm_kind {
+                        Some(ConfirmKind::Quit) => "Quit?",
+                        Some(ConfirmKind::Operation) | None => "Confirm",
+                    },
                     Style::new()
                         .fg(THEME_ERROR)
                         .bg(THEME_BG)
@@ -2433,13 +2247,6 @@ fn confirm_widget(app: &TuiApp) -> Paragraph<'_> {
         )
         .style(surface_style())
         .wrap(Wrap { trim: true })
-}
-
-fn confirm_title(app: &TuiApp) -> &'static str {
-    match app.confirm_kind {
-        Some(ConfirmKind::Quit) => "Quit?",
-        Some(ConfirmKind::Operation) | None => "Confirm",
-    }
 }
 
 fn confirm_body_lines(app: &TuiApp) -> Vec<String> {
@@ -2455,10 +2262,10 @@ fn confirm_body_lines(app: &TuiApp) -> Vec<String> {
 
 fn status_widget(app: &TuiApp) -> Paragraph<'_> {
     if app.mode == AppMode::Command {
-        return input_status_widget(":", app.command_input());
+        return input_status_widget(":", &app.command_input);
     }
     if app.mode == AppMode::Filter {
-        return input_status_widget("/", app.filter_input());
+        return input_status_widget("/", &app.filter_input);
     }
 
     let mut spans = vec![
@@ -2550,25 +2357,17 @@ fn modified_time_label(timestamp: i64) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-fn cache_storage_label(disk_backed: bool) -> &'static str {
-    if disk_backed {
-        "disk backed"
-    } else {
-        "memory only"
-    }
-}
-
 fn files_empty_message(app: &TuiApp) -> String {
-    if !app.filter_input().is_empty() {
-        return format!("No matches for \"{}\"", app.filter_input());
+    if !app.filter_input.is_empty() {
+        return format!("No matches for \"{}\"", app.filter_input);
     }
     match app.request_state {
         DirectoryRequestState::Loading => "Loading...".to_string(),
         DirectoryRequestState::Refreshing => "Refreshing cached entries...".to_string(),
-        DirectoryRequestState::Failed => app
-            .notice()
-            .map(|notice| format!("Error: {notice}"))
-            .unwrap_or_else(|| "Could not load directory".to_string()),
+        DirectoryRequestState::Failed => app.notice.as_deref().map_or_else(
+            || "Could not load directory".to_string(),
+            |notice| format!("Error: {notice}"),
+        ),
         DirectoryRequestState::Idle => "Empty directory".to_string(),
     }
 }
@@ -2589,7 +2388,7 @@ fn task_status_line(app: &TuiApp) -> Option<Line<'static>> {
                     .bg(THEME_PANEL),
             ),
         ),
-        DirectoryRequestState::Failed => app.notice().map(|notice| {
+        DirectoryRequestState::Failed => app.notice.as_deref().map(|notice| {
             Line::raw(format!("Error: {notice}")).style(
                 Style::new()
                     .fg(request_state_color(app.request_state))
@@ -2607,7 +2406,7 @@ fn task_status_line(app: &TuiApp) -> Option<Line<'static>> {
     }
 }
 
-fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+const fn pluralize(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
     if count == 1 {
         singular
     } else {
@@ -2747,19 +2546,452 @@ pub struct PreviewBudget {
     pub kind: PreviewKind,
     pub fetched_bytes: u64,
     pub memory_limit_bytes: u64,
-    pub truncated: bool,
-    pub disk_backed: bool,
 }
 
-impl PreviewBudget {
-    pub fn status_line(&self) -> String {
-        format!(
-            "preview={} fetched={} limit={} truncated={} disk={}",
-            self.kind.label(),
-            self.fetched_bytes,
-            self.memory_limit_bytes,
-            self.truncated,
-            self.disk_backed
-        )
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use baidupcsr_pcs::FileEntry;
+    use ratatui::layout::Rect;
+
+    fn file(fs_id: i64, path: &str) -> FileEntry {
+        FileEntry {
+            fs_id,
+            app_id: 266719,
+            path: path.to_string(),
+            server_filename: path.trim_start_matches('/').to_string(),
+            ctime: 1,
+            mtime: 1,
+            md5: String::new(),
+            block_list: Vec::new(),
+            size: 1,
+            is_dir: false,
+            has_subdir: false,
+        }
+    }
+
+    fn directory(fs_id: i64, path: &str) -> FileEntry {
+        FileEntry {
+            is_dir: true,
+            has_subdir: true,
+            size: 0,
+            ..file(fs_id, path)
+        }
+    }
+
+    #[test]
+    fn default_keymap_exposes_vim_navigation() {
+        assert_eq!(key_action_for(KeyEvent::Char('j')), Some(KeyAction::Down));
+        assert_eq!(key_action_for(KeyEvent::Char('k')), Some(KeyAction::Up));
+        assert_eq!(key_action_for(KeyEvent::Char('h')), Some(KeyAction::Back));
+        assert_eq!(key_action_for(KeyEvent::Char('l')), Some(KeyAction::Enter));
+        assert_eq!(key_action_for(KeyEvent::Char('q')), Some(KeyAction::Quit));
+        assert_eq!(
+            key_action_for(KeyEvent::Char('p')),
+            Some(KeyAction::Preview)
+        );
+        assert_eq!(
+            key_action_for(KeyEvent::Char('d')),
+            Some(KeyAction::Download)
+        );
+        assert_eq!(
+            key_action_for(KeyEvent::Char('x')),
+            Some(KeyAction::CancelTask)
+        );
+        assert_eq!(
+            key_action_for(KeyEvent::PageDown),
+            Some(KeyAction::PageDown)
+        );
+        assert_eq!(key_action_for(KeyEvent::PageUp), Some(KeyAction::PageUp));
+        assert_eq!(key_action_for(KeyEvent::Home), Some(KeyAction::Top));
+        assert_eq!(key_action_for(KeyEvent::End), Some(KeyAction::Bottom));
+        assert_eq!(
+            key_action_for(KeyEvent::Ctrl('d')),
+            Some(KeyAction::HalfPageDown)
+        );
+        assert_eq!(
+            key_action_for(KeyEvent::Ctrl('u')),
+            Some(KeyAction::HalfPageUp)
+        );
+    }
+
+    #[test]
+    fn arrow_keys_mirror_vim_navigation_actions() {
+        assert_eq!(key_action_for(KeyEvent::Down), Some(KeyAction::Down));
+        assert_eq!(key_action_for(KeyEvent::Up), Some(KeyAction::Up));
+        assert_eq!(key_action_for(KeyEvent::Left), Some(KeyAction::Back));
+        assert_eq!(key_action_for(KeyEvent::Right), Some(KeyAction::Enter));
+    }
+
+    #[test]
+    fn preview_mouse_wheel_scrolls_preview_without_changing_selection() {
+        let mut app = TuiApp::new("/docs");
+        app.set_entries(vec![file(1, "/docs/readme.md"), file(2, "/docs/todo.md")]);
+        app.finish_preview_text(
+            "readme.md",
+            "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
+            PreviewBudget {
+                kind: PreviewKind::Text,
+                fetched_bytes: 36,
+                memory_limit_bytes: 16 * 1024 * 1024,
+            },
+        );
+
+        let event = app.handle_mouse_event(MouseInput {
+            kind: MouseInputKind::ScrollDown,
+            column: 70,
+            row: 5,
+            area: Rect::new(0, 0, 96, 16),
+        });
+
+        assert_eq!(event, None);
+        assert_eq!(app.selected_index(), Some(0));
+        assert!(app.preview_scroll_offset > 0);
+    }
+
+    #[test]
+    fn mouse_click_on_preview_scrollbar_moves_preview_to_bottom() {
+        let mut app = TuiApp::new("/docs");
+        app.set_entries(vec![file(1, "/docs/readme.md")]);
+        app.finish_preview_text(
+            "readme.md",
+            "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
+            PreviewBudget {
+                kind: PreviewKind::Text,
+                fetched_bytes: 48,
+                memory_limit_bytes: 16 * 1024 * 1024,
+            },
+        );
+
+        let event = app.handle_mouse_event(MouseInput {
+            kind: MouseInputKind::LeftClick,
+            column: 94,
+            row: 10,
+            area: Rect::new(0, 0, 96, 18),
+        });
+
+        assert_eq!(event, None);
+        assert_eq!(app.preview_scroll_offset, 15);
+    }
+
+    #[test]
+    fn preview_text_updates_panel_content_and_budget() {
+        let mut app = TuiApp::new("/docs");
+
+        let budget = PreviewBudget {
+            kind: PreviewKind::Text,
+            fetched_bytes: 11,
+            memory_limit_bytes: 16 * 1024 * 1024,
+        };
+        app.begin_preview("notes.md", "loading text preview");
+        app.finish_preview_text("notes.md", "hello\nworld", budget);
+
+        assert_eq!(app.preview_title, "notes.md");
+        assert_eq!(
+            app.preview_lines,
+            vec!["hello".to_string(), "world".to_string()]
+        );
+        assert_eq!(app.preview_budget, budget);
+    }
+
+    #[test]
+    fn video_preview_status_updates_panel() {
+        let mut app = TuiApp::new("/videos");
+
+        app.finish_preview_video(
+            "movie.mp4",
+            vec![
+                "video=loopback".to_string(),
+                "listen=127.0.0.1:39177".to_string(),
+                "player=mpv".to_string(),
+                "cache=0/1048576".to_string(),
+            ],
+            PreviewBudget {
+                kind: PreviewKind::Video,
+                fetched_bytes: 0,
+                memory_limit_bytes: 1024 * 1024,
+            },
+        );
+
+        assert_eq!(app.preview_title, "movie.mp4");
+        assert_eq!(app.preview_budget.kind, PreviewKind::Video);
+        assert_eq!(app.preview_budget.memory_limit_bytes, 1024 * 1024);
+        assert_eq!(app.preview_lines[0], "video=loopback");
+    }
+
+    #[test]
+    fn task_items_track_recent_speed_history() {
+        let mut app = TuiApp::new("/remote");
+        let mut item = TaskPanelItem {
+            id: 7,
+            kind: "download".to_string(),
+            state: "running".to_string(),
+            bytes_done: 512,
+            bytes_total: Some(1024),
+            speed_bytes_per_sec: 128,
+            label: "movie.mkv".to_string(),
+        };
+
+        app.set_task_items(vec![item.clone()]);
+        item.bytes_done = 768;
+        item.speed_bytes_per_sec = 256;
+        app.set_task_items(vec![item]);
+
+        assert_eq!(
+            app.task_speed_history.get(&7).map(Vec::as_slice),
+            Some([128, 256].as_slice())
+        );
+    }
+
+    #[test]
+    fn mode_keys_enter_filter_command_and_return_to_normal() {
+        let mut app = TuiApp::new("/");
+
+        app.handle_key_event(KeyEvent::Char('/'));
+        assert_eq!(app.mode, AppMode::Filter);
+
+        app.handle_key_event(KeyEvent::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+
+        app.handle_key_event(KeyEvent::Char(':'));
+        assert_eq!(app.mode, AppMode::Command);
+
+        app.handle_key_event(KeyEvent::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn slash_filters_current_entries_without_submitting_remote_search() {
+        let mut app = TuiApp::new("/");
+        app.set_entries(vec![
+            file(1, "/notes.md"),
+            file(2, "/photo.jpg"),
+            file(3, "/todo.txt"),
+        ]);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
+        for ch in "note".chars() {
+            assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+        }
+
+        assert_eq!(app.mode, AppMode::Filter);
+        assert_eq!(app.filter_input, "note");
+        assert_eq!(app.filtered_entry_count(), 1);
+        assert_eq!(
+            app.selected_entry().map(|entry| entry.path.as_str()),
+            Some("/notes.md")
+        );
+        assert_eq!(app.handle_key_event(KeyEvent::Enter), None);
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.filter_input, "note");
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('/')), None);
+        for ch in "zzz".chars() {
+            assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+        }
+        assert_eq!(app.filtered_entry_count(), 0);
+        assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
+        assert_eq!(app.filter_input, "");
+        assert_eq!(app.filtered_entry_count(), 3);
+    }
+
+    #[test]
+    fn quit_with_background_tasks_requires_confirmation() {
+        let mut app = TuiApp::new("/docs");
+        app.set_background_tasks(2);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(
+            app.confirm_lines,
+            vec!["Quit with 2 tasks still running?".to_string()]
+        );
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('n')), None);
+        assert_eq!(app.mode, AppMode::Normal);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('q')), None);
+        assert_eq!(
+            app.handle_key_event(KeyEvent::Char('y')),
+            Some(TuiRuntimeEvent::Action(KeyAction::Quit))
+        );
+    }
+
+    #[test]
+    fn command_mode_buffers_text_and_submits_on_enter() {
+        let mut app = TuiApp::new("/docs");
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char(':')), None);
+        assert_eq!(app.mode, AppMode::Command);
+        for ch in "mkdir reports".chars() {
+            assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+        }
+
+        assert_eq!(
+            app.handle_key_event(KeyEvent::Enter),
+            Some(TuiRuntimeEvent::CommandSubmitted(
+                "mkdir reports".to_string()
+            ))
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.command_input, "");
+    }
+
+    #[test]
+    fn confirm_mode_requires_explicit_yes_or_no() {
+        let mut app = TuiApp::new("/docs");
+
+        app.begin_confirm(vec![
+            "delete 2 remote entries".to_string(),
+            "/docs/a.txt".to_string(),
+        ]);
+
+        assert_eq!(app.mode, AppMode::Confirm);
+        assert_eq!(app.handle_key_event(KeyEvent::Char('j')), None);
+        assert_eq!(
+            app.handle_key_event(KeyEvent::Char('y')),
+            Some(TuiRuntimeEvent::ConfirmAccepted)
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.confirm_lines.is_empty());
+    }
+
+    #[test]
+    fn mouse_wheel_scrolls_view_and_keeps_selection_visible() {
+        let mut app = TuiApp::new("/docs");
+        let entries: Vec<FileEntry> = (0..20)
+            .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+            .collect();
+        app.set_entries(entries);
+
+        assert_eq!(
+            app.handle_mouse_event(MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                column: 24,
+                row: 5,
+                area: Rect::new(0, 0, 96, 24),
+            }),
+            Some(TuiRuntimeEvent::Action(KeyAction::Select))
+        );
+        assert_eq!(app.selected_index(), Some(3));
+        assert_eq!(app.visible_entry_range(4), 2..6);
+    }
+
+    #[test]
+    fn mouse_click_on_files_scrollbar_moves_view_to_bottom() {
+        let mut app = TuiApp::new("/docs");
+        let entries: Vec<FileEntry> = (0..40)
+            .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+            .collect();
+        app.set_entries(entries);
+
+        let event = app.handle_mouse_event(MouseInput {
+            kind: MouseInputKind::LeftClick,
+            column: 44,
+            row: 16,
+            area: Rect::new(0, 0, 96, 24),
+        });
+
+        assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+        assert_eq!(app.visible_entry_range(13), 27..40);
+        assert_eq!(app.selected_index(), Some(27));
+    }
+
+    #[test]
+    fn mouse_drag_on_files_scrollbar_keeps_controlling_files_after_leaving_column() {
+        let mut app = TuiApp::new("/docs");
+        let entries: Vec<FileEntry> = (0..40)
+            .map(|index| file(index, &format!("/docs/item-{index:02}.txt")))
+            .collect();
+        app.set_entries(entries);
+
+        let area = Rect::new(0, 0, 96, 24);
+        let _ = app.handle_mouse_event(MouseInput {
+            kind: MouseInputKind::LeftClick,
+            column: 44,
+            row: 4,
+            area,
+        });
+
+        let event = app.handle_mouse_event(MouseInput {
+            kind: MouseInputKind::LeftDrag,
+            column: 40,
+            row: 16,
+            area,
+        });
+
+        assert_eq!(event, Some(TuiRuntimeEvent::Action(KeyAction::Select)));
+        assert_eq!(app.visible_entry_range(13), 27..40);
+    }
+
+    #[test]
+    fn directory_load_state_replaces_path_entries_and_status() {
+        let mut app = TuiApp::new("/");
+        app.set_entries(vec![directory(1, "/docs")]);
+
+        app.begin_directory_refresh("/docs", Vec::new(), None, None);
+        assert_eq!(app.path(), "/docs");
+        assert_eq!(app.entries(), &[]);
+        assert_eq!(app.selected_index(), None);
+        assert_eq!(app.notice.as_deref(), Some("loading /docs"));
+        assert_eq!(app.request_state, DirectoryRequestState::Loading);
+
+        app.finish_directory_success(
+            "/docs",
+            vec![file(2, "/docs/readme.md"), directory(3, "/docs/src")],
+            Some(0),
+            None,
+        );
+
+        assert_eq!(app.path(), "/docs");
+        assert_eq!(app.entries().len(), 2);
+        assert_eq!(app.selected_index(), Some(0));
+        assert_eq!(app.notice.as_deref(), Some("loaded /docs"));
+        assert_eq!(app.request_state, DirectoryRequestState::Idle);
+    }
+
+    #[test]
+    fn directory_load_failure_keeps_cached_entries_and_reports_error() {
+        let mut app = TuiApp::new("/docs");
+
+        app.begin_directory_refresh(
+            "/missing",
+            vec![file(1, "/missing/cached.txt")],
+            Some(7),
+            None,
+        );
+        app.finish_directory_error(
+            "/missing",
+            vec![file(1, "/missing/cached.txt")],
+            Some(7),
+            "remote_list_error: 403",
+            None,
+        );
+
+        assert_eq!(app.path(), "/missing");
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.notice.as_deref(), Some("remote_list_error: 403"));
+        assert_eq!(app.request_state, DirectoryRequestState::Failed);
+    }
+
+    #[test]
+    fn cached_directory_refresh_keeps_stale_entries_visible() {
+        let mut app = TuiApp::new("/");
+
+        app.begin_directory_refresh(
+            "/docs",
+            vec![file(1, "/docs/cached.txt"), directory(2, "/docs/src")],
+            Some(12),
+            Some("/docs/src"),
+        );
+
+        assert_eq!(app.path(), "/docs");
+        assert_eq!(app.request_state, DirectoryRequestState::Refreshing);
+        assert_eq!(app.entries().len(), 2);
+        assert_eq!(
+            app.selected_entry().map(|entry| entry.path.as_str()),
+            Some("/docs/src")
+        );
+        assert_eq!(app.notice.as_deref(), Some("refreshing /docs from cache"));
     }
 }

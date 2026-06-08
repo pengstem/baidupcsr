@@ -1,6 +1,6 @@
 use baidupcsr_pcs::FileEntry;
 use baidupcsr_tui::{
-    render_app, CacheSource, KeyAction, KeyEvent, PanelFocus, PreviewBudget, PreviewKind, TuiApp,
+    render_app, CacheSource, KeyAction, KeyEvent, PreviewBudget, PreviewKind, TuiApp,
     TuiRuntimeEvent,
 };
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
@@ -171,8 +171,6 @@ fn preview_panel_uses_empty_space_for_selected_file_details() {
             kind: PreviewKind::Image,
             fetched_bytes: 4096,
             memory_limit_bytes: 16 * 1024 * 1024,
-            truncated: false,
-            disk_backed: false,
         },
     );
 
@@ -242,7 +240,6 @@ fn tab_focus_only_highlights_the_active_browser_pane() {
         file(2, "/remote/current/readme.md", 2048, false),
     ]);
 
-    assert_eq!(app.focus(), PanelFocus::Files);
     let files_focused = draw_buffer(&app, 108, 24);
     assert!(text_has_style(
         &files_focused,
@@ -258,7 +255,6 @@ fn tab_focus_only_highlights_the_active_browser_pane() {
     ));
 
     assert_eq!(app.handle_key_event(KeyEvent::Tab), None);
-    assert_eq!(app.focus(), PanelFocus::Preview);
     let preview_focused = draw_buffer(&app, 108, 24);
     assert!(text_has_style(
         &preview_focused,

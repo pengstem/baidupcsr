@@ -7,26 +7,26 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use serde_json::Value;
 
-pub const CONFIG_FILE_NAME: &str = "pcs_config.json";
-pub const ENV_CONFIG_DIR: &str = "BAIDUPCS_GO_CONFIG_DIR";
-pub const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
-pub const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
-pub const ENV_CACHE_DIR: &str = "BAIDUPCSR_CACHE_DIR";
+const CONFIG_FILE_NAME: &str = "pcs_config.json";
+const ENV_CONFIG_DIR: &str = "BAIDUPCS_GO_CONFIG_DIR";
+const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
+const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
+const ENV_CACHE_DIR: &str = "BAIDUPCSR_CACHE_DIR";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TargetOs {
+enum TargetOs {
     Unix,
     Windows,
     Android,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigDiscoveryInput {
-    pub config_dir_env: Option<PathBuf>,
-    pub executable_dir: PathBuf,
-    pub home_dir: Option<PathBuf>,
-    pub appdata_dir: Option<PathBuf>,
-    pub target_os: TargetOs,
+struct ConfigDiscoveryInput {
+    config_dir_env: Option<PathBuf>,
+    executable_dir: PathBuf,
+    home_dir: Option<PathBuf>,
+    appdata_dir: Option<PathBuf>,
+    target_os: TargetOs,
 }
 
 #[derive(Debug)]
@@ -78,11 +78,9 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Read { source, .. } => Some(source),
-            Self::Write { source, .. } => Some(source),
+            Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
             Self::Parse { source, .. } => Some(source),
-            Self::InvalidConfig { .. } => None,
-            Self::InvalidUiConfig { .. } => None,
+            Self::InvalidConfig { .. } | Self::InvalidUiConfig { .. } => None,
         }
     }
 }
@@ -162,6 +160,30 @@ pub enum VideoPlayerProfile {
     Isolated,
 }
 
+impl PcsConfig {
+    pub fn active_user(&self) -> Option<&BaiduUser> {
+        self.baidu_user_list
+            .iter()
+            .find(|user| user.uid == self.baidu_active_uid)
+    }
+}
+
+impl VideoPreviewConfig {
+    pub fn memory_limit_bytes(&self) -> u64 {
+        self.chunk_size_bytes
+            .saturating_mul(u64::try_from(self.max_chunks).unwrap_or(u64::MAX))
+    }
+}
+
+impl VideoPlayerProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Isolated => "isolated",
+        }
+    }
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
@@ -186,7 +208,12 @@ impl BaiduUser {
     }
 }
 
-pub fn discover_config_file(input: &ConfigDiscoveryInput) -> PathBuf {
+pub fn discover_config_file(config_dir_override: Option<PathBuf>) -> PathBuf {
+    let input = discovery_input_from_env(config_dir_override);
+    discover_config_file_from_input(&input)
+}
+
+fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> PathBuf {
     if let Some(config_dir) = &input.config_dir_env {
         let config_dir = if config_dir.is_absolute() {
             config_dir.clone()
@@ -222,7 +249,7 @@ pub fn discover_config_file(input: &ConfigDiscoveryInput) -> PathBuf {
     }
 }
 
-pub fn discovery_input_from_env(config_dir_override: Option<PathBuf>) -> ConfigDiscoveryInput {
+fn discovery_input_from_env(config_dir_override: Option<PathBuf>) -> ConfigDiscoveryInput {
     let executable_dir = env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -296,14 +323,14 @@ pub fn discover_ui_config_file() -> PathBuf {
         return path;
     }
 
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| {
+    env::var_os("HOME").map(PathBuf::from).map_or_else(
+        || PathBuf::from(UI_CONFIG_FILE_NAME),
+        |path| {
             path.join(".config")
                 .join("baidupcsr")
                 .join(UI_CONFIG_FILE_NAME)
-        })
-        .unwrap_or_else(|| PathBuf::from(UI_CONFIG_FILE_NAME))
+        },
+    )
 }
 
 pub fn discover_cache_dir() -> PathBuf {
@@ -315,10 +342,10 @@ pub fn discover_cache_dir() -> PathBuf {
         return path.join("baidupcsr");
     }
 
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|path| path.join(".cache").join("baidupcsr"))
-        .unwrap_or_else(|| PathBuf::from(".baidupcsr-cache"))
+    env::var_os("HOME").map(PathBuf::from).map_or_else(
+        || PathBuf::from(".baidupcsr-cache"),
+        |path| path.join(".cache").join("baidupcsr"),
+    )
 }
 
 pub fn load_ui_config_or_default(path: &Path) -> Result<UiConfig, ConfigError> {
@@ -331,7 +358,7 @@ pub fn load_ui_config_or_default(path: &Path) -> Result<UiConfig, ConfigError> {
     }
 }
 
-pub fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
+fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
     let data = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
         source,
@@ -353,13 +380,15 @@ fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
         let value = value.trim().trim_matches('"');
         match key {
             "video_preview_enabled" => {
-                config.video_preview.enabled = parse_bool(path, value)?;
+                config.video_preview.enabled = parse_value(path, value, "expected boolean value")?;
             }
             "video_chunk_size_bytes" => {
-                config.video_preview.chunk_size_bytes = parse_u64(path, value)?;
+                config.video_preview.chunk_size_bytes =
+                    parse_value(path, value, "expected unsigned integer")?;
             }
             "video_max_chunks" => {
-                config.video_preview.max_chunks = parse_usize(path, value)?;
+                config.video_preview.max_chunks =
+                    parse_value(path, value, "expected unsigned integer")?;
             }
             "video_player_profile" => {
                 config.video_preview.player_profile = parse_video_player_profile(path, value)?;
@@ -378,24 +407,13 @@ fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
     Ok(config)
 }
 
-fn parse_bool(path: &Path, value: &str) -> Result<bool, ConfigError> {
-    match value {
-        "true" => Ok(true),
-        "false" => Ok(false),
-        _ => Err(invalid_ui_config(path, "expected boolean value")),
-    }
-}
-
-fn parse_u64(path: &Path, value: &str) -> Result<u64, ConfigError> {
+fn parse_value<T>(path: &Path, value: &str, message: &'static str) -> Result<T, ConfigError>
+where
+    T: std::str::FromStr,
+{
     value
-        .parse::<u64>()
-        .map_err(|_| invalid_ui_config(path, "expected unsigned integer"))
-}
-
-fn parse_usize(path: &Path, value: &str) -> Result<usize, ConfigError> {
-    value
-        .parse::<usize>()
-        .map_err(|_| invalid_ui_config(path, "expected unsigned integer"))
+        .parse::<T>()
+        .map_err(|_| invalid_ui_config(path, message))
 }
 
 fn parse_video_player_profile(path: &Path, value: &str) -> Result<VideoPlayerProfile, ConfigError> {
@@ -423,13 +441,6 @@ fn invalid_config(path: &Path, message: &str) -> ConfigError {
     }
 }
 
-pub fn active_user(config: &PcsConfig) -> Option<&BaiduUser> {
-    config
-        .baidu_user_list
-        .iter()
-        .find(|user| user.uid == config.baidu_active_uid)
-}
-
 fn cookie_has_key(cookies: &str, key: &str) -> bool {
     cookies.split(';').any(|item| {
         let item = item.trim();
@@ -446,5 +457,43 @@ fn current_target_os() -> TargetOs {
         TargetOs::Android
     } else {
         TargetOs::Unix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{discover_config_file_from_input, ConfigDiscoveryInput, TargetOs};
+    use std::path::PathBuf;
+
+    #[test]
+    fn discover_config_prefers_explicit_env_dir() {
+        let input = ConfigDiscoveryInput {
+            config_dir_env: Some(PathBuf::from("/tmp/baidupcsr-config")),
+            executable_dir: PathBuf::from("/opt/baidupcsr"),
+            home_dir: Some(PathBuf::from("/home/example")),
+            appdata_dir: None,
+            target_os: TargetOs::Unix,
+        };
+
+        assert_eq!(
+            discover_config_file_from_input(&input),
+            PathBuf::from("/tmp/baidupcsr-config/pcs_config.json")
+        );
+    }
+
+    #[test]
+    fn discover_config_uses_unix_home_config_dir_when_no_env_or_legacy_file() {
+        let input = ConfigDiscoveryInput {
+            config_dir_env: None,
+            executable_dir: PathBuf::from("/opt/baidupcsr"),
+            home_dir: Some(PathBuf::from("/home/example")),
+            appdata_dir: None,
+            target_os: TargetOs::Unix,
+        };
+
+        assert_eq!(
+            discover_config_file_from_input(&input),
+            PathBuf::from("/home/example/.config/BaiduPCS-Go/pcs_config.json")
+        );
     }
 }

@@ -72,7 +72,7 @@ fn empty_operation_targets_are_rejected() {
 #[test]
 fn task_manager_can_track_remote_operation_tasks() -> Result<(), TaskError> {
     let mut manager = TaskManager::new();
-    let id = manager.enqueue_remote_operation("delete", 2);
+    let id = manager.enqueue_remote_operation("delete");
 
     manager.start(id)?;
     manager.complete(id)?;
@@ -82,7 +82,6 @@ fn task_manager_can_track_remote_operation_tasks() -> Result<(), TaskError> {
         task.kind,
         TaskKind::RemoteOperation {
             label: "delete".to_string(),
-            item_count: 2,
         }
     );
     assert_eq!(manager.active_count(), 0);

@@ -31,7 +31,6 @@ fn png_header_preview_extracts_dimensions_without_full_file_decode() {
     assert_eq!(metadata.format, ImagePreviewFormat::Png);
     assert_eq!(metadata.width, Some(320));
     assert_eq!(metadata.height, Some(240));
-    assert!(!metadata.disk_backed);
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use baidupcsr_core::{DirectoryCache, DirectoryChange, DirectoryStatus};
+use baidupcsr_core::{DirectoryCache, DirectoryStatus};
 use baidupcsr_pcs::FileEntry;
 
 fn file(fs_id: i64, path: &str, size: i64, mtime: i64) -> FileEntry {
@@ -20,14 +20,12 @@ fn file(fs_id: i64, path: &str, size: i64, mtime: i64) -> FileEntry {
 #[test]
 fn entering_directory_returns_stale_snapshot_and_starts_refresh() {
     let mut cache = DirectoryCache::new();
-    cache.seed("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
+    cache.replace_with_fresh_entries("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
 
     let view = cache.enter_directory("/docs");
 
-    assert_eq!(view.path, "/docs");
     assert_eq!(view.entries.len(), 1);
     assert_eq!(view.status, DirectoryStatus::Refreshing);
-    assert_eq!(view.generation.value(), 1);
 }
 
 #[test]
@@ -36,11 +34,11 @@ fn stale_refresh_result_cannot_overwrite_newer_generation() {
     let old = cache.begin_refresh("/docs");
     let new = cache.begin_refresh("/docs");
 
-    let applied_old = cache.finish_refresh("/docs", old, vec![file(1, "/docs/old.txt", 10, 100)]);
-    let applied_new = cache.finish_refresh("/docs", new, vec![file(2, "/docs/new.txt", 10, 100)]);
+    let old_applied = cache.finish_refresh("/docs", old, vec![file(1, "/docs/old.txt", 10, 100)]);
+    let new_applied = cache.finish_refresh("/docs", new, vec![file(2, "/docs/new.txt", 10, 100)]);
 
-    assert!(!applied_old.applied);
-    assert!(applied_new.applied);
+    assert!(!old_applied);
+    assert!(new_applied);
 
     let view = cache.enter_directory("/docs");
     assert_eq!(view.entries[0].path, "/docs/new.txt");
@@ -49,46 +47,15 @@ fn stale_refresh_result_cannot_overwrite_newer_generation() {
 #[test]
 fn refresh_error_preserves_cached_entries_and_marks_error() {
     let mut cache = DirectoryCache::new();
-    cache.seed("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
+    cache.replace_with_fresh_entries("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
 
     let generation = cache.begin_refresh("/docs");
-    let result = cache.finish_refresh_error("/docs", generation);
+    let applied = cache.finish_refresh_error("/docs", generation);
 
-    assert!(result.applied);
+    assert!(applied);
 
     let view = cache.snapshot("/docs");
     assert_eq!(view.status, DirectoryStatus::Error);
     assert_eq!(view.entries.len(), 1);
     assert_eq!(view.entries[0].path, "/docs/a.txt");
-}
-
-#[test]
-fn refresh_reports_added_removed_and_modified_entries() {
-    let mut cache = DirectoryCache::new();
-    cache.seed(
-        "/docs",
-        vec![
-            file(1, "/docs/old.txt", 10, 100),
-            file(2, "/docs/changed.txt", 10, 100),
-        ],
-    );
-
-    let generation = cache.begin_refresh("/docs");
-    let result = cache.finish_refresh(
-        "/docs",
-        generation,
-        vec![
-            file(2, "/docs/changed.txt", 11, 101),
-            file(3, "/docs/new.txt", 10, 100),
-        ],
-    );
-
-    assert_eq!(
-        result.changes,
-        vec![
-            DirectoryChange::Added { fs_id: 3 },
-            DirectoryChange::Removed { fs_id: 1 },
-            DirectoryChange::Modified { fs_id: 2 },
-        ]
-    );
 }

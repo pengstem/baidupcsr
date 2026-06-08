@@ -10,18 +10,16 @@ fn doctor_redact_reports_stage1_shell() {
         .args(["doctor", "--redact", "--config-dir", &missing_config_dir])
         .output();
     assert!(output_result.is_ok(), "failed to run baidupcsr-cli doctor");
-    let output = match output_result {
-        Ok(output) => output,
-        Err(_) => return,
+    let Ok(output) = output_result else {
+        return;
     };
 
     assert!(output.status.success());
 
     let stdout_result = String::from_utf8(output.stdout);
     assert!(stdout_result.is_ok(), "stdout is not utf8");
-    let stdout = match stdout_result {
-        Ok(stdout) => stdout,
-        Err(_) => return,
+    let Ok(stdout) = stdout_result else {
+        return;
     };
     assert!(stdout.contains("baidupcsr doctor"));
     assert!(stdout.contains("redacted: true"));

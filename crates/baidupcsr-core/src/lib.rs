@@ -10,12 +10,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RefreshGeneration(u64);
 
-impl RefreshGeneration {
-    pub const fn value(self) -> u64 {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DirectoryStatus {
     Empty,
@@ -25,24 +19,10 @@ pub enum DirectoryStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum DirectoryChange {
-    Added { fs_id: i64 },
-    Removed { fs_id: i64 },
-    Modified { fs_id: i64 },
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirectoryView {
-    pub path: String,
     pub entries: Vec<FileEntry>,
     pub status: DirectoryStatus,
     pub generation: RefreshGeneration,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RefreshResult {
-    pub applied: bool,
-    pub changes: Vec<DirectoryChange>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -55,7 +35,7 @@ impl DirectoryCache {
         Self::default()
     }
 
-    pub fn seed(&mut self, path: &str, entries: Vec<FileEntry>) {
+    pub fn replace_with_fresh_entries(&mut self, path: &str, entries: Vec<FileEntry>) {
         self.entries.insert(
             path.to_string(),
             CacheEntry {
@@ -74,7 +54,6 @@ impl DirectoryCache {
             .or_insert_with(CacheEntry::empty);
 
         DirectoryView {
-            path: path.to_string(),
             entries: entry.entries.clone(),
             status: entry.status,
             generation,
@@ -84,7 +63,6 @@ impl DirectoryCache {
     pub fn snapshot(&self, path: &str) -> DirectoryView {
         let entry = self.entries.get(path);
         DirectoryView {
-            path: path.to_string(),
             entries: entry.map_or_else(Vec::new, |entry| entry.entries.clone()),
             status: entry.map_or(DirectoryStatus::Empty, |entry| entry.status),
             generation: entry.map_or(RefreshGeneration(0), |entry| entry.generation),
@@ -106,52 +84,35 @@ impl DirectoryCache {
         path: &str,
         generation: RefreshGeneration,
         new_entries: Vec<FileEntry>,
-    ) -> RefreshResult {
+    ) -> bool {
         let entry = self
             .entries
             .entry(path.to_string())
             .or_insert_with(CacheEntry::empty);
 
         if entry.generation != generation {
-            return RefreshResult {
-                applied: false,
-                changes: Vec::new(),
-            };
+            return false;
         }
 
-        let changes = diff_entries(&entry.entries, &new_entries);
         entry.entries = new_entries;
         entry.status = DirectoryStatus::Fresh;
 
-        RefreshResult {
-            applied: true,
-            changes,
-        }
+        true
     }
 
-    pub fn finish_refresh_error(
-        &mut self,
-        path: &str,
-        generation: RefreshGeneration,
-    ) -> RefreshResult {
+    pub fn finish_refresh_error(&mut self, path: &str, generation: RefreshGeneration) -> bool {
         let entry = self
             .entries
             .entry(path.to_string())
             .or_insert_with(CacheEntry::empty);
 
         if entry.generation != generation {
-            return RefreshResult {
-                applied: false,
-                changes: Vec::new(),
-            };
+            return false;
         }
 
         entry.status = DirectoryStatus::Error;
 
-        RefreshResult {
-            applied: true,
-            changes: Vec::new(),
-        }
+        true
     }
 }
 
@@ -186,8 +147,8 @@ impl std::error::Error for DirectoryCacheStoreError {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CachedDirectorySnapshot {
-    pub account_uid: u64,
-    pub path: String,
+    account_uid: u64,
+    path: String,
     pub saved_at_unix_seconds: u64,
     pub entries: Vec<FileEntry>,
 }
@@ -197,10 +158,6 @@ impl DirectoryCacheStore {
         Self {
             root: root.as_ref().to_path_buf(),
         }
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 
     pub fn write_snapshot(
@@ -278,7 +235,6 @@ pub struct PagedPreloadPlan {
     pub targets: Vec<PreloadTarget>,
     pub window_start: usize,
     pub window_end: usize,
-    pub considered_entries: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,7 +266,6 @@ impl PagedPreloadPlanner {
                 targets: Vec::new(),
                 window_start: 0,
                 window_end: 0,
-                considered_entries: 0,
             };
         }
         let selected = selected_index.min(entries.len().saturating_sub(1));
@@ -334,7 +289,6 @@ impl PagedPreloadPlanner {
             targets,
             window_start,
             window_end,
-            considered_entries: window_end.saturating_sub(window_start),
         }
     }
 
@@ -416,33 +370,10 @@ impl TaskId {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TransferPolicy {
-    Skip,
-    Overwrite,
-    Rsync,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TaskKind {
-    Download {
-        remote_path: String,
-        local_path: String,
-        size_bytes: u64,
-    },
-    LocalOpen {
-        remote_path: String,
-        local_path: String,
-        size_bytes: u64,
-    },
-    Upload {
-        local_path: String,
-        remote_path: String,
-        policy: TransferPolicy,
-    },
-    RemoteOperation {
-        label: String,
-        item_count: usize,
-    },
+    Download { local_path: String },
+    LocalOpen { local_path: String },
+    RemoteOperation { label: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -468,8 +399,6 @@ pub struct TaskSnapshot {
     pub kind: TaskKind,
     pub state: TaskState,
     pub progress: TransferProgress,
-    pub error: Option<String>,
-    pub retry_of: Option<TaskId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -498,68 +427,29 @@ impl TaskManager {
         Self::default()
     }
 
-    pub fn enqueue_download(
-        &mut self,
-        remote_path: impl Into<String>,
-        local_path: impl Into<String>,
-        size_bytes: u64,
-    ) -> TaskId {
+    pub fn enqueue_download(&mut self, local_path: impl Into<String>, size_bytes: u64) -> TaskId {
         self.insert_task(
             TaskKind::Download {
-                remote_path: remote_path.into(),
                 local_path: local_path.into(),
-                size_bytes,
             },
             Some(size_bytes),
-            None,
         )
     }
 
-    pub fn enqueue_local_open(
-        &mut self,
-        remote_path: impl Into<String>,
-        local_path: impl Into<String>,
-        size_bytes: u64,
-    ) -> TaskId {
+    pub fn enqueue_local_open(&mut self, local_path: impl Into<String>, size_bytes: u64) -> TaskId {
         self.insert_task(
             TaskKind::LocalOpen {
-                remote_path: remote_path.into(),
                 local_path: local_path.into(),
-                size_bytes,
             },
             Some(size_bytes),
-            None,
         )
     }
 
-    pub fn enqueue_upload(
-        &mut self,
-        local_path: impl Into<String>,
-        remote_path: impl Into<String>,
-        policy: TransferPolicy,
-    ) -> TaskId {
-        self.insert_task(
-            TaskKind::Upload {
-                local_path: local_path.into(),
-                remote_path: remote_path.into(),
-                policy,
-            },
-            None,
-            None,
-        )
-    }
-
-    pub fn enqueue_remote_operation(
-        &mut self,
-        label: impl Into<String>,
-        item_count: usize,
-    ) -> TaskId {
+    pub fn enqueue_remote_operation(&mut self, label: impl Into<String>) -> TaskId {
         self.insert_task(
             TaskKind::RemoteOperation {
                 label: label.into(),
-                item_count,
             },
-            None,
             None,
         )
     }
@@ -570,7 +460,6 @@ impl TaskManager {
             return Err(TaskError::InvalidTransition);
         }
         task.state = TaskState::Running;
-        task.error = None;
         Ok(())
     }
 
@@ -614,36 +503,25 @@ impl TaskManager {
             task.progress.bytes_done = total;
         }
         task.state = TaskState::Completed;
-        task.error = None;
         Ok(())
     }
 
-    pub fn fail(&mut self, id: TaskId, error: impl Into<String>) -> Result<(), TaskError> {
+    pub fn fail(&mut self, id: TaskId) -> Result<(), TaskError> {
         let task = self.task_mut(id)?;
         if task.is_terminal() {
             return Err(TaskError::InvalidTransition);
         }
         task.state = TaskState::Failed;
-        task.error = Some(error.into());
         Ok(())
     }
 
-    pub fn cancelled(&mut self, id: TaskId, reason: impl Into<String>) -> Result<(), TaskError> {
+    pub fn cancelled(&mut self, id: TaskId) -> Result<(), TaskError> {
         let task = self.task_mut(id)?;
         if task.state != TaskState::CancelRequested {
             return Err(TaskError::InvalidTransition);
         }
         task.state = TaskState::Cancelled;
-        task.error = Some(reason.into());
         Ok(())
-    }
-
-    pub fn retry(&mut self, id: TaskId) -> Result<TaskId, TaskError> {
-        let task = self.task(id)?;
-        if !matches!(task.state, TaskState::Failed | TaskState::Cancelled) {
-            return Err(TaskError::InvalidTransition);
-        }
-        Ok(self.insert_task(task.kind.clone(), task.progress.bytes_total, Some(id)))
     }
 
     pub fn snapshots(&self) -> Vec<TaskSnapshot> {
@@ -654,8 +532,6 @@ impl TaskManager {
                 kind: task.kind.clone(),
                 state: task.state,
                 progress: task.progress,
-                error: task.error.clone(),
-                retry_of: task.retry_of,
             })
             .collect()
     }
@@ -667,12 +543,7 @@ impl TaskManager {
             .count()
     }
 
-    fn insert_task(
-        &mut self,
-        kind: TaskKind,
-        bytes_total: Option<u64>,
-        retry_of: Option<TaskId>,
-    ) -> TaskId {
+    fn insert_task(&mut self, kind: TaskKind, bytes_total: Option<u64>) -> TaskId {
         let id = TaskId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         self.tasks.insert(
@@ -685,15 +556,9 @@ impl TaskManager {
                     bytes_total,
                     speed_bytes_per_sec: 0,
                 },
-                error: None,
-                retry_of,
             },
         );
         id
-    }
-
-    fn task(&self, id: TaskId) -> Result<&TaskRecord, TaskError> {
-        self.tasks.get(&id).ok_or(TaskError::UnknownTask)
     }
 
     fn task_mut(&mut self, id: TaskId) -> Result<&mut TaskRecord, TaskError> {
@@ -706,8 +571,6 @@ struct TaskRecord {
     kind: TaskKind,
     state: TaskState,
     progress: TransferProgress,
-    error: Option<String>,
-    retry_of: Option<TaskId>,
 }
 
 impl TaskRecord {
@@ -737,19 +600,18 @@ pub enum RemoteOperationKind {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteOperationPlan {
     kind: RemoteOperationKind,
-    destructive: bool,
     affected_dirs: Vec<String>,
     dry_run_lines: Vec<String>,
 }
 
 impl RemoteOperationPlan {
     pub fn mkdir(path: impl Into<String>) -> Result<Self, String> {
-        let path = normalize_remote_path(path.into())?;
+        let path = path.into();
+        let path = normalize_remote_path(&path)?;
         let affected_dirs = related_dirs_for_paths([path.as_str()]);
         Ok(Self {
             dry_run_lines: vec![format!("mkdir {path}")],
             kind: RemoteOperationKind::Mkdir { path },
-            destructive: false,
             affected_dirs,
         })
     }
@@ -761,20 +623,20 @@ impl RemoteOperationPlan {
         let affected_dirs = related_dirs_for_paths(paths.iter().map(String::as_str));
         Ok(Self {
             kind: RemoteOperationKind::Delete { paths },
-            destructive: true,
             affected_dirs,
             dry_run_lines,
         })
     }
 
     pub fn rename(from: impl Into<String>, to: impl Into<String>) -> Result<Self, String> {
-        let from = normalize_remote_path(from.into())?;
-        let to = normalize_remote_path(to.into())?;
+        let from = from.into();
+        let to = to.into();
+        let from = normalize_remote_path(&from)?;
+        let to = normalize_remote_path(&to)?;
         let affected_dirs = related_dirs_for_paths([from.as_str(), to.as_str()]);
         Ok(Self {
             dry_run_lines: vec![format!("rename {from} -> {to}")],
             kind: RemoteOperationKind::Rename { from, to },
-            destructive: false,
             affected_dirs,
         })
     }
@@ -792,7 +654,7 @@ impl RemoteOperationPlan {
     }
 
     pub const fn is_destructive(&self) -> bool {
-        self.destructive
+        matches!(self.kind, RemoteOperationKind::Delete { .. })
     }
 
     pub fn affected_dirs(&self) -> &[String] {
@@ -803,23 +665,13 @@ impl RemoteOperationPlan {
         &self.dry_run_lines
     }
 
-    pub fn label(&self) -> &'static str {
+    pub const fn label(&self) -> &'static str {
         match &self.kind {
             RemoteOperationKind::Mkdir { .. } => "mkdir",
             RemoteOperationKind::Delete { .. } => "delete",
             RemoteOperationKind::Rename { .. } => "rename",
             RemoteOperationKind::Copy { .. } => "copy",
             RemoteOperationKind::Move { .. } => "move",
-        }
-    }
-
-    pub fn item_count(&self) -> usize {
-        match &self.kind {
-            RemoteOperationKind::Mkdir { .. } | RemoteOperationKind::Rename { .. } => 1,
-            RemoteOperationKind::Delete { paths } => paths.len(),
-            RemoteOperationKind::Copy { pairs } | RemoteOperationKind::Move { pairs } => {
-                pairs.len()
-            }
         }
     }
 
@@ -846,7 +698,6 @@ impl RemoteOperationPlan {
             } else {
                 RemoteOperationKind::Copy { pairs }
             },
-            destructive: false,
             affected_dirs,
             dry_run_lines,
         })
@@ -857,7 +708,10 @@ fn normalize_nonempty_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
     if paths.is_empty() {
         return Err("operation requires at least one remote path".to_string());
     }
-    paths.into_iter().map(normalize_remote_path).collect()
+    paths
+        .into_iter()
+        .map(|path| normalize_remote_path(path.as_str()))
+        .collect()
 }
 
 fn normalize_nonempty_pairs(pairs: Vec<RemotePathPair>) -> Result<Vec<RemotePathPair>, String> {
@@ -868,14 +722,14 @@ fn normalize_nonempty_pairs(pairs: Vec<RemotePathPair>) -> Result<Vec<RemotePath
         .into_iter()
         .map(|pair| {
             Ok(RemotePathPair {
-                from: normalize_remote_path(pair.from)?,
-                to: normalize_remote_path(pair.to)?,
+                from: normalize_remote_path(pair.from.as_str())?,
+                to: normalize_remote_path(pair.to.as_str())?,
             })
         })
         .collect()
 }
 
-fn normalize_remote_path(path: String) -> Result<String, String> {
+fn normalize_remote_path(path: &str) -> Result<String, String> {
     let path = path.trim();
     if path.is_empty() {
         return Err("remote path must not be empty".to_string());
@@ -905,46 +759,4 @@ fn remote_parent_path(path: &str) -> String {
         Some(0) | None => "/".to_string(),
         Some(index) => path[..index].to_string(),
     }
-}
-
-fn diff_entries(old_entries: &[FileEntry], new_entries: &[FileEntry]) -> Vec<DirectoryChange> {
-    let old_by_id = entries_by_id(old_entries);
-    let new_by_id = entries_by_id(new_entries);
-
-    let mut changes = Vec::new();
-
-    for fs_id in new_by_id.keys() {
-        if !old_by_id.contains_key(fs_id) {
-            changes.push(DirectoryChange::Added { fs_id: *fs_id });
-        }
-    }
-
-    for fs_id in old_by_id.keys() {
-        if !new_by_id.contains_key(fs_id) {
-            changes.push(DirectoryChange::Removed { fs_id: *fs_id });
-        }
-    }
-
-    for (fs_id, old_entry) in &old_by_id {
-        if let Some(new_entry) = new_by_id.get(fs_id) {
-            if entry_changed(old_entry, new_entry) {
-                changes.push(DirectoryChange::Modified { fs_id: *fs_id });
-            }
-        }
-    }
-
-    changes
-}
-
-fn entries_by_id(entries: &[FileEntry]) -> BTreeMap<i64, &FileEntry> {
-    entries.iter().map(|entry| (entry.fs_id, entry)).collect()
-}
-
-fn entry_changed(old_entry: &FileEntry, new_entry: &FileEntry) -> bool {
-    old_entry.path != new_entry.path
-        || old_entry.server_filename != new_entry.server_filename
-        || old_entry.mtime != new_entry.mtime
-        || old_entry.size != new_entry.size
-        || old_entry.md5 != new_entry.md5
-        || old_entry.is_dir != new_entry.is_dir
 }

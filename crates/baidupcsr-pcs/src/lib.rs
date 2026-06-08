@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha1::{Digest as Sha1Digest, Sha1};
 use url::form_urlencoded;
 
-const PAN_APP_ID: i64 = 250528;
+const PAN_APP_ID: i64 = 250_528;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PcsError {
@@ -65,18 +65,17 @@ pub struct PcsClientOptions {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PcsApi {
+struct PcsApi {
     options: PcsClientOptions,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PcsRequest {
-    pub method: &'static str,
-    pub url: String,
+struct PcsRequest {
+    url: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FileOperation {
+enum FileOperation {
     Delete,
     Copy,
     Move,
@@ -101,10 +100,10 @@ pub struct PcsAuth {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BlockingPcsClientOptions {
-    pub user_agent: String,
-    pub pan_user_agent: String,
-    pub proxy: Option<String>,
-    pub timeout: Duration,
+    user_agent: String,
+    pan_user_agent: String,
+    proxy: Option<String>,
+    timeout: Duration,
 }
 
 #[derive(Clone, Debug)]
@@ -114,41 +113,17 @@ pub struct BlockingPcsClient {
     options: BlockingPcsClientOptions,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OrderBy {
-    Name,
-    Time,
-    Size,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum OrderDirection {
-    Asc,
-    Desc,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct OrderOptions {
-    pub by: OrderBy,
-    pub direction: OrderDirection,
-}
-
 impl PcsApi {
-    pub fn new(options: PcsClientOptions) -> Self {
-        Self { options }
-    }
-
-    pub fn list_request(&self, path: &str, order: OrderOptions) -> PcsRequest {
+    fn list_request(&self, path: &str) -> PcsRequest {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("app_id", &self.options.app_id.to_string())
             .append_pair("method", "list")
             .append_pair("path", path)
-            .append_pair("by", order.by.as_str())
-            .append_pair("order", order.direction.as_str())
+            .append_pair("by", "name")
+            .append_pair("order", "asc")
             .finish();
 
         PcsRequest {
-            method: "GET",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -158,7 +133,7 @@ impl PcsApi {
         }
     }
 
-    pub fn download_request(&self, path: &str) -> PcsRequest {
+    fn download_request(&self, path: &str) -> PcsRequest {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("app_id", &self.options.app_id.to_string())
             .append_pair("method", "download")
@@ -166,7 +141,6 @@ impl PcsApi {
             .finish();
 
         PcsRequest {
-            method: "GET",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -176,7 +150,7 @@ impl PcsApi {
         }
     }
 
-    pub fn mkdir_request(&self, path: &str) -> PcsRequest {
+    fn mkdir_request(&self, path: &str) -> PcsRequest {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("app_id", &self.options.app_id.to_string())
             .append_pair("method", "mkdir")
@@ -184,7 +158,6 @@ impl PcsApi {
             .finish();
 
         PcsRequest {
-            method: "POST",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -194,7 +167,7 @@ impl PcsApi {
         }
     }
 
-    pub fn search_request(&self, path: &str, keyword: &str, recursive: bool) -> PcsRequest {
+    fn search_request(&self, path: &str, keyword: &str, recursive: bool) -> PcsRequest {
         let recursive = if recursive { "1" } else { "0" };
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("app_id", &self.options.app_id.to_string())
@@ -205,7 +178,6 @@ impl PcsApi {
             .finish();
 
         PcsRequest {
-            method: "GET",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -215,14 +187,13 @@ impl PcsApi {
         }
     }
 
-    pub fn file_operation_request(&self, operation: FileOperation) -> PcsRequest {
+    fn file_operation_request(&self, operation: FileOperation) -> PcsRequest {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("app_id", &self.options.app_id.to_string())
             .append_pair("method", operation.method_name())
             .finish();
 
         PcsRequest {
-            method: "POST",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -232,7 +203,7 @@ impl PcsApi {
         }
     }
 
-    pub fn locatedownload_request(&self, path: &str, sign: &LocateDownloadSign) -> PcsRequest {
+    fn locatedownload_request(&self, path: &str, sign: &LocateDownloadSign) -> PcsRequest {
         let query = form_urlencoded::Serializer::new(String::new())
             .append_pair("ant", "1")
             .append_pair("check_blue", "1")
@@ -255,7 +226,6 @@ impl PcsApi {
             .finish();
 
         PcsRequest {
-            method: "POST",
             url: format!(
                 "{}://{}/rest/2.0/pcs/file?{}",
                 scheme(self.options.enable_https),
@@ -281,14 +251,7 @@ impl ByteRange {
         })
     }
 
-    pub const fn prefix(length: u64) -> Self {
-        Self {
-            start: 0,
-            end_inclusive: length.saturating_sub(1),
-        }
-    }
-
-    pub fn try_prefix(length: u64) -> Result<Self, PcsError> {
+    pub fn prefix(length: u64) -> Result<Self, PcsError> {
         if length == 0 {
             return Err(PcsError::Network {
                 operation: "download".to_string(),
@@ -296,14 +259,17 @@ impl ByteRange {
             });
         }
 
-        Ok(Self::prefix(length))
+        Ok(Self {
+            start: 0,
+            end_inclusive: length - 1,
+        })
     }
 
-    pub fn header_value(&self) -> String {
+    fn header_value(&self) -> String {
         format!("bytes={}-{}", self.start, self.end_inclusive)
     }
 
-    pub fn read_limit_bytes(&self) -> u64 {
+    const fn read_limit_bytes(&self) -> u64 {
         self.end_inclusive
             .saturating_sub(self.start)
             .saturating_add(1)
@@ -338,10 +304,6 @@ impl PcsAuth {
             cookie_header: parts.join("; "),
         })
     }
-
-    pub fn cookie_header(&self) -> &str {
-        &self.cookie_header
-    }
 }
 
 impl BlockingPcsClientOptions {
@@ -360,23 +322,27 @@ impl BlockingPcsClientOptions {
 }
 
 impl BlockingPcsClient {
-    pub fn new(api: PcsApi, auth: PcsAuth, options: BlockingPcsClientOptions) -> Self {
-        Self { api, auth, options }
+    pub fn new(
+        api_options: PcsClientOptions,
+        auth: PcsAuth,
+        options: BlockingPcsClientOptions,
+    ) -> Self {
+        Self {
+            api: PcsApi {
+                options: api_options,
+            },
+            auth,
+            options,
+        }
     }
 
-    pub fn list(&self, path: &str, order: OrderOptions) -> Result<Vec<FileEntry>, PcsError> {
-        let request = self.api.list_request(path, order);
+    pub fn list(&self, path: &str) -> Result<Vec<FileEntry>, PcsError> {
+        let request = self.api.list_request(path);
         let client = self.build_client("list")?;
         let builder = client
             .get(&request.url)
             .header(USER_AGENT, self.options.user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header());
-        if !request.method.eq_ignore_ascii_case("GET") {
-            return Err(PcsError::Network {
-                operation: "list".to_string(),
-                message: format!("unsupported method {}", request.method),
-            });
-        }
+            .header(COOKIE, self.auth.cookie_header.as_str());
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "list".to_string(),
@@ -392,7 +358,7 @@ impl BlockingPcsClient {
             return Err(parse_remote_error("list", &text));
         }
 
-        parse_file_list(&text)
+        parse_file_list_for_operation("list", &text)
     }
 
     pub fn locate_download_urls(
@@ -407,13 +373,7 @@ impl BlockingPcsClient {
         let builder = client
             .post(&request.url)
             .header(USER_AGENT, self.options.pan_user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header());
-        if !request.method.eq_ignore_ascii_case("POST") {
-            return Err(PcsError::Network {
-                operation: "locatedownload".to_string(),
-                message: format!("unsupported method {}", request.method),
-            });
-        }
+            .header(COOKIE, self.auth.cookie_header.as_str());
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "locatedownload".to_string(),
@@ -443,25 +403,25 @@ impl BlockingPcsClient {
 
     pub fn mkdir(&self, path: &str) -> Result<(), PcsError> {
         let request = self.api.mkdir_request(path);
-        self.send_file_operation_request("mkdir", request, None)
+        self.send_file_operation_request("mkdir", &request, None)
     }
 
     pub fn delete_paths(&self, paths: &[String]) -> Result<(), PcsError> {
         let param = delete_param_json(paths)?;
         let request = self.api.file_operation_request(FileOperation::Delete);
-        self.send_file_operation_request("delete", request, Some(param))
+        self.send_file_operation_request("delete", &request, Some(param.as_str()))
     }
 
     pub fn copy_paths(&self, pairs: &[FileOperationPair]) -> Result<(), PcsError> {
         let param = copy_move_param_json(pairs)?;
         let request = self.api.file_operation_request(FileOperation::Copy);
-        self.send_file_operation_request("copy", request, Some(param))
+        self.send_file_operation_request("copy", &request, Some(param.as_str()))
     }
 
     pub fn move_paths(&self, pairs: &[FileOperationPair]) -> Result<(), PcsError> {
         let param = copy_move_param_json(pairs)?;
         let request = self.api.file_operation_request(FileOperation::Move);
-        self.send_file_operation_request("move", request, Some(param))
+        self.send_file_operation_request("move", &request, Some(param.as_str()))
     }
 
     pub fn search(
@@ -475,13 +435,7 @@ impl BlockingPcsClient {
         let builder = client
             .get(&request.url)
             .header(USER_AGENT, self.options.user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header());
-        if !request.method.eq_ignore_ascii_case("GET") {
-            return Err(PcsError::Network {
-                operation: "search".to_string(),
-                message: format!("unsupported method {}", request.method),
-            });
-        }
+            .header(COOKIE, self.auth.cookie_header.as_str());
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "search".to_string(),
@@ -520,14 +474,8 @@ impl BlockingPcsClient {
         let builder = client
             .get(&request.url)
             .header(USER_AGENT, self.options.user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header())
+            .header(COOKIE, self.auth.cookie_header.as_str())
             .header(RANGE, range.header_value());
-        if !request.method.eq_ignore_ascii_case("GET") {
-            return Err(PcsError::Network {
-                operation: "download".to_string(),
-                message: format!("unsupported method {}", request.method),
-            });
-        }
 
         if is_cancelled() {
             return Err(PcsError::Cancelled {
@@ -562,7 +510,7 @@ impl BlockingPcsClient {
         let builder = client
             .get(url)
             .header(USER_AGENT, self.options.pan_user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header())
+            .header(COOKIE, self.auth.cookie_header.as_str())
             .header(RANGE, range.header_value());
         if is_cancelled() {
             return Err(PcsError::Cancelled {
@@ -581,21 +529,15 @@ impl BlockingPcsClient {
     fn send_file_operation_request(
         &self,
         operation: &str,
-        request: PcsRequest,
-        param: Option<String>,
+        request: &PcsRequest,
+        param: Option<&str>,
     ) -> Result<(), PcsError> {
         let client = self.build_client(operation)?;
         let mut builder = client
             .post(&request.url)
             .header(USER_AGENT, self.options.user_agent.as_str())
-            .header(COOKIE, self.auth.cookie_header());
-        if !request.method.eq_ignore_ascii_case("POST") {
-            return Err(PcsError::Network {
-                operation: operation.to_string(),
-                message: format!("unsupported method {}", request.method),
-            });
-        }
-        if let Some(param) = param.as_deref() {
+            .header(COOKIE, self.auth.cookie_header.as_str());
+        if let Some(param) = param {
             let (content_type, body) = multipart_param_body(param);
             builder = builder.header(CONTENT_TYPE, content_type).body(body);
         }
@@ -649,25 +591,6 @@ impl FileOperation {
     }
 }
 
-impl OrderBy {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Name => "name",
-            Self::Time => "time",
-            Self::Size => "size",
-        }
-    }
-}
-
-impl OrderDirection {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Asc => "asc",
-            Self::Desc => "desc",
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileEntry {
     pub fs_id: i64,
@@ -702,34 +625,21 @@ pub struct FileEntry {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct LocateDownloadInfo {
-    pub urls: Vec<DownloadUrlInfo>,
+struct LocateDownloadInfo {
+    urls: Vec<DownloadUrlInfo>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-pub struct DownloadUrlInfo {
-    pub url: String,
-    pub encrypt: i64,
+struct DownloadUrlInfo {
+    url: String,
+    encrypt: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LocateDownloadSign {
-    pub time: i64,
-    pub rand: String,
-    pub devuid: String,
-}
-
-impl LocateDownloadSign {
-    pub fn url_param(&self) -> String {
-        format!(
-            "time={}&rand={}&devuid={}&cuid={}",
-            self.time, self.rand, self.devuid, self.devuid
-        )
-    }
-}
-
-pub fn parse_file_list(data: &str) -> Result<Vec<FileEntry>, PcsError> {
-    parse_file_list_for_operation("list", data)
+struct LocateDownloadSign {
+    time: i64,
+    rand: String,
+    devuid: String,
 }
 
 fn parse_file_list_for_operation(operation: &str, data: &str) -> Result<Vec<FileEntry>, PcsError> {
@@ -750,7 +660,7 @@ fn parse_file_list_for_operation(operation: &str, data: &str) -> Result<Vec<File
     Ok(response.list)
 }
 
-pub fn parse_file_operation_response(operation: &str, data: &str) -> Result<(), PcsError> {
+fn parse_file_operation_response(operation: &str, data: &str) -> Result<(), PcsError> {
     let response =
         serde_json::from_str::<FileOperationResponse>(data).map_err(|source| PcsError::Parse {
             operation: operation.to_string(),
@@ -771,7 +681,7 @@ pub fn parse_file_operation_response(operation: &str, data: &str) -> Result<(), 
     Ok(())
 }
 
-pub fn delete_param_json(paths: &[String]) -> Result<String, PcsError> {
+fn delete_param_json(paths: &[String]) -> Result<String, PcsError> {
     let list = paths
         .iter()
         .map(|path| PathParam { path: path.clone() })
@@ -782,7 +692,7 @@ pub fn delete_param_json(paths: &[String]) -> Result<String, PcsError> {
     })
 }
 
-pub fn copy_move_param_json(pairs: &[FileOperationPair]) -> Result<String, PcsError> {
+fn copy_move_param_json(pairs: &[FileOperationPair]) -> Result<String, PcsError> {
     serde_json::to_string(&CopyMoveParamList { list: pairs }).map_err(|source| PcsError::Parse {
         operation: "file_operation".to_string(),
         message: source.to_string(),
@@ -799,7 +709,7 @@ fn multipart_param_body(param: &str) -> (String, String) {
     )
 }
 
-pub fn parse_locatedownload(data: &str) -> Result<LocateDownloadInfo, PcsError> {
+fn parse_locatedownload(data: &str) -> Result<LocateDownloadInfo, PcsError> {
     let response =
         serde_json::from_str::<LocateDownloadResponse>(data).map_err(|source| PcsError::Parse {
             operation: "locatedownload".to_string(),
@@ -819,7 +729,7 @@ pub fn parse_locatedownload(data: &str) -> Result<LocateDownloadInfo, PcsError> 
     })
 }
 
-pub fn parse_remote_error(operation: &str, data: &str) -> PcsError {
+fn parse_remote_error(operation: &str, data: &str) -> PcsError {
     match serde_json::from_str::<RemoteErrorResponse>(data) {
         Ok(response) => PcsError::Remote {
             operation: operation.to_string(),
@@ -835,7 +745,7 @@ pub fn parse_remote_error(operation: &str, data: &str) -> PcsError {
     }
 }
 
-pub fn select_download_urls(info: &LocateDownloadInfo, https: bool) -> Vec<String> {
+fn select_download_urls(info: &LocateDownloadInfo, https: bool) -> Vec<String> {
     info.urls
         .iter()
         .filter(|url| url.encrypt == 0)
@@ -843,18 +753,13 @@ pub fn select_download_urls(info: &LocateDownloadInfo, https: bool) -> Vec<Strin
         .collect()
 }
 
-pub fn dev_uid(feature: &str) -> String {
+fn dev_uid(feature: &str) -> String {
     let mut md5 = Md5::new();
     Md5Digest::update(&mut md5, feature.as_bytes());
     format!("{:X}|0", Md5Digest::finalize(md5))
 }
 
-pub fn locatedownload_sign_with(
-    time: i64,
-    devuid: &str,
-    uid: u64,
-    bduss: &str,
-) -> LocateDownloadSign {
+fn locatedownload_sign_with(time: i64, devuid: &str, uid: u64, bduss: &str) -> LocateDownloadSign {
     let mut bduss_sha1 = Sha1::new();
     Sha1Digest::update(&mut bduss_sha1, bduss.as_bytes());
     let bduss_sha1_hex = format!("{:x}", Sha1Digest::finalize(bduss_sha1));
@@ -928,10 +833,10 @@ fn bool_to_int<S>(value: &bool, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    serializer.serialize_i64(if *value { 1 } else { 0 })
+    serializer.serialize_i64(i64::from(*value))
 }
 
-fn scheme(https: bool) -> &'static str {
+const fn scheme(https: bool) -> &'static str {
     if https {
         "https"
     } else {
@@ -997,6 +902,298 @@ where
 fn now_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
-        .unwrap_or(0)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+    };
+
+    use super::{
+        copy_move_param_json, delete_param_json, dev_uid, locatedownload_sign_with,
+        BlockingPcsClientOptions, ByteRange, FileOperation, FileOperationPair, PcsApi,
+        PcsClientOptions, PcsError,
+    };
+
+    fn fixture_path(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/api")
+            .join(name)
+    }
+
+    fn fixture_string(name: &str) -> String {
+        let data = fs::read_to_string(fixture_path(name));
+        assert!(data.is_ok(), "fixture should be readable");
+        data.unwrap_or_default()
+    }
+
+    fn api() -> PcsApi {
+        PcsApi {
+            options: PcsClientOptions {
+                app_id: 266_719,
+                pcs_addr: "pcs.baidu.com".to_string(),
+                enable_https: true,
+            },
+        }
+    }
+
+    #[test]
+    fn client_options_keep_pan_user_agent_separate() {
+        let options = BlockingPcsClientOptions::new_with_pan("pcs-ua", "pan-ua", None);
+
+        assert_eq!(options.user_agent, "pcs-ua");
+        assert_eq!(options.pan_user_agent, "pan-ua");
+    }
+
+    #[test]
+    fn list_request_builds_pcs_url_with_ordering() {
+        let request = api().list_request("/我的资源");
+
+        assert_eq!(
+            request.url.as_str(),
+            "https://pcs.baidu.com/rest/2.0/pcs/file?app_id=266719&method=list&path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90&by=name&order=asc"
+        );
+    }
+
+    #[test]
+    fn parse_list_response_preserves_file_model_fields() {
+        let entries =
+            super::parse_file_list_for_operation("list", &fixture_string("list_root.json"));
+        assert!(entries.is_ok(), "list fixture should parse");
+        let Ok(entries) = entries else {
+            return;
+        };
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].fs_id, 9001);
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[1].server_filename, "hello.txt");
+        assert_eq!(
+            entries[1].block_list,
+            vec!["5d41402abc4b2a76b9719d911017c592"]
+        );
+    }
+
+    #[test]
+    fn parse_list_response_accepts_real_success_defaults() -> Result<(), PcsError> {
+        let response = r#"{
+            "list": [
+                {
+                    "fs_id": 10,
+                    "path": "/我的资源/example",
+                    "server_filename": "example",
+                    "isdir": 1
+                }
+            ]
+        }"#;
+
+        let files = super::parse_file_list_for_operation("list", response)?;
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].server_filename, "example");
+        assert!(files[0].is_dir);
+        assert_eq!(files[0].md5, "");
+        assert_eq!(files[0].size, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_remote_error_keeps_remote_code_and_message() {
+        let error = super::parse_remote_error("list", &fixture_string("remote_error.json"));
+        assert!(matches!(
+            error,
+            PcsError::Remote {
+                operation: _,
+                code: 31066,
+                message: _
+            }
+        ));
+    }
+
+    #[test]
+    fn download_request_builds_readonly_pcs_file_url() {
+        let request = api().download_request("/我的资源/notes.md");
+
+        assert_eq!(
+            request.url.as_str(),
+            "https://pcs.baidu.com/rest/2.0/pcs/file?app_id=266719&method=download&path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90%2Fnotes.md"
+        );
+    }
+
+    #[test]
+    fn locatedownload_request_builds_signed_pcs_url() {
+        let sign = locatedownload_sign_with(
+            1_571_140_066,
+            "O|1E67351CCE80B2CF48DB511CD77ACD9F",
+            10086,
+            "test_bduss",
+        );
+
+        let request = api().locatedownload_request("/我的资源/movie.mp4", &sign);
+
+        assert!(request
+            .url
+            .starts_with("https://pcs.baidu.com/rest/2.0/pcs/file?ant=1&check_blue=1"));
+        assert!(request.url.contains("method=locatedownload"));
+        assert!(request.url.contains("app_id=250528"));
+        assert!(request
+            .url
+            .contains("path=%2F%E6%88%91%E7%9A%84%E8%B5%84%E6%BA%90%2Fmovie.mp4"));
+        assert!(request.url.contains("time=1571140066"));
+        assert!(request
+            .url
+            .contains("devuid=O%7C1E67351CCE80B2CF48DB511CD77ACD9F"));
+    }
+
+    #[test]
+    fn locatedownload_sign_matches_reference_vector() {
+        let sign = locatedownload_sign_with(
+            1_571_140_066,
+            "O|1E67351CCE80B2CF48DB511CD77ACD9F",
+            10086,
+            "test_bduss",
+        );
+
+        assert_eq!(sign.rand, "b6bb7a6f46899e181baea58798d4fdb889775c2c");
+        assert_eq!(sign.time, 1_571_140_066);
+        assert_eq!(sign.devuid, "O|1E67351CCE80B2CF48DB511CD77ACD9F");
+    }
+
+    #[test]
+    fn devuid_is_uppercase_md5_plus_suffix() {
+        assert_eq!(dev_uid("test_bduss"), "66AE65D3C5D483FC4431FC43670A4673|0");
+    }
+
+    #[test]
+    fn mkdir_request_builds_post_file_url() {
+        let request = api().mkdir_request("/docs/new folder");
+
+        assert!(request
+            .url
+            .starts_with("https://pcs.baidu.com/rest/2.0/pcs/file?"));
+        assert!(request.url.contains("method=mkdir"));
+        assert!(request.url.contains("app_id=266719"));
+        assert!(request.url.contains("path=%2Fdocs%2Fnew+folder"));
+    }
+
+    #[test]
+    fn search_request_records_recursive_flag_and_keyword() {
+        let request = api().search_request("/docs", "report 2026", true);
+
+        assert!(request.url.contains("method=search"));
+        assert!(request.url.contains("path=%2Fdocs"));
+        assert!(request.url.contains("wd=report+2026"));
+        assert!(request.url.contains("re=1"));
+    }
+
+    #[test]
+    fn file_operation_request_builds_batch_operation_url() {
+        let request = api().file_operation_request(FileOperation::Move);
+
+        assert!(request.url.contains("method=move"));
+    }
+
+    #[test]
+    fn delete_param_json_matches_go_reference_shape() -> Result<(), PcsError> {
+        let json = delete_param_json(&["/a.txt".to_string(), "/dir/b.txt".to_string()])?;
+
+        assert_eq!(
+            json,
+            r#"{"list":[{"path":"/a.txt"},{"path":"/dir/b.txt"}]}"#
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn copy_move_param_json_matches_go_reference_shape() -> Result<(), PcsError> {
+        let json = copy_move_param_json(&[FileOperationPair {
+            from: "/a.txt".to_string(),
+            to: "/backup/a.txt".to_string(),
+        }])?;
+
+        assert_eq!(json, r#"{"list":[{"from":"/a.txt","to":"/backup/a.txt"}]}"#);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_file_operation_response_accepts_errno_zero_and_rejects_remote_error(
+    ) -> Result<(), String> {
+        super::parse_file_operation_response("mkdir", r#"{"errno":0}"#)
+            .map_err(|err| err.to_string())?;
+
+        let err = match super::parse_file_operation_response(
+            "delete",
+            r#"{"error_code":31070,"error_msg":"file delete failed"}"#,
+        ) {
+            Ok(()) => return Err("remote delete error should fail".to_string()),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            PcsError::Remote {
+                operation: "delete".to_string(),
+                code: 31070,
+                message: "file delete failed".to_string(),
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn locatedownload_parser_selects_unencrypted_urls() {
+        let info = super::parse_locatedownload(&fixture_string("locatedownload.json"));
+        assert!(info.is_ok(), "locatedownload fixture should parse");
+        let Ok(info) = info else {
+            return;
+        };
+
+        let urls = super::select_download_urls(&info, true);
+        assert_eq!(urls, vec!["https://fixture.invalid/download/hello.txt"]);
+    }
+
+    #[test]
+    fn locatedownload_parser_accepts_success_without_errno() -> Result<(), PcsError> {
+        let info = super::parse_locatedownload(
+            r#"{
+                "urls": [
+                    {
+                        "url": "http://fixture.invalid/download/movie.mp4",
+                        "encrypt": 0
+                    }
+                ]
+            }"#,
+        )?;
+
+        assert_eq!(super::select_download_urls(&info, true).len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_range_header_is_bounded_to_requested_bytes() -> Result<(), PcsError> {
+        let range = ByteRange::prefix(16)?;
+
+        assert_eq!(range.header_value(), "bytes=0-15");
+        assert_eq!(range.read_limit_bytes(), 16);
+        Ok(())
+    }
+
+    #[test]
+    fn preview_range_rejects_zero_length_prefix() {
+        assert!(ByteRange::prefix(0).is_err());
+    }
+
+    #[test]
+    fn preview_range_header_supports_seek_offsets() -> Result<(), PcsError> {
+        let range = ByteRange::new(1024, 2047)?;
+
+        assert_eq!(range.header_value(), "bytes=1024-2047");
+        assert_eq!(range.read_limit_bytes(), 1024);
+        Ok(())
+    }
 }

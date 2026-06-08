@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, VecDeque},
-    fmt,
     io::{Read, Write},
     net::{TcpListener, TcpStream},
     sync::{
@@ -120,8 +119,6 @@ pub struct PreviewStatus {
     pub kind: PreviewKind,
     pub fetched_bytes: u64,
     pub memory_limit_bytes: u64,
-    pub truncated: bool,
-    pub disk_backed: bool,
 }
 
 pub fn preview_kind_from_name(file_name: &str) -> PreviewKind {
@@ -171,7 +168,6 @@ pub struct ImagePreviewMetadata {
     pub format: ImagePreviewFormat,
     pub width: Option<u32>,
     pub height: Option<u32>,
-    pub disk_backed: bool,
 }
 
 pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
@@ -180,7 +176,6 @@ pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
             format: ImagePreviewFormat::Png,
             width: Some(width),
             height: Some(height),
-            disk_backed: false,
         };
     }
     if let Some((width, height)) = parse_jpeg_dimensions(bytes) {
@@ -188,7 +183,6 @@ pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
             format: ImagePreviewFormat::Jpeg,
             width: Some(width),
             height: Some(height),
-            disk_backed: false,
         };
     }
 
@@ -196,7 +190,6 @@ pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
         format: ImagePreviewFormat::Unknown,
         width: None,
         height: None,
-        disk_backed: false,
     }
 }
 
@@ -268,12 +261,6 @@ pub struct PreviewText {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestState {
-    Applied,
-    Stale,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     key: PreviewKey,
     generation: u64,
@@ -283,12 +270,6 @@ impl PreviewRequest {
     pub const fn key(self) -> PreviewKey {
         self.key
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PreviewUpdate {
-    pub status: PreviewStatus,
-    pub request_state: RequestState,
 }
 
 #[derive(Clone, Debug)]
@@ -322,41 +303,31 @@ impl PreviewManager {
         PreviewRequest { key, generation }
     }
 
-    pub fn request_state(&self, request: PreviewRequest) -> RequestState {
-        if self.generations.get(&request.key).copied() == Some(request.generation) {
-            RequestState::Applied
-        } else {
-            RequestState::Stale
-        }
+    pub fn is_current_request(&self, request: PreviewRequest) -> bool {
+        self.generations.get(&request.key).copied() == Some(request.generation)
     }
 
-    pub fn finish_text_request(&mut self, request: PreviewRequest, bytes: &[u8]) -> PreviewUpdate {
-        let status = self.text_status(bytes);
-        if self.generations.get(&request.key).copied() != Some(request.generation) {
-            return PreviewUpdate {
-                status,
-                request_state: RequestState::Stale,
-            };
+    pub fn finish_text_request(
+        &mut self,
+        request: PreviewRequest,
+        bytes: &[u8],
+    ) -> Option<PreviewStatus> {
+        if !self.is_current_request(request) {
+            return None;
         }
 
+        let status = self.text_status(bytes);
         let content_len = usize::try_from(status.fetched_bytes)
             .unwrap_or(bytes.len())
             .min(bytes.len());
         let content = String::from_utf8_lossy(&bytes[..content_len]).to_string();
         self.insert(request.key, PreviewText { content, status });
 
-        PreviewUpdate {
-            status,
-            request_state: RequestState::Applied,
-        }
+        Some(status)
     }
 
     pub fn get(&self, key: &PreviewKey) -> Option<&PreviewText> {
         self.cache.get(key)
-    }
-
-    pub const fn used_bytes(&self) -> u64 {
-        self.used_bytes
     }
 
     fn text_status(&self, bytes: &[u8]) -> PreviewStatus {
@@ -366,8 +337,6 @@ impl PreviewManager {
             kind: PreviewKind::Text,
             fetched_bytes: fetched,
             memory_limit_bytes: self.memory_limit_bytes,
-            truncated: incoming > fetched,
-            disk_backed: false,
         }
     }
 
@@ -400,42 +369,15 @@ const VIDEO_PREVIEW_PATH: &str = "/preview/video/";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VideoPreviewError {
-    InvalidUpstreamUrl,
     InvalidVideoTokenFormat,
     InvalidCacheBudget,
     InvalidRange,
-    InvalidPort,
-    NonLoopbackBindAddress,
     InvalidVideoToken,
     InactiveVideoSession,
     VideoChunkTooLarge,
     LoopbackServerIo,
     MalformedHttpRequest,
     UnsupportedHttpMethod,
-}
-
-#[derive(Clone, Eq, PartialEq)]
-pub struct VideoUpstream {
-    url: String,
-}
-
-impl VideoUpstream {
-    pub fn new(url: impl Into<String>) -> Result<Self, VideoPreviewError> {
-        let url = url.into();
-        if url.starts_with("https://") || url.starts_with("http://") {
-            Ok(Self { url })
-        } else {
-            Err(VideoPreviewError::InvalidUpstreamUrl)
-        }
-    }
-}
-
-impl fmt::Debug for VideoUpstream {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("VideoUpstream")
-            .field("url", &"<redacted>")
-            .finish()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -456,7 +398,7 @@ impl VideoToken {
         Ok(Self { token })
     }
 
-    pub fn as_str(&self) -> &str {
+    fn as_str(&self) -> &str {
         &self.token
     }
 
@@ -465,43 +407,14 @@ impl VideoToken {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct LoopbackEndpoint {
-    port: u16,
-}
-
-impl LoopbackEndpoint {
-    pub fn new(port: u16) -> Result<Self, VideoPreviewError> {
-        Self::from_host_port(LOOPBACK_HOST, port)
-    }
-
-    pub fn from_host_port(host: &str, port: u16) -> Result<Self, VideoPreviewError> {
-        if host != LOOPBACK_HOST {
-            return Err(VideoPreviewError::NonLoopbackBindAddress);
-        }
-        if port == 0 {
-            return Err(VideoPreviewError::InvalidPort);
-        }
-        Ok(Self { port })
-    }
-
-    pub const fn host(&self) -> &'static str {
-        LOOPBACK_HOST
-    }
-
-    pub const fn port(&self) -> u16 {
-        self.port
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VideoCacheBudget {
-    pub chunk_size_bytes: u64,
-    pub max_chunks: usize,
+    chunk_size_bytes: u64,
+    max_chunks: usize,
 }
 
 impl VideoCacheBudget {
-    pub fn new(chunk_size_bytes: u64, max_chunks: usize) -> Result<Self, VideoPreviewError> {
+    pub const fn new(chunk_size_bytes: u64, max_chunks: usize) -> Result<Self, VideoPreviewError> {
         if chunk_size_bytes == 0 || max_chunks == 0 {
             return Err(VideoPreviewError::InvalidCacheBudget);
         }
@@ -512,7 +425,7 @@ impl VideoCacheBudget {
         })
     }
 
-    pub fn memory_limit_bytes(&self) -> u64 {
+    fn memory_limit_bytes(&self) -> u64 {
         self.chunk_size_bytes
             .saturating_mul(u64::try_from(self.max_chunks).unwrap_or(u64::MAX))
     }
@@ -525,7 +438,7 @@ pub struct VideoRange {
 }
 
 impl VideoRange {
-    pub fn new(start: u64, end_inclusive: u64) -> Result<Self, VideoPreviewError> {
+    pub const fn new(start: u64, end_inclusive: u64) -> Result<Self, VideoPreviewError> {
         if start > end_inclusive {
             return Err(VideoPreviewError::InvalidRange);
         }
@@ -535,11 +448,7 @@ impl VideoRange {
         })
     }
 
-    pub fn header_value(&self) -> String {
-        format!("bytes={}-{}", self.start, self.end_inclusive)
-    }
-
-    pub fn len(&self) -> u64 {
+    const fn len(&self) -> u64 {
         if self.is_empty() {
             0
         } else {
@@ -549,11 +458,11 @@ impl VideoRange {
         }
     }
 
-    pub const fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.start > self.end_inclusive
     }
 
-    pub fn contains(&self, other: Self) -> bool {
+    const fn contains(&self, other: Self) -> bool {
         self.start <= other.start && self.end_inclusive >= other.end_inclusive
     }
 
@@ -583,14 +492,14 @@ impl VideoRange {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RequestedVideoRange {
+enum RequestedVideoRange {
     Explicit(VideoRange),
     OpenEnded(u64),
     Suffix(u64),
 }
 
 impl RequestedVideoRange {
-    pub fn suffix(bytes: u64) -> Result<Self, VideoPreviewError> {
+    const fn suffix(bytes: u64) -> Result<Self, VideoPreviewError> {
         if bytes == 0 {
             return Err(VideoPreviewError::InvalidRange);
         }
@@ -637,7 +546,7 @@ struct CachedInterval {
 }
 
 #[derive(Clone, Debug)]
-pub struct VideoIntervalBuffer {
+struct VideoIntervalBuffer {
     budget: VideoCacheBudget,
     used_bytes: u64,
     tick: u64,
@@ -645,7 +554,7 @@ pub struct VideoIntervalBuffer {
 }
 
 impl VideoIntervalBuffer {
-    pub fn new(budget: VideoCacheBudget) -> Self {
+    const fn new(budget: VideoCacheBudget) -> Self {
         Self {
             budget,
             used_bytes: 0,
@@ -654,7 +563,7 @@ impl VideoIntervalBuffer {
         }
     }
 
-    pub fn put(&mut self, range: VideoRange, bytes: Vec<u8>) -> Result<(), VideoPreviewError> {
+    fn put(&mut self, range: VideoRange, bytes: Vec<u8>) -> Result<(), VideoPreviewError> {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len > range.len() || len > self.budget.memory_limit_bytes() {
             return Err(VideoPreviewError::VideoChunkTooLarge);
@@ -672,7 +581,7 @@ impl VideoIntervalBuffer {
         Ok(())
     }
 
-    pub fn get(&mut self, range: VideoRange) -> Option<Vec<u8>> {
+    fn get(&mut self, range: VideoRange) -> Option<Vec<u8>> {
         let index = self
             .intervals
             .iter()
@@ -690,11 +599,7 @@ impl VideoIntervalBuffer {
         Some(bytes)
     }
 
-    pub const fn used_bytes(&self) -> u64 {
-        self.used_bytes
-    }
-
-    pub fn window(&self) -> Option<VideoRange> {
+    fn window(&self) -> Option<VideoRange> {
         let mut start = u64::MAX;
         let mut end = 0;
         for interval in &self.intervals {
@@ -712,7 +617,7 @@ impl VideoIntervalBuffer {
         }
     }
 
-    pub fn contains_range(&self, range: VideoRange) -> bool {
+    fn contains_range(&self, range: VideoRange) -> bool {
         self.intervals
             .iter()
             .any(|interval| interval.range.contains(range))
@@ -755,20 +660,20 @@ impl VideoIntervalBuffer {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VideoProxyMethod {
+enum VideoProxyMethod {
     Head,
     Get,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VideoProxyRequest {
-    pub method: VideoProxyMethod,
-    pub token: String,
-    pub range: Option<RequestedVideoRange>,
+struct VideoProxyRequest {
+    method: VideoProxyMethod,
+    token: String,
+    range: Option<RequestedVideoRange>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VideoProxyResponse {
+enum VideoProxyResponse {
     Head {
         content_length: u64,
         accept_ranges: bool,
@@ -787,51 +692,6 @@ pub struct VideoProxyStats {
     pub window_start: Option<u64>,
     pub window_end_inclusive: Option<u64>,
     pub last_error: Option<VideoPreviewError>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct VideoGatewayPolicy {
-    pub prefetch_chunks: usize,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlaybackState {
-    Preparing,
-    Buffering,
-    Playing,
-    Stalled,
-    Failed,
-    Stopped,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlaybackProgress {
-    state: PlaybackState,
-    last_activity_ms: u64,
-}
-
-impl PlaybackProgress {
-    pub const fn new(state: PlaybackState) -> Self {
-        Self {
-            state,
-            last_activity_ms: 0,
-        }
-    }
-
-    pub const fn with_last_activity_ms(mut self, last_activity_ms: u64) -> Self {
-        self.last_activity_ms = last_activity_ms;
-        self
-    }
-
-    pub const fn status_at(&self, now_ms: u64, stall_timeout_ms: u64) -> PlaybackState {
-        if matches!(self.state, PlaybackState::Playing)
-            && now_ms.saturating_sub(self.last_activity_ms) >= stall_timeout_ms
-        {
-            PlaybackState::Stalled
-        } else {
-            self.state
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -858,7 +718,8 @@ impl PlayerLogRing {
         self.lines.push_back(sanitize_player_log_line(line));
     }
 
-    pub fn lines(&self) -> Vec<&str> {
+    #[cfg(test)]
+    fn lines(&self) -> Vec<&str> {
         self.lines.iter().map(String::as_str).collect()
     }
 
@@ -900,99 +761,43 @@ fn is_sensitive_log_key(key: &str) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PlayerBackend {
-    Mpv,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MpvLaunchProfile {
     User,
     Isolated,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PlayerLaunch {
-    program: String,
-    args: Vec<String>,
-    max_memory_cache_bytes: u64,
-    disk_cache_disabled: bool,
-}
-
-impl PlayerLaunch {
-    pub fn program(&self) -> &str {
-        &self.program
-    }
-
-    pub fn args(&self) -> &[String] {
-        &self.args
-    }
-
-    pub const fn max_memory_cache_bytes(&self) -> u64 {
-        self.max_memory_cache_bytes
-    }
-
-    pub const fn disk_cache_disabled(&self) -> bool {
-        self.disk_cache_disabled
-    }
-}
-
 #[derive(Clone, Debug)]
-pub struct VideoPreviewSession {
+struct VideoPreviewSession {
     key: PreviewKey,
-    upstream: VideoUpstream,
     token: VideoToken,
-    endpoint: LoopbackEndpoint,
+    port: u16,
     budget: VideoCacheBudget,
-    active: bool,
 }
 
 impl VideoPreviewSession {
-    pub fn new(
-        key: PreviewKey,
-        upstream: VideoUpstream,
-        token: VideoToken,
-        endpoint: LoopbackEndpoint,
-        budget: VideoCacheBudget,
-    ) -> Result<Self, VideoPreviewError> {
-        Ok(Self {
+    const fn new(key: PreviewKey, token: VideoToken, port: u16, budget: VideoCacheBudget) -> Self {
+        Self {
             key,
-            upstream,
             token,
-            endpoint,
+            port,
             budget,
-            active: true,
-        })
+        }
     }
 
-    pub fn player_url(&self) -> String {
+    fn player_url(&self) -> String {
         format!(
             "http://{}:{}{}{}",
-            self.endpoint.host(),
-            self.endpoint.port(),
+            LOOPBACK_HOST,
+            self.port,
             VIDEO_PREVIEW_PATH,
             self.token.as_str()
         )
     }
 
-    pub fn upstream(&self) -> &VideoUpstream {
-        &self.upstream
-    }
-
-    pub const fn is_active(&self) -> bool {
-        self.active
-    }
-
-    pub fn invalidate(&mut self) {
-        self.active = false;
-    }
-
-    pub fn handle_proxy_request(
+    fn handle_proxy_request(
         &self,
-        request: VideoProxyRequest,
+        request: &VideoProxyRequest,
     ) -> Result<VideoProxyResponse, VideoPreviewError> {
-        if !self.active {
-            return Err(VideoPreviewError::InactiveVideoSession);
-        }
         if !self.token.matches(&request.token) {
             return Err(VideoPreviewError::InvalidVideoToken);
         }
@@ -1012,56 +817,39 @@ impl VideoPreviewSession {
         }
     }
 
-    pub fn player_launch(&self, backend: PlayerBackend) -> Result<PlayerLaunch, VideoPreviewError> {
-        self.player_launch_with_profile(backend, MpvLaunchProfile::User)
-    }
-
-    pub fn player_launch_with_profile(
-        &self,
-        backend: PlayerBackend,
-        profile: MpvLaunchProfile,
-    ) -> Result<PlayerLaunch, VideoPreviewError> {
-        match backend {
-            PlayerBackend::Mpv => {
-                let mut args = match profile {
-                    MpvLaunchProfile::User => vec![
-                        "--no-terminal".to_string(),
-                        "--cache-on-disk=no".to_string(),
-                        "--cache=yes".to_string(),
-                        "--cache-pause=no".to_string(),
-                        "--demuxer-readahead-secs=20".to_string(),
-                    ],
-                    MpvLaunchProfile::Isolated => vec![
-                        "--no-config".to_string(),
-                        "--load-scripts=no".to_string(),
-                        "--osc=no".to_string(),
-                        "--no-terminal".to_string(),
-                        "--cache-on-disk=no".to_string(),
-                        "--cache=yes".to_string(),
-                    ],
-                };
-                args.extend([
-                    format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
-                    "--demuxer-max-back-bytes=0".to_string(),
-                    "--force-window=immediate".to_string(),
-                ]);
-                if profile == MpvLaunchProfile::Isolated {
-                    args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
-                }
-                args.extend([
-                    "--idle=yes".to_string(),
-                    "--msg-level=all=warn".to_string(),
-                    "--no-ytdl".to_string(),
-                    self.player_url(),
-                ]);
-                Ok(PlayerLaunch {
-                    program: "mpv".to_string(),
-                    args,
-                    max_memory_cache_bytes: self.budget.memory_limit_bytes(),
-                    disk_cache_disabled: true,
-                })
-            }
+    fn mpv_args_with_profile(&self, profile: MpvLaunchProfile) -> Vec<String> {
+        let mut args = match profile {
+            MpvLaunchProfile::User => vec![
+                "--no-terminal".to_string(),
+                "--cache-on-disk=no".to_string(),
+                "--cache=yes".to_string(),
+                "--cache-pause=no".to_string(),
+                "--demuxer-readahead-secs=20".to_string(),
+            ],
+            MpvLaunchProfile::Isolated => vec![
+                "--no-config".to_string(),
+                "--load-scripts=no".to_string(),
+                "--osc=no".to_string(),
+                "--no-terminal".to_string(),
+                "--cache-on-disk=no".to_string(),
+                "--cache=yes".to_string(),
+            ],
+        };
+        args.extend([
+            format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
+            "--demuxer-max-back-bytes=0".to_string(),
+            "--force-window=immediate".to_string(),
+        ]);
+        if profile == MpvLaunchProfile::Isolated {
+            args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
         }
+        args.extend([
+            "--idle=yes".to_string(),
+            "--msg-level=all=warn".to_string(),
+            "--no-ytdl".to_string(),
+            self.player_url(),
+        ]);
+        args
     }
 
     fn default_range(&self) -> VideoRange {
@@ -1083,7 +871,7 @@ type VideoRangeFetcher =
 struct VideoLoopbackState {
     session: VideoPreviewSession,
     cache: VideoIntervalBuffer,
-    policy: VideoGatewayPolicy,
+    prefetch_chunks: usize,
     stats: VideoProxyStats,
     fetcher: Arc<VideoRangeFetcher>,
     stop: Arc<AtomicBool>,
@@ -1101,40 +889,18 @@ struct VideoPrefetchJob {
 }
 
 pub struct VideoLoopbackServer {
-    endpoint: LoopbackEndpoint,
-    player_url: String,
+    port: u16,
     stop: Arc<AtomicBool>,
     state: Arc<Mutex<VideoLoopbackState>>,
     handle: Option<thread::JoinHandle<()>>,
 }
 
 impl VideoLoopbackServer {
-    pub fn spawn<F>(
+    pub fn spawn_with_prefetch<F>(
         key: PreviewKey,
-        upstream: VideoUpstream,
         token: VideoToken,
         budget: VideoCacheBudget,
-        fetcher: F,
-    ) -> Result<Self, VideoPreviewError>
-    where
-        F: Fn(VideoRange) -> Result<Vec<u8>, VideoPreviewError> + Send + Sync + 'static,
-    {
-        Self::spawn_with_policy(
-            key,
-            upstream,
-            token,
-            budget,
-            VideoGatewayPolicy::default(),
-            fetcher,
-        )
-    }
-
-    pub fn spawn_with_policy<F>(
-        key: PreviewKey,
-        upstream: VideoUpstream,
-        token: VideoToken,
-        budget: VideoCacheBudget,
-        policy: VideoGatewayPolicy,
+        prefetch_chunks: usize,
         fetcher: F,
     ) -> Result<Self, VideoPreviewError>
     where
@@ -1149,14 +915,12 @@ impl VideoLoopbackServer {
             .local_addr()
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?
             .port();
-        let endpoint = LoopbackEndpoint::new(port)?;
-        let session = VideoPreviewSession::new(key, upstream, token, endpoint.clone(), budget)?;
-        let player_url = session.player_url();
+        let session = VideoPreviewSession::new(key, token, port, budget);
         let stop = Arc::new(AtomicBool::new(false));
         let state = Arc::new(Mutex::new(VideoLoopbackState {
             session,
             cache: VideoIntervalBuffer::new(budget),
-            policy,
+            prefetch_chunks,
             stats: VideoProxyStats::default(),
             fetcher: Arc::new(fetcher),
             stop: Arc::clone(&stop),
@@ -1164,30 +928,25 @@ impl VideoLoopbackServer {
         let thread_state = Arc::clone(&state);
         let thread_stop = Arc::clone(&stop);
         let handle =
-            thread::spawn(move || serve_video_loopback(listener, thread_state, thread_stop));
+            thread::spawn(move || serve_video_loopback(&listener, &thread_state, &thread_stop));
 
         Ok(Self {
-            endpoint,
-            player_url,
+            port,
             stop,
             state,
             handle: Some(handle),
         })
     }
 
-    pub const fn endpoint(&self) -> &LoopbackEndpoint {
-        &self.endpoint
-    }
-
-    pub fn player_url(&self) -> &str {
-        &self.player_url
+    pub const fn port(&self) -> u16 {
+        self.port
     }
 
     pub fn stats(&self) -> VideoProxyStats {
         match self.state.lock() {
             Ok(state) => {
                 let mut stats = state.stats.clone();
-                stats.used_bytes = state.cache.used_bytes();
+                stats.used_bytes = state.cache.used_bytes;
                 if let Some(window) = state.cache.window() {
                     stats.window_start = Some(window.start);
                     stats.window_end_inclusive = Some(window.end_inclusive);
@@ -1198,29 +957,20 @@ impl VideoLoopbackServer {
         }
     }
 
-    pub fn player_launch(&self, backend: PlayerBackend) -> Result<PlayerLaunch, VideoPreviewError> {
-        self.state
-            .lock()
-            .map_err(|_| VideoPreviewError::LoopbackServerIo)?
-            .session
-            .player_launch(backend)
-    }
-
-    pub fn player_launch_with_profile(
+    pub fn mpv_args_with_profile(
         &self,
-        backend: PlayerBackend,
         profile: MpvLaunchProfile,
-    ) -> Result<PlayerLaunch, VideoPreviewError> {
-        self.state
+    ) -> Result<Vec<String>, VideoPreviewError> {
+        let state = self
+            .state
             .lock()
-            .map_err(|_| VideoPreviewError::LoopbackServerIo)?
-            .session
-            .player_launch_with_profile(backend, profile)
+            .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+        Ok(state.session.mpv_args_with_profile(profile))
     }
 
-    pub fn shutdown(&mut self) {
+    fn shutdown(&mut self) {
         self.stop.store(true, Ordering::Release);
-        if let Ok(stream) = TcpStream::connect((LOOPBACK_HOST, self.endpoint.port())) {
+        if let Ok(stream) = TcpStream::connect((LOOPBACK_HOST, self.port)) {
             let _ = stream.shutdown(std::net::Shutdown::Both);
         }
         if let Some(handle) = self.handle.take() {
@@ -1236,14 +986,14 @@ impl Drop for VideoLoopbackServer {
 }
 
 fn serve_video_loopback(
-    listener: TcpListener,
-    state: Arc<Mutex<VideoLoopbackState>>,
-    stop: Arc<AtomicBool>,
+    listener: &TcpListener,
+    state: &Arc<Mutex<VideoLoopbackState>>,
+    stop: &AtomicBool,
 ) {
     while !stop.load(Ordering::Acquire) {
         match listener.accept() {
             Ok((stream, _addr)) => {
-                let state = Arc::clone(&state);
+                let state = Arc::clone(state);
                 thread::spawn(move || handle_video_connection(stream, &state));
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1259,7 +1009,7 @@ fn handle_video_connection(mut stream: TcpStream, state: &Arc<Mutex<VideoLoopbac
         .and_then(|request| handle_http_request(request, state))
     {
         Ok(response) => response,
-        Err(err) => video_error_response(err),
+        Err(err) => video_error_response(&err),
     };
     let _ = stream.write_all(&response);
     let _ = stream.flush();
@@ -1324,9 +1074,7 @@ fn parse_http_request(request: &str) -> Result<ParsedHttpRequest, VideoPreviewEr
     })
 }
 
-pub fn parse_video_range_header(
-    line: &str,
-) -> Option<Result<RequestedVideoRange, VideoPreviewError>> {
+fn parse_video_range_header(line: &str) -> Option<Result<RequestedVideoRange, VideoPreviewError>> {
     let (name, value) = line.split_once(':')?;
     if !name.trim().eq_ignore_ascii_case("range") {
         return None;
@@ -1365,7 +1113,7 @@ fn handle_http_request(
         let state = state
             .lock()
             .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
-        state.session.handle_proxy_request(VideoProxyRequest {
+        state.session.handle_proxy_request(&VideoProxyRequest {
             method: request.method,
             token: request.token,
             range: request.range,
@@ -1465,7 +1213,7 @@ fn spawn_prefetch_after(
         let Ok(state_guard) = state.lock() else {
             return;
         };
-        let prefetch_chunks = state_guard.policy.prefetch_chunks;
+        let prefetch_chunks = state_guard.prefetch_chunks;
         if prefetch_chunks == 0 {
             return;
         }
@@ -1490,7 +1238,7 @@ fn spawn_prefetch_after(
     };
 
     thread::spawn(move || {
-        prefetch_forward_window(job);
+        prefetch_forward_window(&job);
     });
 }
 
@@ -1515,7 +1263,7 @@ fn should_prefetch_after(
     }
 }
 
-fn prefetch_forward_window(job: VideoPrefetchJob) {
+fn prefetch_forward_window(job: &VideoPrefetchJob) {
     if job.file_size == 0 || job.chunk_size_bytes == 0 || job.memory_limit_bytes == 0 {
         return;
     }
@@ -1579,18 +1327,15 @@ fn video_head_response(content_length: u64, accept_ranges: bool) -> Vec<u8> {
     )
 }
 
-fn video_error_response(err: VideoPreviewError) -> Vec<u8> {
+fn video_error_response(err: &VideoPreviewError) -> Vec<u8> {
     let status = match err {
         VideoPreviewError::InvalidVideoToken => "403 Forbidden",
         VideoPreviewError::InactiveVideoSession => "410 Gone",
         VideoPreviewError::InvalidRange => "416 Range Not Satisfiable",
         VideoPreviewError::UnsupportedHttpMethod => "405 Method Not Allowed",
         VideoPreviewError::MalformedHttpRequest => "400 Bad Request",
-        VideoPreviewError::InvalidUpstreamUrl
-        | VideoPreviewError::InvalidVideoTokenFormat
+        VideoPreviewError::InvalidVideoTokenFormat
         | VideoPreviewError::InvalidCacheBudget
-        | VideoPreviewError::InvalidPort
-        | VideoPreviewError::NonLoopbackBindAddress
         | VideoPreviewError::VideoChunkTooLarge
         | VideoPreviewError::LoopbackServerIo => "500 Internal Server Error",
     };
@@ -1610,4 +1355,231 @@ fn video_body_response(status: &str, headers: &[(&str, String)], body: &[u8]) ->
     let mut response = head.into_bytes();
     response.extend_from_slice(body);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MpvLaunchProfile, PreviewKey, RequestedVideoRange, VideoCacheBudget, VideoIntervalBuffer,
+        VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
+        VideoProxyResponse, VideoRange, VideoToken,
+    };
+
+    fn key() -> PreviewKey {
+        PreviewKey {
+            account_uid: 100,
+            fs_id: 42,
+            mtime: 7,
+            size: 1_000,
+        }
+    }
+
+    fn session() -> Result<VideoPreviewSession, VideoPreviewError> {
+        Ok(VideoPreviewSession::new(
+            key(),
+            VideoToken::new("tok_0123456789abcdef")?,
+            39_177,
+            VideoCacheBudget::new(256, 2)?,
+        ))
+    }
+
+    #[test]
+    fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), VideoPreviewError> {
+        let session = session()?;
+
+        assert_eq!(
+            session.player_url(),
+            "http://127.0.0.1:39177/preview/video/tok_0123456789abcdef"
+        );
+        assert!(!session.player_url().contains("baidu"));
+
+        let args = session
+            .mpv_args_with_profile(MpvLaunchProfile::User)
+            .join(" ");
+        assert!(args.contains("127.0.0.1:39177"));
+        assert!(!args.contains("baidu"));
+        assert!(args.contains("--cache-on-disk=no"));
+        assert!(!args.contains("--disk-cache=no"));
+        assert!(!args.contains("--no-config"));
+        assert!(!args.contains("--load-scripts=no"));
+        assert!(!args.contains("--osc=no"));
+        assert!(args.contains("--demuxer-readahead-secs=20"));
+        assert!(args.contains("--cache-pause=no"));
+        assert!(args.contains("--no-terminal"));
+        assert!(args.contains("--force-window=immediate"));
+        assert!(args.contains("--msg-level=all=warn"));
+        assert!(!args.contains("--really-quiet"));
+        assert!(!args.contains("--vo=null"));
+        assert!(!args.contains("--ao=null"));
+        assert!(!args.contains("--mute=yes"));
+        assert!(!args.contains("--pause"));
+        assert!(args.contains("--idle=yes"));
+        assert!(args.contains("--demuxer-max-bytes=512"));
+        Ok(())
+    }
+
+    #[test]
+    fn isolated_mpv_profile_disables_user_config_scripts_and_osc() -> Result<(), VideoPreviewError>
+    {
+        let session = session()?;
+
+        let args = session
+            .mpv_args_with_profile(MpvLaunchProfile::Isolated)
+            .join(" ");
+        assert!(args.contains("127.0.0.1:39177"));
+        assert!(!args.contains("baidu"));
+        assert!(args.contains("--cache-on-disk=no"));
+        assert!(args.contains("--no-config"));
+        assert!(args.contains("--load-scripts=no"));
+        assert!(args.contains("--osc=no"));
+        assert!(args.contains("--no-terminal"));
+        assert!(args.contains("--force-window=immediate"));
+        assert!(args.contains("--msg-level=all=warn"));
+        assert!(!args.contains("--really-quiet"));
+        assert!(!args.contains("--vo=null"));
+        assert!(!args.contains("--pause"));
+        assert!(args.contains("--idle=yes"));
+        assert!(args.contains("--demuxer-max-bytes=512"));
+        Ok(())
+    }
+
+    #[test]
+    fn player_log_ring_keeps_recent_sanitized_lines() {
+        let mut log = super::PlayerLogRing::new(2);
+        log.push("Opening http://127.0.0.1:1234/preview/video/tok_secret");
+        log.push("A: 00:00:01 / 00:20:00");
+        log.push("Error: https://d.pcs.baidu.com/file/private?token=SECRET");
+
+        assert_eq!(log.lines().len(), 2);
+        assert!(log.lines()[0].contains("A: 00:00:01"));
+        assert!(log.lines()[1].contains("<redacted-url>"));
+        assert!(!log.lines()[1].contains("SECRET"));
+    }
+
+    #[test]
+    fn player_log_ring_redacts_token_like_fields() {
+        let mut log = super::PlayerLogRing::new(2);
+        log.push("headers BDUSS=SECRET_BDUSS token=SECRET_TOKEN cookie=SECRET_COOKIE");
+
+        let line = log.last_line().unwrap_or_default();
+        assert!(line.contains("BDUSS=<redacted>"));
+        assert!(line.contains("token=<redacted>"));
+        assert!(line.contains("cookie=<redacted>"));
+        assert!(!line.contains("SECRET"));
+    }
+
+    #[test]
+    fn interval_buffer_serves_overlapping_subranges() -> Result<(), VideoPreviewError> {
+        let budget = VideoCacheBudget::new(16, 2)?;
+        let mut buffer = VideoIntervalBuffer::new(budget);
+        buffer.put(VideoRange::new(0, 15)?, b"abcdefghijklmnop".to_vec())?;
+
+        assert_eq!(buffer.get(VideoRange::new(4, 7)?), Some(b"efgh".to_vec()));
+        assert_eq!(buffer.get(VideoRange::new(12, 20)?), None);
+        Ok(())
+    }
+
+    #[test]
+    fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError> {
+        let budget = VideoCacheBudget::new(8, 2)?;
+        let mut buffer = VideoIntervalBuffer::new(budget);
+        buffer.put(VideoRange::new(0, 7)?, b"aaaaaaaa".to_vec())?;
+        buffer.put(VideoRange::new(8, 15)?, b"bbbbbbbb".to_vec())?;
+        buffer.put(VideoRange::new(16, 23)?, b"cccccccc".to_vec())?;
+
+        assert_eq!(buffer.used_bytes, 16);
+        assert!(buffer.get(VideoRange::new(0, 7)?).is_none());
+        assert_eq!(
+            buffer.get(VideoRange::new(16, 23)?),
+            Some(b"cccccccc".to_vec())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn open_ended_proxy_range_uses_bounded_playback_chunk() -> Result<(), VideoPreviewError> {
+        let session = session()?;
+        let response = session.handle_proxy_request(&VideoProxyRequest {
+            method: VideoProxyMethod::Get,
+            token: "tok_0123456789abcdef".to_string(),
+            range: Some(RequestedVideoRange::OpenEnded(100)),
+        })?;
+
+        assert_eq!(
+            response,
+            VideoProxyResponse::Fetch(VideoRange::new(100, 355)?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn suffix_proxy_range_resolves_against_file_tail() -> Result<(), VideoPreviewError> {
+        let session = session()?;
+        let response = session.handle_proxy_request(&VideoProxyRequest {
+            method: VideoProxyMethod::Get,
+            token: "tok_0123456789abcdef".to_string(),
+            range: Some(RequestedVideoRange::Suffix(128)),
+        })?;
+
+        assert_eq!(
+            response,
+            VideoProxyResponse::Fetch(VideoRange::new(872, 999)?)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoPreviewError> {
+        assert_eq!(
+            super::parse_video_range_header("Range: bytes=4096-").transpose()?,
+            Some(RequestedVideoRange::OpenEnded(4096))
+        );
+        assert_eq!(
+            super::parse_video_range_header("Range: bytes=-8192").transpose()?,
+            Some(RequestedVideoRange::Suffix(8192))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_request_requires_matching_token() -> Result<(), VideoPreviewError> {
+        let session = session()?;
+
+        let rejected = session.handle_proxy_request(&VideoProxyRequest {
+            method: VideoProxyMethod::Get,
+            token: "wrong".to_string(),
+            range: Some(VideoRange::new(10, 20)?.into()),
+        });
+        assert_eq!(rejected, Err(VideoPreviewError::InvalidVideoToken));
+
+        let range = VideoRange::new(10, 20)?;
+        let accepted = session.handle_proxy_request(&VideoProxyRequest {
+            method: VideoProxyMethod::Get,
+            token: "tok_0123456789abcdef".to_string(),
+            range: Some(range.into()),
+        })?;
+        assert_eq!(accepted, VideoProxyResponse::Fetch(range));
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_head_response_reports_range_capability_without_fetching_body(
+    ) -> Result<(), VideoPreviewError> {
+        let session = session()?;
+
+        let response = session.handle_proxy_request(&VideoProxyRequest {
+            method: VideoProxyMethod::Head,
+            token: "tok_0123456789abcdef".to_string(),
+            range: None,
+        })?;
+
+        assert_eq!(
+            response,
+            VideoProxyResponse::Head {
+                content_length: 1_000,
+                accept_ranges: true,
+            }
+        );
+        Ok(())
+    }
 }

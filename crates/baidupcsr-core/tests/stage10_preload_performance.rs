@@ -26,7 +26,7 @@ fn paged_preload_records_bounded_work_for_large_directories() {
     let plan = PagedPreloadPlanner::new(24, 1, 8, 8).plan(&entries, 50_000);
 
     assert!(plan.targets.len() <= 16);
-    assert!(plan.considered_entries <= 72);
+    assert!(plan.window_end.saturating_sub(plan.window_start) <= 72);
     assert!(plan.window_start > 49_900);
     assert!(plan.window_end < 50_100);
 }

@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use baidupcsr_config::{
-    active_user, discover_config_file, load_config, save_active_user_workdir, AuthPresence,
-    ConfigDiscoveryInput, ConfigError, TargetOs, UiConfig, VideoPlayerProfile,
+    load_config, save_active_user_workdir, AuthPresence, ConfigError, UiConfig, VideoPlayerProfile,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -12,51 +11,17 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 #[test]
-fn discover_config_prefers_explicit_env_dir() {
-    let input = ConfigDiscoveryInput {
-        config_dir_env: Some(PathBuf::from("/tmp/baidupcsr-config")),
-        executable_dir: PathBuf::from("/opt/baidupcsr"),
-        home_dir: Some(PathBuf::from("/home/example")),
-        appdata_dir: None,
-        target_os: TargetOs::Unix,
-    };
-
-    assert_eq!(
-        discover_config_file(&input),
-        PathBuf::from("/tmp/baidupcsr-config/pcs_config.json")
-    );
-}
-
-#[test]
-fn discover_config_uses_unix_home_config_dir_when_no_env_or_legacy_file() {
-    let input = ConfigDiscoveryInput {
-        config_dir_env: None,
-        executable_dir: PathBuf::from("/opt/baidupcsr"),
-        home_dir: Some(PathBuf::from("/home/example")),
-        appdata_dir: None,
-        target_os: TargetOs::Unix,
-    };
-
-    assert_eq!(
-        discover_config_file(&input),
-        PathBuf::from("/home/example/.config/BaiduPCS-Go/pcs_config.json")
-    );
-}
-
-#[test]
 fn load_config_selects_active_user() {
     let config = load_config(&fixture_path("pcs_config_minimal.json"));
     assert!(config.is_ok(), "minimal fixture should parse");
-    let config = match config {
-        Ok(config) => config,
-        Err(_) => return,
+    let Ok(config) = config else {
+        return;
     };
 
-    let user = active_user(&config);
+    let user = config.active_user();
     assert!(user.is_some(), "active user should exist");
-    let user = match user {
-        Some(user) => user,
-        None => return,
+    let Some(user) = user else {
+        return;
     };
 
     assert_eq!(user.uid, 100000001);
@@ -76,16 +41,14 @@ fn load_config_selects_active_user() {
 fn load_config_extracts_auth_presence_from_cookie_string() {
     let config = load_config(&fixture_path("pcs_config_cookie_only.json"));
     assert!(config.is_ok(), "cookie fixture should parse");
-    let config = match config {
-        Ok(config) => config,
-        Err(_) => return,
+    let Ok(config) = config else {
+        return;
     };
 
-    let user = active_user(&config);
+    let user = config.active_user();
     assert!(user.is_some(), "active user should exist");
-    let user = match user {
-        Some(user) => user,
-        None => return,
+    let Some(user) = user else {
+        return;
     };
 
     assert_eq!(
@@ -120,10 +83,12 @@ fn save_active_user_workdir_updates_default_directory() -> Result<(), ConfigErro
 
     save_active_user_workdir(&path, "/电影/科幻电影")?;
     let config = load_config(&path)?;
-    let user = active_user(&config).ok_or_else(|| ConfigError::InvalidConfig {
-        path: path.clone(),
-        message: "active user missing after save".to_string(),
-    })?;
+    let user = config
+        .active_user()
+        .ok_or_else(|| ConfigError::InvalidConfig {
+            path: path.clone(),
+            message: "active user missing after save".to_string(),
+        })?;
 
     assert_eq!(user.workdir, "/电影/科幻电影");
     let _ = std::fs::remove_file(path);
@@ -167,7 +132,7 @@ fn ui_config_sidecar_can_select_isolated_mpv_profile() -> Result<(), ConfigError
         source,
     })?;
 
-    let config = baidupcsr_config::load_ui_config(&path)?;
+    let config = baidupcsr_config::load_ui_config_or_default(&path)?;
 
     assert!(config.video_preview.enabled);
     assert_eq!(config.video_preview.chunk_size_bytes, 131_072);
@@ -193,7 +158,7 @@ fn ui_config_rejects_zero_video_chunk_budget() {
     );
     assert!(write_result.is_ok());
 
-    let result = baidupcsr_config::load_ui_config(&path);
+    let result = baidupcsr_config::load_ui_config_or_default(&path);
 
     assert!(matches!(result, Err(ConfigError::InvalidUiConfig { .. })));
     let _ = std::fs::remove_file(path);
