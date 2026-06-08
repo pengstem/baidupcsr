@@ -48,6 +48,7 @@ const BREADCRUMB_SEPARATOR: &str = " > ";
 enum AppMode {
     Normal,
     Filter,
+    Search,
     Command,
     Confirm,
 }
@@ -81,6 +82,7 @@ impl AppMode {
         match self {
             Self::Normal => "NORMAL",
             Self::Filter => "FILTER",
+            Self::Search => "SEARCH",
             Self::Command => "COMMAND",
             Self::Confirm => "CONFIRM",
         }
@@ -111,6 +113,7 @@ pub enum KeyAction {
     Down,
     Back,
     Enter,
+    Filter,
     Search,
     Command,
     Refresh,
@@ -151,6 +154,7 @@ pub enum TuiRuntimeEvent {
     Tick,
     Action(KeyAction),
     CommandSubmitted(String),
+    SearchSubmitted(String),
     PathRequested(String),
     ConfirmAccepted,
     ConfirmRejected,
@@ -173,6 +177,24 @@ enum DirectoryRequestState {
     Loading,
     Refreshing,
     Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SearchResultsState {
+    root_path: String,
+    keyword: String,
+    restore_entries: Vec<FileEntry>,
+    restore_selection_path: Option<String>,
+    scanned_dirs: usize,
+    scanned_entries: usize,
+    matches: usize,
+    running: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FileListMode {
+    Directory,
+    SearchResults(SearchResultsState),
 }
 
 impl DirectoryRequestState {
@@ -215,7 +237,8 @@ const fn key_action_for(event: KeyEvent) -> Option<KeyAction> {
         KeyEvent::End | KeyEvent::Char('G') => Some(KeyAction::Bottom),
         KeyEvent::Ctrl('u' | 'U') => Some(KeyAction::HalfPageUp),
         KeyEvent::Ctrl('d' | 'D') => Some(KeyAction::HalfPageDown),
-        KeyEvent::Char('/') => Some(KeyAction::Search),
+        KeyEvent::Char('/') | KeyEvent::Char('f') => Some(KeyAction::Filter),
+        KeyEvent::Char('s') => Some(KeyAction::Search),
         KeyEvent::Char(':') => Some(KeyAction::Command),
         KeyEvent::Char('r') => Some(KeyAction::Refresh),
         KeyEvent::Char('p') => Some(KeyAction::Preview),
@@ -251,6 +274,8 @@ pub struct TuiApp {
     preload_lines: Vec<String>,
     command_input: String,
     filter_input: String,
+    search_input: String,
+    file_list_mode: FileListMode,
     selected_paths: Vec<String>,
     confirm_lines: Vec<String>,
     confirm_kind: Option<ConfirmKind>,
@@ -284,6 +309,8 @@ impl TuiApp {
             preload_lines: Vec::new(),
             command_input: String::new(),
             filter_input: String::new(),
+            search_input: String::new(),
+            file_list_mode: FileListMode::Directory,
             selected_paths: Vec::new(),
             confirm_lines: Vec::new(),
             confirm_kind: None,
@@ -314,6 +341,7 @@ impl TuiApp {
             self.filter_input.clear();
         }
         self.path = path;
+        self.file_list_mode = FileListMode::Directory;
         self.cache_age_seconds = cache_age_seconds;
         self.background_tasks = 1;
         self.request_state = if cached_entries.is_empty() {
@@ -339,6 +367,7 @@ impl TuiApp {
         preferred_selection_path: Option<&str>,
     ) {
         self.path = normalize_path(path);
+        self.file_list_mode = FileListMode::Directory;
         self.cache_age_seconds = cache_age_seconds;
         self.background_tasks = 0;
         self.request_state = DirectoryRequestState::Idle;
@@ -355,6 +384,7 @@ impl TuiApp {
         preferred_selection_path: Option<&str>,
     ) {
         self.path = normalize_path(path);
+        self.file_list_mode = FileListMode::Directory;
         self.cache_age_seconds = cache_age_seconds;
         self.background_tasks = 0;
         self.request_state = DirectoryRequestState::Failed;
@@ -393,6 +423,107 @@ impl TuiApp {
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
+    }
+
+    pub fn begin_search_results(&mut self, root_path: &str, keyword: &str) {
+        let restore_selection_path = self.selected_entry().map(|entry| entry.path.clone());
+        let restore_entries = self.entries.clone();
+        let root_path = normalize_path(root_path);
+        let keyword = keyword.to_string();
+        self.path = root_path.clone();
+        self.entries.clear();
+        self.selected_index = None;
+        self.scroll_offset = 0;
+        self.filter_input.clear();
+        self.search_input.clear();
+        self.selected_paths.clear();
+        self.last_file_click = None;
+        self.background_tasks = 1;
+        self.request_state = DirectoryRequestState::Idle;
+        self.notice = Some(format!("searching \"{keyword}\" in {root_path}"));
+        self.file_list_mode = FileListMode::SearchResults(SearchResultsState {
+            root_path,
+            keyword,
+            restore_entries,
+            restore_selection_path,
+            scanned_dirs: 0,
+            scanned_entries: 0,
+            matches: 0,
+            running: true,
+        });
+        self.begin_preview("search", "searching remote files");
+    }
+
+    pub fn append_search_results(
+        &mut self,
+        entries: Vec<FileEntry>,
+        scanned_dirs: usize,
+        scanned_entries: usize,
+    ) {
+        let Some(state) = self.search_results_state_mut() else {
+            return;
+        };
+        state.scanned_dirs = scanned_dirs;
+        state.scanned_entries = scanned_entries;
+        state.matches = state.matches.saturating_add(entries.len());
+        self.entries.extend(entries);
+        if self.selected_index.is_none() && !self.entries.is_empty() {
+            self.select_index(Some(0));
+        }
+        self.sync_selection_to_filter();
+        self.update_search_notice();
+    }
+
+    pub fn finish_search_success(&mut self, scanned_dirs: usize, scanned_entries: usize) {
+        let matches = self.entries.len();
+        let Some(state) = self.search_results_state_mut() else {
+            return;
+        };
+        state.scanned_dirs = scanned_dirs;
+        state.scanned_entries = scanned_entries;
+        state.matches = matches;
+        state.running = false;
+        self.background_tasks = 0;
+        self.update_search_notice();
+    }
+
+    pub fn finish_search_error(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        let Some(state) = self.take_search_results_state() else {
+            self.notice = Some(format!("search_failed: {message}"));
+            self.background_tasks = 0;
+            return;
+        };
+        let root_path = state.root_path;
+        let restore_selection_path = state.restore_selection_path;
+        self.path = root_path;
+        self.background_tasks = 0;
+        self.request_state = DirectoryRequestState::Idle;
+        self.notice = Some(format!("search_failed: {message}"));
+        self.set_entries_with_selection(state.restore_entries, restore_selection_path.as_deref());
+    }
+
+    pub fn exit_search_results(&mut self) -> Option<String> {
+        let state = self.take_search_results_state()?;
+        let root_path = state.root_path;
+        let restore_selection_path = state.restore_selection_path;
+        self.path = root_path.clone();
+        self.background_tasks = 0;
+        self.request_state = DirectoryRequestState::Idle;
+        self.notice = Some(format!("returned to {}", root_path));
+        self.set_entries_with_selection(state.restore_entries, restore_selection_path.as_deref());
+        Some(root_path)
+    }
+
+    pub fn is_search_results(&self) -> bool {
+        matches!(self.file_list_mode, FileListMode::SearchResults(_))
+    }
+
+    pub fn search_origin_path(&self) -> Option<&str> {
+        match &self.file_list_mode {
+            FileListMode::Directory => None,
+            FileListMode::SearchResults(state) => Some(state.root_path.as_str()),
+        }
     }
 
     pub fn set_cache_age_seconds(&mut self, value: Option<u64>) {
@@ -646,6 +777,7 @@ impl TuiApp {
             AppMode::Normal => self.handle_normal_key(event),
             AppMode::Command => self.handle_command_key(event),
             AppMode::Filter => self.handle_filter_key(event),
+            AppMode::Search => self.handle_search_key(event),
             AppMode::Confirm => self.handle_confirm_key(event),
         }
     }
@@ -673,6 +805,46 @@ impl TuiApp {
 
     pub fn selected_paths(&self) -> &[String] {
         &self.selected_paths
+    }
+
+    fn search_results_state(&self) -> Option<&SearchResultsState> {
+        match &self.file_list_mode {
+            FileListMode::Directory => None,
+            FileListMode::SearchResults(state) => Some(state),
+        }
+    }
+
+    fn search_results_state_mut(&mut self) -> Option<&mut SearchResultsState> {
+        match &mut self.file_list_mode {
+            FileListMode::Directory => None,
+            FileListMode::SearchResults(state) => Some(state),
+        }
+    }
+
+    fn take_search_results_state(&mut self) -> Option<SearchResultsState> {
+        match std::mem::replace(&mut self.file_list_mode, FileListMode::Directory) {
+            FileListMode::Directory => None,
+            FileListMode::SearchResults(state) => Some(state),
+        }
+    }
+
+    fn update_search_notice(&mut self) {
+        let Some(state) = self.search_results_state() else {
+            return;
+        };
+        let status = if state.running {
+            "searching"
+        } else {
+            "search_complete"
+        };
+        self.notice = Some(format!(
+            "{status}: {} matches for \"{}\" in {} ({} dirs, {} entries)",
+            state.matches,
+            state.keyword,
+            state.root_path,
+            state.scanned_dirs,
+            state.scanned_entries
+        ));
     }
 
     fn visible_entry_range(&self, rows: usize) -> Range<usize> {
@@ -864,6 +1036,9 @@ impl TuiApp {
         if event == KeyEvent::Esc {
             self.mode = AppMode::Normal;
             self.pending_g = false;
+            if self.is_search_results() {
+                return Some(TuiRuntimeEvent::Action(KeyAction::Back));
+            }
             return None;
         }
 
@@ -901,10 +1076,14 @@ impl TuiApp {
                 self.move_to_bottom();
                 return Some(TuiRuntimeEvent::Action(KeyAction::Bottom));
             }
-            KeyAction::Search => {
+            KeyAction::Filter => {
                 self.mode = AppMode::Filter;
                 self.filter_input.clear();
                 self.sync_selection_to_filter();
+            }
+            KeyAction::Search => {
+                self.mode = AppMode::Search;
+                self.search_input.clear();
             }
             KeyAction::Command => {
                 self.mode = AppMode::Command;
@@ -989,6 +1168,44 @@ impl TuiApp {
             KeyEvent::Char(ch) => {
                 self.filter_input.push(ch);
                 self.sync_selection_to_filter();
+                None
+            }
+            KeyEvent::Up
+            | KeyEvent::Down
+            | KeyEvent::Left
+            | KeyEvent::Right
+            | KeyEvent::PageUp
+            | KeyEvent::PageDown
+            | KeyEvent::Home
+            | KeyEvent::End
+            | KeyEvent::Ctrl(_)
+            | KeyEvent::Tab => None,
+        }
+    }
+
+    fn handle_search_key(&mut self, event: KeyEvent) -> Option<TuiRuntimeEvent> {
+        match event {
+            KeyEvent::Esc => {
+                self.mode = AppMode::Normal;
+                self.search_input.clear();
+                None
+            }
+            KeyEvent::Backspace => {
+                self.search_input.pop();
+                None
+            }
+            KeyEvent::Enter => {
+                let input = self.search_input.trim().to_string();
+                self.search_input.clear();
+                self.mode = AppMode::Normal;
+                if input.is_empty() {
+                    None
+                } else {
+                    Some(TuiRuntimeEvent::SearchSubmitted(input))
+                }
+            }
+            KeyEvent::Char(ch) => {
+                self.search_input.push(ch);
                 None
             }
             KeyEvent::Up
@@ -1131,6 +1348,13 @@ impl TuiApp {
     }
 
     fn status_hint(&self) -> Option<String> {
+        if let Some(state) = self.search_results_state() {
+            let status = if state.running { "searching" } else { "search" };
+            return Some(format!(
+                "{} \"{}\" {} matches, {} dirs",
+                status, state.keyword, state.matches, state.scanned_dirs
+            ));
+        }
         match self.request_state {
             DirectoryRequestState::Loading => Some("Loading...".to_string()),
             DirectoryRequestState::Refreshing => Some("Refreshing...".to_string()),
@@ -1543,7 +1767,7 @@ fn help_widget() -> Paragraph<'static> {
         content_line("  Enter              submit input"),
         Line::raw("").style(surface_style()),
         help_section_line("Actions"),
-        content_line("  / filter           : command"),
+        content_line("  f filter  s search : command"),
         content_line("  ? help             Esc close/cancel"),
         content_line("  space mark         r refresh"),
         content_line("  d download         x cancel task"),
@@ -1833,7 +2057,27 @@ fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
     };
 
     let total = visible_indices.len();
-    let title = if total == 0 {
+    let title = if let Some(state) = app.search_results_state() {
+        let prefix = if state.running { "Search" } else { "Results" };
+        if total == 0 {
+            format!("{prefix} 0 matches")
+        } else if app.filter_input.is_empty() {
+            format!(
+                "{prefix} {}-{}/{} matches",
+                range.start + 1,
+                range.end,
+                total
+            )
+        } else {
+            format!(
+                "{prefix} {}-{}/{} of {} matches",
+                range.start + 1,
+                range.end,
+                total,
+                app.entries().len()
+            )
+        }
+    } else if total == 0 {
         if app.filter_input.is_empty() {
             "Files 0 items".to_string()
         } else {
@@ -2265,7 +2509,10 @@ fn status_widget(app: &TuiApp) -> Paragraph<'_> {
         return input_status_widget(":", &app.command_input);
     }
     if app.mode == AppMode::Filter {
-        return input_status_widget("/", &app.filter_input);
+        return input_status_widget("f", &app.filter_input);
+    }
+    if app.mode == AppMode::Search {
+        return input_status_widget("s", &app.search_input);
     }
 
     let mut spans = vec![
@@ -2361,6 +2608,13 @@ fn files_empty_message(app: &TuiApp) -> String {
     if !app.filter_input.is_empty() {
         return format!("No matches for \"{}\"", app.filter_input);
     }
+    if let Some(state) = app.search_results_state() {
+        return if state.running {
+            format!("Searching \"{}\"...", state.keyword)
+        } else {
+            format!("No matches for \"{}\"", state.keyword)
+        };
+    }
     match app.request_state {
         DirectoryRequestState::Loading => "Loading...".to_string(),
         DirectoryRequestState::Refreshing => "Refreshing cached entries...".to_string(),
@@ -2395,14 +2649,28 @@ fn task_status_line(app: &TuiApp) -> Option<Line<'static>> {
                     .bg(THEME_PANEL),
             )
         }),
-        DirectoryRequestState::Idle => (app.background_tasks > 0).then(|| {
-            Line::raw(format!(
-                "{} {} running",
-                app.background_tasks,
-                pluralize(app.background_tasks, "task", "tasks")
-            ))
-            .style(meta_value_style())
-        }),
+        DirectoryRequestState::Idle => (app.background_tasks > 0)
+            .then(|| {
+                Line::raw(format!(
+                    "{} {} running",
+                    app.background_tasks,
+                    pluralize(app.background_tasks, "task", "tasks")
+                ))
+                .style(meta_value_style())
+            })
+            .or_else(|| {
+                app.search_results_state().map(|state| {
+                    Line::raw(format!(
+                        "{} matches for \"{}\" in {} ({} dirs, {} entries)",
+                        state.matches,
+                        state.keyword,
+                        state.root_path,
+                        state.scanned_dirs,
+                        state.scanned_entries
+                    ))
+                    .style(meta_value_style())
+                })
+            }),
     }
 }
 
@@ -2747,8 +3015,20 @@ mod tests {
     fn mode_keys_enter_filter_command_and_return_to_normal() {
         let mut app = TuiApp::new("/");
 
+        app.handle_key_event(KeyEvent::Char('f'));
+        assert_eq!(app.mode, AppMode::Filter);
+
+        app.handle_key_event(KeyEvent::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+
         app.handle_key_event(KeyEvent::Char('/'));
         assert_eq!(app.mode, AppMode::Filter);
+
+        app.handle_key_event(KeyEvent::Esc);
+        assert_eq!(app.mode, AppMode::Normal);
+
+        app.handle_key_event(KeyEvent::Char('s'));
+        assert_eq!(app.mode, AppMode::Search);
 
         app.handle_key_event(KeyEvent::Esc);
         assert_eq!(app.mode, AppMode::Normal);
@@ -2793,6 +3073,65 @@ mod tests {
         assert_eq!(app.handle_key_event(KeyEvent::Esc), None);
         assert_eq!(app.filter_input, "");
         assert_eq!(app.filtered_entry_count(), 3);
+    }
+
+    #[test]
+    fn f_filters_current_entries_without_submitting_remote_search() {
+        let mut app = TuiApp::new("/");
+        app.set_entries(vec![
+            file(1, "/notes.md"),
+            file(2, "/photo.jpg"),
+            file(3, "/todo.txt"),
+        ]);
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('f')), None);
+        for ch in "photo".chars() {
+            assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+        }
+
+        assert_eq!(app.mode, AppMode::Filter);
+        assert_eq!(app.filtered_entry_count(), 1);
+        assert_eq!(
+            app.selected_entry().map(|entry| entry.path.as_str()),
+            Some("/photo.jpg")
+        );
+    }
+
+    #[test]
+    fn s_submits_remote_search_input() {
+        let mut app = TuiApp::new("/docs");
+
+        assert_eq!(app.handle_key_event(KeyEvent::Char('s')), None);
+        for ch in "notes".chars() {
+            assert_eq!(app.handle_key_event(KeyEvent::Char(ch)), None);
+        }
+
+        assert_eq!(
+            app.handle_key_event(KeyEvent::Enter),
+            Some(TuiRuntimeEvent::SearchSubmitted("notes".to_string()))
+        );
+        assert_eq!(app.mode, AppMode::Normal);
+        assert_eq!(app.search_input, "");
+    }
+
+    #[test]
+    fn search_results_restore_original_directory_on_exit() {
+        let mut app = TuiApp::new("/docs");
+        app.set_entries(vec![file(1, "/docs/readme.md"), file(2, "/docs/todo.md")]);
+        app.handle_key_event(KeyEvent::Char('j'));
+
+        app.begin_search_results("/docs", "photo");
+        app.append_search_results(vec![file(3, "/docs/nested/photo.jpg")], 2, 8);
+
+        assert!(app.is_search_results());
+        assert_eq!(app.entries().len(), 1);
+        assert_eq!(app.exit_search_results(), Some("/docs".to_string()));
+        assert!(!app.is_search_results());
+        assert_eq!(app.entries().len(), 2);
+        assert_eq!(
+            app.selected_entry().map(|entry| entry.path.as_str()),
+            Some("/docs/todo.md")
+        );
     }
 
     #[test]

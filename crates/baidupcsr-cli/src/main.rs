@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -21,6 +21,8 @@ const LOCAL_OPEN_TEMP_DIR_NAME: &str = "baidupcsr-open";
 const VIDEO_PREFETCH_CHUNKS: usize = 4;
 const MPV_PROGRAM: &str = "mpv";
 const ENV_DOWNLOAD_DIR: &str = "BAIDUPCSR_DOWNLOAD_DIR";
+const SEARCH_BATCH_SIZE: usize = 64;
+const SEARCH_MAX_RESULTS: usize = 2_000;
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -152,11 +154,18 @@ enum TransferTaskEvent {
         id: baidupcsr_core::TaskId,
         message: String,
     },
+    SearchBatch {
+        id: baidupcsr_core::TaskId,
+        path: String,
+        entries: Vec<baidupcsr_pcs::FileEntry>,
+        scanned_dirs: usize,
+        scanned_entries: usize,
+    },
     SearchCompleted {
         id: baidupcsr_core::TaskId,
         path: String,
         keyword: String,
-        result: Result<Vec<baidupcsr_pcs::FileEntry>, String>,
+        result: Result<RemoteSearchSummary, String>,
     },
 }
 
@@ -166,8 +175,22 @@ enum ParsedRemoteCommand {
     Search {
         path: String,
         keyword: String,
-        recursive: bool,
+        mode: RemoteSearchMode,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteSearchMode {
+    RecursiveList,
+    CurrentList,
+    PcsApi,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RemoteSearchSummary {
+    scanned_dirs: usize,
+    scanned_entries: usize,
+    matches: usize,
 }
 
 impl Drop for ActiveVideoPreview {
@@ -384,6 +407,14 @@ impl BrowserRuntime {
             baidupcsr_tui::TuiRuntimeEvent::CommandSubmitted(command) => {
                 self.handle_remote_command(app, command.as_str());
             }
+            baidupcsr_tui::TuiRuntimeEvent::SearchSubmitted(keyword) => {
+                self.start_search_task(
+                    app,
+                    app.path().to_string(),
+                    keyword,
+                    RemoteSearchMode::RecursiveList,
+                );
+            }
             baidupcsr_tui::TuiRuntimeEvent::PathRequested(path) => {
                 self.handle_path_request(app, path);
             }
@@ -415,6 +446,12 @@ impl BrowserRuntime {
                 }
             }
             baidupcsr_tui::KeyAction::Back => {
+                if let Some(path) = app.search_origin_path().map(str::to_string) {
+                    app.exit_search_results();
+                    self.stop_active_video();
+                    self.start_directory_load(app, path, None);
+                    return;
+                }
                 if let Some(path) = baidupcsr_tui::TuiApp::parent_path(app.path()) {
                     self.stop_active_video();
                     let current_path = app.path().to_string();
@@ -446,7 +483,8 @@ impl BrowserRuntime {
             baidupcsr_tui::KeyAction::CancelTask => {
                 self.cancel_latest_task(app);
             }
-            baidupcsr_tui::KeyAction::Search
+            baidupcsr_tui::KeyAction::Filter
+            | baidupcsr_tui::KeyAction::Search
             | baidupcsr_tui::KeyAction::Command
             | baidupcsr_tui::KeyAction::ToggleSelect
             | baidupcsr_tui::KeyAction::Quit => {}
@@ -467,8 +505,8 @@ impl BrowserRuntime {
             Ok(ParsedRemoteCommand::Search {
                 path,
                 keyword,
-                recursive,
-            }) => self.start_search_task(app, path, keyword, recursive),
+                mode,
+            }) => self.start_search_task(app, path, keyword, mode),
             Ok(ParsedRemoteCommand::Operation(plan)) if plan.is_destructive() => {
                 self.pending_remote_operation = Some(plan.clone());
                 let mut lines = plan.dry_run_lines().to_vec();
@@ -533,7 +571,7 @@ impl BrowserRuntime {
         app: &mut baidupcsr_tui::TuiApp,
         path: String,
         keyword: String,
-        recursive: bool,
+        mode: RemoteSearchMode,
     ) {
         let Some(client) = self.client.clone() else {
             app.set_notice("search_error: client unavailable");
@@ -546,10 +584,10 @@ impl BrowserRuntime {
         }
 
         let tx = self.task_tx.clone();
+        app.begin_search_results(path.as_str(), keyword.as_str());
         app.set_notice(format!("search_started: #{} {}", id.value(), keyword));
         thread::spawn(move || {
-            let result = client
-                .search(path.as_str(), keyword.as_str(), recursive)
+            let result = run_remote_search_task(client, tx.clone(), id, &path, &keyword, mode)
                 .map_err(|err| pcs_error_label(&err));
             let _ = tx.send(TransferTaskEvent::SearchCompleted {
                 id,
@@ -1133,20 +1171,38 @@ impl BrowserRuntime {
                     let _ = self.task_manager.fail(id);
                     app.set_notice(format!("operation_failed: #{} {}", id.value(), message));
                 }
+                TransferTaskEvent::SearchBatch {
+                    id,
+                    path,
+                    entries,
+                    scanned_dirs,
+                    scanned_entries,
+                } => {
+                    let expected_path = app.search_origin_path().map(str::to_string);
+                    if expected_path.as_deref() == Some(path.as_str()) {
+                        app.append_search_results(entries, scanned_dirs, scanned_entries);
+                        app.set_notice(format!(
+                            "search_progress: #{} {} dirs, {} entries",
+                            id.value(),
+                            scanned_dirs,
+                            scanned_entries
+                        ));
+                        self.update_preview_for_selection(app);
+                    }
+                }
                 TransferTaskEvent::SearchCompleted {
                     id,
                     path,
                     keyword,
                     result,
                 } => match result {
-                    Ok(entries) => {
-                        let count = entries.len();
+                    Ok(summary) => {
                         let _ = self.task_manager.complete(id);
-                        app.set_entries(entries);
+                        app.finish_search_success(summary.scanned_dirs, summary.scanned_entries);
                         app.set_notice(format!(
                             "search_complete: #{} {} matches for {} in {}",
                             id.value(),
-                            count,
+                            summary.matches,
                             keyword,
                             path
                         ));
@@ -1154,7 +1210,7 @@ impl BrowserRuntime {
                     }
                     Err(message) => {
                         let _ = self.task_manager.fail(id);
-                        app.set_notice(format!("search_failed: #{} {}", id.value(), message));
+                        app.finish_search_error(format!("#{} {}", id.value(), message));
                     }
                 },
             }
@@ -2072,6 +2128,122 @@ fn local_open_command_candidates(_path: &Path) -> Vec<LocalOpenCommand> {
     Vec::new()
 }
 
+fn run_remote_search_task(
+    client: baidupcsr_pcs::BlockingPcsClient,
+    tx: mpsc::Sender<TransferTaskEvent>,
+    id: baidupcsr_core::TaskId,
+    path: &str,
+    keyword: &str,
+    mode: RemoteSearchMode,
+) -> Result<RemoteSearchSummary, baidupcsr_pcs::PcsError> {
+    match mode {
+        RemoteSearchMode::PcsApi => {
+            let entries = client.search(path, keyword, true)?;
+            let summary = RemoteSearchSummary {
+                scanned_dirs: 1,
+                scanned_entries: entries.len(),
+                matches: entries.len(),
+            };
+            send_search_batch(&tx, id, path, entries, summary)?;
+            Ok(summary)
+        }
+        RemoteSearchMode::RecursiveList | RemoteSearchMode::CurrentList => {
+            let recursive = mode == RemoteSearchMode::RecursiveList;
+            search_remote_by_listing_with(
+                path,
+                keyword,
+                recursive,
+                Some(SEARCH_MAX_RESULTS),
+                |dir| client.list(dir),
+                |entries, summary| send_search_batch(&tx, id, path, entries, summary).is_ok(),
+            )
+        }
+    }
+}
+
+fn send_search_batch(
+    tx: &mpsc::Sender<TransferTaskEvent>,
+    id: baidupcsr_core::TaskId,
+    path: &str,
+    entries: Vec<baidupcsr_pcs::FileEntry>,
+    summary: RemoteSearchSummary,
+) -> Result<(), baidupcsr_pcs::PcsError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    tx.send(TransferTaskEvent::SearchBatch {
+        id,
+        path: path.to_string(),
+        entries,
+        scanned_dirs: summary.scanned_dirs,
+        scanned_entries: summary.scanned_entries,
+    })
+    .map_err(|_| baidupcsr_pcs::PcsError::Cancelled {
+        operation: "search".to_string(),
+    })
+}
+
+fn search_remote_by_listing_with<ListFn, BatchFn>(
+    root_path: &str,
+    keyword: &str,
+    recursive: bool,
+    max_results: Option<usize>,
+    mut list: ListFn,
+    mut on_batch: BatchFn,
+) -> Result<RemoteSearchSummary, baidupcsr_pcs::PcsError>
+where
+    ListFn: FnMut(&str) -> Result<Vec<baidupcsr_pcs::FileEntry>, baidupcsr_pcs::PcsError>,
+    BatchFn: FnMut(Vec<baidupcsr_pcs::FileEntry>, RemoteSearchSummary) -> bool,
+{
+    let needle = keyword.trim().to_lowercase();
+    let mut queue = VecDeque::from([root_path.to_string()]);
+    let mut summary = RemoteSearchSummary::default();
+
+    while let Some(path) = queue.pop_front() {
+        summary.scanned_dirs = summary.scanned_dirs.saturating_add(1);
+        let entries = list(path.as_str())?;
+        let mut batch = Vec::new();
+
+        for entry in entries {
+            summary.scanned_entries = summary.scanned_entries.saturating_add(1);
+            let matched = entry
+                .server_filename
+                .to_lowercase()
+                .contains(needle.as_str());
+            if recursive && entry.is_dir {
+                queue.push_back(entry.path.clone());
+            }
+            if matched {
+                summary.matches = summary.matches.saturating_add(1);
+                batch.push(entry);
+                if batch.len() >= SEARCH_BATCH_SIZE
+                    && !on_batch(std::mem::take(&mut batch), summary)
+                {
+                    return Err(baidupcsr_pcs::PcsError::Cancelled {
+                        operation: "search".to_string(),
+                    });
+                }
+                if max_results.is_some_and(|limit| summary.matches >= limit) {
+                    if !batch.is_empty() && !on_batch(batch, summary) {
+                        return Err(baidupcsr_pcs::PcsError::Cancelled {
+                            operation: "search".to_string(),
+                        });
+                    }
+                    return Ok(summary);
+                }
+            }
+        }
+
+        if !batch.is_empty() && !on_batch(batch, summary) {
+            return Err(baidupcsr_pcs::PcsError::Cancelled {
+                operation: "search".to_string(),
+            });
+        }
+    }
+
+    Ok(summary)
+}
+
 fn parse_remote_command(
     input: &str,
     app: &baidupcsr_tui::TuiApp,
@@ -2163,13 +2335,14 @@ fn parse_remote_command(
             })?,
         )),
         "search" => {
-            let mut recursive = false;
+            let mut mode = RemoteSearchMode::RecursiveList;
             let mut words = Vec::new();
             for arg in args {
-                if arg == "-r" {
-                    recursive = true;
-                } else {
-                    words.push(arg);
+                match arg {
+                    "-r" | "--recursive" => mode = RemoteSearchMode::RecursiveList,
+                    "--current" => mode = RemoteSearchMode::CurrentList,
+                    "--api" => mode = RemoteSearchMode::PcsApi,
+                    _ => words.push(arg),
                 }
             }
             let keyword = words.join(" ");
@@ -2179,7 +2352,7 @@ fn parse_remote_command(
             Ok(ParsedRemoteCommand::Search {
                 path: app.path().to_string(),
                 keyword,
-                recursive,
+                mode,
             })
         }
         _ => Err(format!("unknown command: {command}")),
@@ -2644,8 +2817,9 @@ mod tests {
         download_target_path, fetch_first_successful_dlink_range, is_local_open_size_allowed,
         is_video_entry, local_open_command_candidates, local_open_target_path,
         pan_user_agent_for_config, parse_remote_command, partial_download_path,
-        persist_workdir_if_active, preview_key_for_entry, task_panel_item, tui_preview_kind,
-        DlinkRangeAttempt, ParsedRemoteCommand, LOCAL_OPEN_MAX_BYTES,
+        persist_workdir_if_active, preview_key_for_entry, search_remote_by_listing_with,
+        task_panel_item, tui_preview_kind, DlinkRangeAttempt, ParsedRemoteCommand,
+        RemoteSearchMode, LOCAL_OPEN_MAX_BYTES,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -2674,6 +2848,22 @@ mod tests {
             size,
             is_dir: false,
             has_subdir: false,
+        }
+    }
+
+    fn remote_entry(fs_id: i64, path: &str, is_dir: bool) -> FileEntry {
+        FileEntry {
+            fs_id,
+            app_id: 266_719,
+            path: path.to_string(),
+            server_filename: path.rsplit('/').next().unwrap_or(path).to_string(),
+            ctime: 1,
+            mtime: 2,
+            md5: String::new(),
+            block_list: Vec::new(),
+            size: if is_dir { 0 } else { 12 },
+            is_dir,
+            has_subdir: is_dir,
         }
     }
 
@@ -2733,13 +2923,15 @@ mod tests {
         }
     }
 
-    fn expect_search(command: ParsedRemoteCommand) -> Result<(String, String, bool), String> {
+    fn expect_search(
+        command: ParsedRemoteCommand,
+    ) -> Result<(String, String, RemoteSearchMode), String> {
         match command {
             ParsedRemoteCommand::Search {
                 path,
                 keyword,
-                recursive,
-            } => Ok((path, keyword, recursive)),
+                mode,
+            } => Ok((path, keyword, mode)),
             ParsedRemoteCommand::Operation(_) => {
                 Err("command parsed as operation, expected search".to_string())
             }
@@ -3044,12 +3236,112 @@ mod tests {
     fn remote_command_search_parses_recursive_flag() -> Result<(), String> {
         let app = baidupcsr_tui::TuiApp::new("/docs");
 
-        let (path, keyword, recursive) =
-            expect_search(parse_remote_command("search -r notes", &app)?)?;
+        let (path, keyword, mode) = expect_search(parse_remote_command("search -r notes", &app)?)?;
 
         assert_eq!(path, "/docs");
         assert_eq!(keyword, "notes");
-        assert!(recursive);
+        assert_eq!(mode, RemoteSearchMode::RecursiveList);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_search_defaults_to_recursive_list() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let (_, keyword, mode) = expect_search(parse_remote_command("search notes", &app)?)?;
+
+        assert_eq!(keyword, "notes");
+        assert_eq!(mode, RemoteSearchMode::RecursiveList);
+        Ok(())
+    }
+
+    #[test]
+    fn remote_command_search_accepts_current_and_api_modes() -> Result<(), String> {
+        let app = baidupcsr_tui::TuiApp::new("/docs");
+
+        let (_, current_keyword, current_mode) =
+            expect_search(parse_remote_command("search --current notes", &app)?)?;
+        let (_, api_keyword, api_mode) =
+            expect_search(parse_remote_command("search --api notes", &app)?)?;
+
+        assert_eq!(current_keyword, "notes");
+        assert_eq!(current_mode, RemoteSearchMode::CurrentList);
+        assert_eq!(api_keyword, "notes");
+        assert_eq!(api_mode, RemoteSearchMode::PcsApi);
+        Ok(())
+    }
+
+    #[test]
+    fn recursive_list_search_finds_nested_files_and_directories() -> Result<(), String> {
+        let mut batches = Vec::new();
+
+        let summary = search_remote_by_listing_with(
+            "/docs",
+            "photo",
+            true,
+            None,
+            |path| match path {
+                "/docs" => Ok(vec![
+                    remote_entry(1, "/docs/album-photo", true),
+                    remote_entry(2, "/docs/readme.md", false),
+                ]),
+                "/docs/album-photo" => Ok(vec![remote_entry(
+                    3,
+                    "/docs/album-photo/holiday-photo.jpg",
+                    false,
+                )]),
+                other => Err(baidupcsr_pcs::PcsError::Remote {
+                    operation: "list".to_string(),
+                    code: -1,
+                    message: format!("unexpected path {other}"),
+                }),
+            },
+            |entries, _summary| {
+                batches.extend(entries);
+                true
+            },
+        )
+        .map_err(|err| err.to_string())?;
+
+        assert_eq!(summary.scanned_dirs, 2);
+        assert_eq!(summary.scanned_entries, 3);
+        assert_eq!(summary.matches, 2);
+        assert_eq!(
+            batches
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/docs/album-photo", "/docs/album-photo/holiday-photo.jpg"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn current_list_search_does_not_descend_into_nested_directories() -> Result<(), String> {
+        let mut batches = Vec::new();
+
+        let summary = search_remote_by_listing_with(
+            "/docs",
+            "photo",
+            false,
+            None,
+            |_path| {
+                Ok(vec![
+                    remote_entry(1, "/docs/photo-dir", true),
+                    remote_entry(2, "/docs/photo.txt", false),
+                ])
+            },
+            |entries, _summary| {
+                batches.extend(entries);
+                true
+            },
+        )
+        .map_err(|err| err.to_string())?;
+
+        assert_eq!(summary.scanned_dirs, 1);
+        assert_eq!(summary.scanned_entries, 2);
+        assert_eq!(summary.matches, 2);
+        assert_eq!(batches.len(), 2);
         Ok(())
     }
 

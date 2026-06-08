@@ -452,7 +452,7 @@ fn ratatui_render_shows_filter_input_in_bottom_modeline() {
     let screen = draw_to_text(&app, None);
     let last_line = screen.lines().last().unwrap_or_default();
 
-    assert!(last_line.contains("/n|"));
+    assert!(last_line.contains("fn|"));
     assert!(screen.contains("Files 1-1/1 of 2"));
     assert!(screen.contains("notes.md"));
     assert!(!screen.contains("photo.jpg"));
