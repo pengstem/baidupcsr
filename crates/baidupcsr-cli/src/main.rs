@@ -3,7 +3,8 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::{
@@ -18,9 +19,10 @@ const TEXT_PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
 const DOWNLOAD_CHUNK_BYTES: u64 = 1024 * 1024;
 const LOCAL_OPEN_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const LOCAL_OPEN_TEMP_DIR_NAME: &str = "baidupcsr-open";
-const VIDEO_PREFETCH_CHUNKS: usize = 4;
+const VIDEO_PREFETCH_CHUNK_LIMIT: usize = 31;
 const MPV_PROGRAM: &str = "mpv";
 const ENV_DOWNLOAD_DIR: &str = "BAIDUPCSR_DOWNLOAD_DIR";
+const ENV_PROXY: &str = "BAIDUPCSR_PROXY";
 const SEARCH_BATCH_SIZE: usize = 64;
 const SEARCH_MAX_RESULTS: usize = 2_000;
 
@@ -31,6 +33,13 @@ fn main() -> ExitCode {
             print_doctor(config_dir);
             ExitCode::SUCCESS
         }
+        CommandAction::VideoBench(options) => match run_video_bench(&options) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("video_bench_error: {err}");
+                ExitCode::from(1)
+            }
+        },
         CommandAction::TuiShell => {
             let mut runtime = BrowserRuntime::from_config();
             let app = runtime.starting_app();
@@ -45,7 +54,9 @@ fn main() -> ExitCode {
             }
         }
         CommandAction::UsageError => {
-            eprintln!("usage: baidupcsr-cli [tui|doctor [--redact]]");
+            eprintln!(
+                "usage: baidupcsr-cli [tui|doctor [--redact]|video-bench --path REMOTE_PATH [--case source|gateway|all] [--duration SECONDS] [--output PATH] [--redact]]"
+            );
             ExitCode::from(2)
         }
     }
@@ -1430,7 +1441,7 @@ impl BrowserRuntime {
             key,
             token,
             budget,
-            VIDEO_PREFETCH_CHUNKS,
+            default_video_prefetch_chunks(self.video_config.max_chunks),
             move |range| {
                 if cancellation_epoch.load(Ordering::Acquire) != token_epoch {
                     return Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession);
@@ -1711,8 +1722,90 @@ impl BrowserRuntime {
 
 enum CommandAction {
     Doctor { config_dir: Option<PathBuf> },
+    VideoBench(VideoBenchCliOptions),
     TuiShell,
     UsageError,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VideoBenchCliOptions {
+    remote_path: String,
+    bench_case: VideoBenchCase,
+    duration_seconds: u64,
+    output_path: Option<PathBuf>,
+    redact: bool,
+    chunk_size_bytes: Option<u64>,
+    max_chunks: Option<usize>,
+    prefetch_chunks: Option<usize>,
+    reps: usize,
+    range_sizes: Vec<u64>,
+    positions: Vec<VideoBenchPosition>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoBenchCase {
+    Source,
+    Gateway,
+    All,
+}
+
+impl VideoBenchCase {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Source => "source",
+            Self::Gateway => "gateway",
+            Self::All => "all",
+        }
+    }
+
+    const fn includes_source(self) -> bool {
+        matches!(self, Self::Source | Self::All)
+    }
+
+    const fn includes_gateway(self) -> bool {
+        matches!(self, Self::Gateway | Self::All)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VideoBenchPosition {
+    Start,
+    Percent(u8),
+    Tail,
+}
+
+impl VideoBenchPosition {
+    fn label(self) -> String {
+        match self {
+            Self::Start => "start".to_string(),
+            Self::Percent(percent) => format!("p{percent}"),
+            Self::Tail => "tail".to_string(),
+        }
+    }
+}
+
+impl Default for VideoBenchCliOptions {
+    fn default() -> Self {
+        Self {
+            remote_path: String::new(),
+            bench_case: VideoBenchCase::All,
+            duration_seconds: 30,
+            output_path: None,
+            redact: true,
+            chunk_size_bytes: None,
+            max_chunks: None,
+            prefetch_chunks: None,
+            reps: 3,
+            range_sizes: vec![1024 * 1024, 4 * 1024 * 1024],
+            positions: vec![
+                VideoBenchPosition::Start,
+                VideoBenchPosition::Percent(10),
+                VideoBenchPosition::Percent(50),
+                VideoBenchPosition::Percent(90),
+                VideoBenchPosition::Tail,
+            ],
+        }
+    }
 }
 
 fn parse_command(args: &[String]) -> CommandAction {
@@ -1730,8 +1823,998 @@ fn parse_command(args: &[String]) -> CommandAction {
                 config_dir: Some(PathBuf::from(dir)),
             }
         }
+        [cmd, rest @ ..] if cmd == "video-bench" => parse_video_bench_command(rest)
+            .map(CommandAction::VideoBench)
+            .unwrap_or(CommandAction::UsageError),
         _ => CommandAction::UsageError,
     }
+}
+
+fn parse_video_bench_command(args: &[String]) -> Result<VideoBenchCliOptions, String> {
+    let mut options = VideoBenchCliOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--path" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --path value".to_string())?;
+                options.remote_path = normalize_remote_command_path(value);
+            }
+            "--case" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --case value".to_string())?;
+                options.bench_case = parse_video_bench_case(value)?;
+            }
+            "--duration" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --duration value".to_string())?;
+                options.duration_seconds = parse_positive_u64(value, "--duration")?;
+            }
+            "--output" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --output value".to_string())?;
+                options.output_path = Some(PathBuf::from(value));
+            }
+            "--chunk-size" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --chunk-size value".to_string())?;
+                options.chunk_size_bytes = Some(parse_byte_size_arg(value)?);
+            }
+            "--max-chunks" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --max-chunks value".to_string())?;
+                options.max_chunks = Some(parse_positive_usize(value, "--max-chunks")?);
+            }
+            "--prefetch-chunks" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --prefetch-chunks value".to_string())?;
+                options.prefetch_chunks = Some(parse_positive_usize(value, "--prefetch-chunks")?);
+            }
+            "--reps" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --reps value".to_string())?;
+                options.reps = parse_positive_usize(value, "--reps")?;
+            }
+            "--range-sizes" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --range-sizes value".to_string())?;
+                options.range_sizes = parse_range_sizes_arg(value)?;
+            }
+            "--positions" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| "missing --positions value".to_string())?;
+                options.positions = parse_video_bench_positions(value)?;
+            }
+            "--redact" => {
+                options.redact = true;
+            }
+            _ => return Err(format!("unknown video-bench option {}", args[index])),
+        }
+        index += 1;
+    }
+
+    if options.remote_path.is_empty() {
+        return Err("missing --path".to_string());
+    }
+    Ok(options)
+}
+
+fn parse_video_bench_case(value: &str) -> Result<VideoBenchCase, String> {
+    match value {
+        "source" => Ok(VideoBenchCase::Source),
+        "gateway" => Ok(VideoBenchCase::Gateway),
+        "all" => Ok(VideoBenchCase::All),
+        _ => Err(format!("invalid --case {value}")),
+    }
+}
+
+fn parse_positive_u64(value: &str, name: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} must be a positive integer"))
+}
+
+fn parse_positive_usize(value: &str, name: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{name} must be a positive integer"))
+}
+
+fn parse_range_sizes_arg(value: &str) -> Result<Vec<u64>, String> {
+    let sizes = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(parse_byte_size_arg)
+        .collect::<Result<Vec<_>, _>>()?;
+    if sizes.is_empty() {
+        Err("--range-sizes must include at least one size".to_string())
+    } else {
+        Ok(sizes)
+    }
+}
+
+fn parse_byte_size_arg(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("byte size must not be empty".to_string());
+    }
+    let digit_count = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return Err(format!("invalid byte size {value}"));
+    }
+    let number = trimmed[..digit_count]
+        .parse::<u64>()
+        .map_err(|_| format!("invalid byte size {value}"))?;
+    let suffix = trimmed[digit_count..].to_ascii_lowercase();
+    let multiplier = match suffix.as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        _ => return Err(format!("invalid byte size suffix {suffix}")),
+    };
+    number
+        .checked_mul(multiplier)
+        .filter(|size| *size > 0)
+        .ok_or_else(|| format!("invalid byte size {value}"))
+}
+
+fn parse_video_bench_positions(value: &str) -> Result<Vec<VideoBenchPosition>, String> {
+    let positions = value
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(parse_video_bench_position)
+        .collect::<Result<Vec<_>, _>>()?;
+    if positions.is_empty() {
+        Err("--positions must include at least one position".to_string())
+    } else {
+        Ok(positions)
+    }
+}
+
+fn parse_video_bench_position(value: &str) -> Result<VideoBenchPosition, String> {
+    if value.eq_ignore_ascii_case("start") {
+        return Ok(VideoBenchPosition::Start);
+    }
+    if value.eq_ignore_ascii_case("tail") || value.eq_ignore_ascii_case("end") {
+        return Ok(VideoBenchPosition::Tail);
+    }
+    let percent = value
+        .trim_start_matches('p')
+        .parse::<u8>()
+        .map_err(|_| format!("invalid bench position {value}"))?;
+    if percent > 100 {
+        return Err(format!("invalid bench position {value}"));
+    }
+    if percent == 0 {
+        Ok(VideoBenchPosition::Start)
+    } else if percent == 100 {
+        Ok(VideoBenchPosition::Tail)
+    } else {
+        Ok(VideoBenchPosition::Percent(percent))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct VideoBenchResolvedOptions {
+    chunk_size_bytes: u64,
+    max_chunks: usize,
+    prefetch_chunks: usize,
+    memory_limit_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct VideoBenchMovie {
+    entry: baidupcsr_pcs::FileEntry,
+    size_bytes: u64,
+    path_hash: String,
+    extension: String,
+}
+
+struct VideoBenchOutput {
+    writer: Box<dyn Write>,
+}
+
+impl VideoBenchOutput {
+    fn new(path: Option<&Path>) -> Result<Self, String> {
+        let writer: Box<dyn Write> = match path {
+            Some(path) => {
+                if let Some(parent) = path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                {
+                    fs::create_dir_all(parent).map_err(|err| io_error_label(&err))?;
+                }
+                let file = OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(path)
+                    .map_err(|err| io_error_label(&err))?;
+                Box::new(BufWriter::new(file))
+            }
+            None => Box::new(std::io::stdout()),
+        };
+        Ok(Self { writer })
+    }
+
+    fn emit(&mut self, line: &str) -> Result<(), String> {
+        writeln!(self.writer, "{line}").map_err(|err| io_error_label(&err))
+    }
+
+    fn flush(&mut self) -> Result<(), String> {
+        self.writer.flush().map_err(|err| io_error_label(&err))
+    }
+}
+
+fn run_video_bench(options: &VideoBenchCliOptions) -> Result<(), String> {
+    let config_path = baidupcsr_config::discover_config_file(None);
+    let config = baidupcsr_config::load_config(&config_path)
+        .map_err(|err| format!("config_load_failed: {err}"))?;
+    let user = config
+        .active_user()
+        .ok_or_else(|| "active_user_missing".to_string())?;
+    let account_bduss = bduss_from_user(user).ok_or_else(|| "bduss_missing".to_string())?;
+    let client = build_pcs_client(&config, user)?;
+    let ui_config_path = baidupcsr_config::discover_ui_config_file();
+    let ui_config = baidupcsr_config::load_ui_config_or_default(&ui_config_path)
+        .unwrap_or_else(|_| baidupcsr_config::UiConfig::default());
+    let resolved = resolve_video_bench_options(options, &ui_config.video_preview)?;
+    let movie = resolve_video_bench_movie(&client, options.remote_path.as_str())?;
+    if !is_video_entry(&movie.entry) {
+        return Err("target_is_not_supported_video".to_string());
+    }
+
+    let mut output = VideoBenchOutput::new(options.output_path.as_deref())?;
+    output.emit(format_video_bench_start(options, &resolved, &movie, user.uid).as_str())?;
+    if options.bench_case.includes_source() {
+        run_video_source_bench(
+            &mut output,
+            &client,
+            &movie,
+            user.uid,
+            account_bduss.as_str(),
+            options,
+        )?;
+    }
+    if options.bench_case.includes_gateway() {
+        run_video_gateway_bench(
+            &mut output,
+            client,
+            &movie,
+            user.uid,
+            account_bduss,
+            &resolved,
+            options.duration_seconds,
+        )?;
+    }
+    output.emit(format_video_bench_end(options).as_str())?;
+    output.flush()
+}
+
+fn resolve_video_bench_options(
+    options: &VideoBenchCliOptions,
+    video_config: &baidupcsr_config::VideoPreviewConfig,
+) -> Result<VideoBenchResolvedOptions, String> {
+    let chunk_size_bytes = options
+        .chunk_size_bytes
+        .unwrap_or(video_config.chunk_size_bytes);
+    let max_chunks = options.max_chunks.unwrap_or(video_config.max_chunks);
+    let prefetch_chunks = options
+        .prefetch_chunks
+        .unwrap_or_else(|| default_video_prefetch_chunks(max_chunks));
+    baidupcsr_preview::VideoCacheBudget::new(chunk_size_bytes, max_chunks)
+        .map_err(|err| format!("video_budget_error: {err:?}"))?;
+    let memory_limit_bytes =
+        chunk_size_bytes.saturating_mul(u64::try_from(max_chunks).unwrap_or(u64::MAX));
+    Ok(VideoBenchResolvedOptions {
+        chunk_size_bytes,
+        max_chunks,
+        prefetch_chunks,
+        memory_limit_bytes,
+    })
+}
+
+fn resolve_video_bench_movie(
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    remote_path: &str,
+) -> Result<VideoBenchMovie, String> {
+    let normalized_path = normalize_remote_command_path(remote_path);
+    if normalized_path == "/" {
+        return Err("video_bench_path_must_be_file".to_string());
+    }
+    let parent = remote_parent_path_for_bench(normalized_path.as_str());
+    let file_name = remote_file_name(normalized_path.as_str());
+    let entries = client
+        .list(parent.as_str())
+        .map_err(|err| format!("metadata_list_failed: {}", pcs_error_label(&err)))?;
+    let entry = entries
+        .into_iter()
+        .find(|entry| entry.path == normalized_path || entry.server_filename == file_name)
+        .ok_or_else(|| "metadata_entry_not_found".to_string())?;
+    if entry.is_dir {
+        return Err("video_bench_path_must_be_file".to_string());
+    }
+    let size_bytes = nonnegative_size(entry.size);
+    if size_bytes == 0 {
+        return Err("video_bench_file_size_empty".to_string());
+    }
+    let extension = Path::new(entry.server_filename.as_str())
+        .extension()
+        .and_then(|value| value.to_str())
+        .map_or_else(String::new, str::to_ascii_lowercase);
+    Ok(VideoBenchMovie {
+        path_hash: redacted_path_hash(normalized_path.as_str()),
+        entry,
+        size_bytes,
+        extension,
+    })
+}
+
+fn remote_parent_path_for_bench(path: &str) -> String {
+    let normalized = normalize_remote_command_path(path);
+    let trimmed = normalized.trim_end_matches('/');
+    match trimmed.rsplit_once('/') {
+        Some(("", _)) | None => "/".to_string(),
+        Some((parent, _)) => parent.to_string(),
+    }
+}
+
+fn format_video_bench_start(
+    options: &VideoBenchCliOptions,
+    resolved: &VideoBenchResolvedOptions,
+    movie: &VideoBenchMovie,
+    account_uid: u64,
+) -> String {
+    format!(
+        "{{\"type\":\"bench_start\",\"case\":{},\"redacted\":{},\"account_hash\":{},\"movie\":{{\"path_hash\":{},\"extension\":{},\"size_bytes\":{},\"mtime\":{}}},\"config\":{{\"duration_seconds\":{},\"chunk_size_bytes\":{},\"max_chunks\":{},\"prefetch_chunks\":{},\"memory_limit_bytes\":{},\"reps\":{},\"range_sizes\":{},\"positions\":{}}}}}",
+        json_string(options.bench_case.as_str()),
+        options.redact,
+        json_string(redacted_path_hash(&account_uid.to_string()).as_str()),
+        json_string(movie.path_hash.as_str()),
+        json_string(movie.extension.as_str()),
+        movie.size_bytes,
+        movie.entry.mtime,
+        options.duration_seconds,
+        resolved.chunk_size_bytes,
+        resolved.max_chunks,
+        resolved.prefetch_chunks,
+        resolved.memory_limit_bytes,
+        options.reps,
+        json_u64_array(&options.range_sizes),
+        json_position_array(&options.positions)
+    )
+}
+
+fn format_video_bench_end(options: &VideoBenchCliOptions) -> String {
+    format!(
+        "{{\"type\":\"bench_end\",\"case\":{},\"redacted\":{}}}",
+        json_string(options.bench_case.as_str()),
+        options.redact
+    )
+}
+
+struct VideoBenchRangeFetch {
+    bytes_len: usize,
+    candidate_index: usize,
+    refresh_count: usize,
+}
+
+fn run_video_source_bench(
+    output: &mut VideoBenchOutput,
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    movie: &VideoBenchMovie,
+    account_uid: u64,
+    account_bduss: &str,
+    options: &VideoBenchCliOptions,
+) -> Result<(), String> {
+    let locate_started = Instant::now();
+    let mut urls = client
+        .locate_download_urls(movie.entry.path.as_str(), account_uid, account_bduss)
+        .map_err(|err| format!("locatedownload_failed: {}", pcs_error_label(&err)))?;
+    let locate_elapsed = locate_started.elapsed();
+    output.emit(
+        format!(
+            "{{\"type\":\"source_locatedownload\",\"path_hash\":{},\"duration_ms\":{},\"url_count\":{},\"ok\":{}}}",
+            json_string(movie.path_hash.as_str()),
+            locate_elapsed.as_millis(),
+            urls.len(),
+            !urls.is_empty()
+        )
+        .as_str(),
+    )?;
+    if urls.is_empty() {
+        return Err("locatedownload_empty".to_string());
+    }
+
+    for &range_size in &options.range_sizes {
+        let request_len = range_size.min(movie.size_bytes);
+        if request_len == 0 {
+            continue;
+        }
+        for &position in &options.positions {
+            let offset = video_bench_offset(movie.size_bytes, request_len, position);
+            for rep in 1..=options.reps {
+                let end = offset.saturating_add(request_len).saturating_sub(1);
+                let range = baidupcsr_pcs::ByteRange::new(offset, end)
+                    .map_err(|err| pcs_error_label(&err))?;
+                let started = Instant::now();
+                let result = fetch_video_bench_dlink_range(
+                    client,
+                    &mut urls,
+                    movie.entry.path.as_str(),
+                    account_uid,
+                    account_bduss,
+                    range,
+                );
+                let elapsed = started.elapsed();
+                match result {
+                    Ok(fetch) => output.emit(
+                        format_source_range_event(
+                            movie,
+                            position,
+                            rep,
+                            offset,
+                            request_len,
+                            &fetch,
+                            elapsed,
+                        )
+                        .as_str(),
+                    )?,
+                    Err(error) => output.emit(
+                        format_source_error_event(
+                            movie,
+                            position,
+                            rep,
+                            offset,
+                            request_len,
+                            elapsed,
+                            error.as_str(),
+                        )
+                        .as_str(),
+                    )?,
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn fetch_video_bench_dlink_range(
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    urls: &mut Vec<String>,
+    remote_path: &str,
+    account_uid: u64,
+    account_bduss: &str,
+    range: baidupcsr_pcs::ByteRange,
+) -> Result<VideoBenchRangeFetch, String> {
+    match try_video_bench_dlink_candidates(client, urls, range) {
+        Ok(mut fetch) => {
+            fetch.refresh_count = 0;
+            Ok(fetch)
+        }
+        Err(_) => {
+            let refreshed = client
+                .locate_download_urls(remote_path, account_uid, account_bduss)
+                .map_err(|err| {
+                    format!("locatedownload_refresh_failed: {}", pcs_error_label(&err))
+                })?;
+            if refreshed.is_empty() {
+                return Err("locatedownload_refresh_empty".to_string());
+            }
+            *urls = refreshed;
+            let mut fetch = try_video_bench_dlink_candidates(client, urls, range)?;
+            fetch.refresh_count = 1;
+            Ok(fetch)
+        }
+    }
+}
+
+fn try_video_bench_dlink_candidates(
+    client: &baidupcsr_pcs::BlockingPcsClient,
+    urls: &[String],
+    range: baidupcsr_pcs::ByteRange,
+) -> Result<VideoBenchRangeFetch, String> {
+    let mut last_error = "locatedownload_empty".to_string();
+    for (index, url) in urls.iter().enumerate() {
+        match client.download_url_range_with_cancel(url.as_str(), range, || false) {
+            Ok(bytes) => {
+                return Ok(VideoBenchRangeFetch {
+                    bytes_len: bytes.len(),
+                    candidate_index: index,
+                    refresh_count: 0,
+                });
+            }
+            Err(err) => last_error = pcs_error_label(&err),
+        }
+    }
+    Err(last_error)
+}
+
+fn format_source_range_event(
+    movie: &VideoBenchMovie,
+    position: VideoBenchPosition,
+    rep: usize,
+    offset: u64,
+    request_len: u64,
+    fetch: &VideoBenchRangeFetch,
+    elapsed: Duration,
+) -> String {
+    let bytes_len = u64::try_from(fetch.bytes_len).unwrap_or(u64::MAX);
+    format!(
+        "{{\"type\":\"source_range\",\"path_hash\":{},\"position\":{},\"rep\":{},\"offset\":{},\"request_bytes\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"candidate_index\":{},\"refresh_count\":{},\"ok\":{},\"error\":null}}",
+        json_string(movie.path_hash.as_str()),
+        json_string(position.label().as_str()),
+        rep,
+        offset,
+        request_len,
+        fetch.bytes_len,
+        elapsed.as_millis(),
+        throughput_mib_s(bytes_len, elapsed),
+        fetch.candidate_index,
+        fetch.refresh_count,
+        bytes_len == request_len
+    )
+}
+
+fn format_source_error_event(
+    movie: &VideoBenchMovie,
+    position: VideoBenchPosition,
+    rep: usize,
+    offset: u64,
+    request_len: u64,
+    elapsed: Duration,
+    error: &str,
+) -> String {
+    format!(
+        "{{\"type\":\"source_range\",\"path_hash\":{},\"position\":{},\"rep\":{},\"offset\":{},\"request_bytes\":{},\"bytes\":0,\"duration_ms\":{},\"throughput_mib_s\":0.000,\"candidate_index\":null,\"refresh_count\":null,\"ok\":false,\"error\":{}}}",
+        json_string(movie.path_hash.as_str()),
+        json_string(position.label().as_str()),
+        rep,
+        offset,
+        request_len,
+        elapsed.as_millis(),
+        json_string(error)
+    )
+}
+
+fn video_bench_offset(file_size: u64, request_len: u64, position: VideoBenchPosition) -> u64 {
+    let max_start = file_size.saturating_sub(request_len);
+    match position {
+        VideoBenchPosition::Start => 0,
+        VideoBenchPosition::Percent(percent) => max_start.saturating_mul(u64::from(percent)) / 100,
+        VideoBenchPosition::Tail => max_start,
+    }
+}
+
+struct VideoBenchHttpResponse {
+    status_code: u16,
+    body_len: usize,
+    content_length: Option<u64>,
+    content_range: Option<String>,
+}
+
+fn run_video_gateway_bench(
+    output: &mut VideoBenchOutput,
+    client: baidupcsr_pcs::BlockingPcsClient,
+    movie: &VideoBenchMovie,
+    account_uid: u64,
+    account_bduss: String,
+    resolved: &VideoBenchResolvedOptions,
+    duration_seconds: u64,
+) -> Result<(), String> {
+    let budget =
+        baidupcsr_preview::VideoCacheBudget::new(resolved.chunk_size_bytes, resolved.max_chunks)
+            .map_err(|err| format!("video_budget_error: {err:?}"))?;
+    let token = generate_video_token(1).map_err(|err| format!("video_token_error: {err:?}"))?;
+    let key = preview_key_for_entry(account_uid, &movie.entry);
+    let path = movie.entry.path.clone();
+    let dlink_cache = Arc::new(Mutex::new(None::<Vec<String>>));
+    let server = baidupcsr_preview::VideoLoopbackServer::spawn_with_prefetch(
+        key,
+        token,
+        budget,
+        resolved.prefetch_chunks,
+        {
+            let dlink_cache = Arc::clone(&dlink_cache);
+            move |range| {
+                let byte_range = baidupcsr_pcs::ByteRange::new(range.start, range.end_inclusive)
+                    .map_err(|_| baidupcsr_preview::VideoPreviewError::InvalidRange)?;
+                let urls = {
+                    let mut cached = dlink_cache
+                        .lock()
+                        .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
+                    if let Some(urls) = cached.as_ref() {
+                        urls.clone()
+                    } else {
+                        let urls = client
+                            .locate_download_urls(
+                                path.as_str(),
+                                account_uid,
+                                account_bduss.as_str(),
+                            )
+                            .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
+                        if urls.is_empty() {
+                            return Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo);
+                        }
+                        *cached = Some(urls.clone());
+                        urls
+                    }
+                };
+                match fetch_first_successful_dlink_range(&urls, |dlink| {
+                    client.download_url_range_with_cancel(dlink, byte_range, || false)
+                }) {
+                    DlinkRangeAttempt::Bytes(bytes) => Ok(bytes),
+                    DlinkRangeAttempt::Cancelled => {
+                        Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession)
+                    }
+                    DlinkRangeAttempt::Failed(_) => {
+                        let refreshed_urls = client
+                            .locate_download_urls(
+                                path.as_str(),
+                                account_uid,
+                                account_bduss.as_str(),
+                            )
+                            .map_err(|_| baidupcsr_preview::VideoPreviewError::LoopbackServerIo)?;
+                        if refreshed_urls.is_empty() {
+                            return Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo);
+                        }
+                        {
+                            let mut cached = dlink_cache.lock().map_err(|_| {
+                                baidupcsr_preview::VideoPreviewError::LoopbackServerIo
+                            })?;
+                            *cached = Some(refreshed_urls.clone());
+                        }
+                        match fetch_first_successful_dlink_range(&refreshed_urls, |dlink| {
+                            client.download_url_range_with_cancel(dlink, byte_range, || false)
+                        }) {
+                            DlinkRangeAttempt::Bytes(bytes) => Ok(bytes),
+                            DlinkRangeAttempt::Cancelled => {
+                                Err(baidupcsr_preview::VideoPreviewError::InactiveVideoSession)
+                            }
+                            DlinkRangeAttempt::Failed(_) => {
+                                Err(baidupcsr_preview::VideoPreviewError::LoopbackServerIo)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+    )
+    .map_err(|err| format!("video_server_error: {err:?}"))?;
+    let request_path = loopback_request_path(&server)?;
+    output.emit(
+        format!(
+            "{{\"type\":\"gateway_start\",\"path_hash\":{},\"port\":{},\"chunk_size_bytes\":{},\"prefetch_chunks\":{},\"duration_seconds\":{}}}",
+            json_string(movie.path_hash.as_str()),
+            server.port(),
+            resolved.chunk_size_bytes,
+            resolved.prefetch_chunks,
+            duration_seconds
+        )
+        .as_str(),
+    )?;
+
+    let started = Instant::now();
+    let deadline = Duration::from_secs(duration_seconds);
+    let mut offset = 0_u64;
+    let mut total_bytes = 0_u64;
+    let mut requests = 0_u64;
+    let mut stop_reason = "duration";
+    while started.elapsed() < deadline && offset < movie.size_bytes {
+        let request_len = resolved
+            .chunk_size_bytes
+            .min(movie.size_bytes.saturating_sub(offset));
+        if request_len == 0 {
+            stop_reason = "eof";
+            break;
+        }
+        let end = offset.saturating_add(request_len).saturating_sub(1);
+        let request_started = Instant::now();
+        let response = video_bench_loopback_get(server.port(), request_path.as_str(), offset, end);
+        let elapsed = request_started.elapsed();
+        match response {
+            Ok(response) => {
+                let bytes_len = u64::try_from(response.body_len).unwrap_or(u64::MAX);
+                let ok = response.status_code == 206
+                    && bytes_len > 0
+                    && response.content_length == Some(bytes_len)
+                    && response.content_range.is_some();
+                output.emit(
+                    format_gateway_range_event(
+                        movie,
+                        offset,
+                        request_len,
+                        &response,
+                        elapsed,
+                        ok,
+                        None,
+                    )
+                    .as_str(),
+                )?;
+                if !ok {
+                    stop_reason = "http_error";
+                    break;
+                }
+                requests = requests.saturating_add(1);
+                total_bytes = total_bytes.saturating_add(bytes_len);
+                offset = offset.saturating_add(bytes_len);
+            }
+            Err(error) => {
+                output.emit(
+                    format_gateway_range_error_event(
+                        movie,
+                        offset,
+                        request_len,
+                        elapsed,
+                        error.as_str(),
+                    )
+                    .as_str(),
+                )?;
+                stop_reason = "error";
+                break;
+            }
+        }
+    }
+    if offset >= movie.size_bytes {
+        stop_reason = "eof";
+    }
+
+    let elapsed = started.elapsed();
+    let stats = server.stats();
+    output.emit(
+        format_gateway_summary_event(movie, requests, total_bytes, elapsed, &stats, stop_reason)
+            .as_str(),
+    )
+}
+
+fn loopback_request_path(
+    server: &baidupcsr_preview::VideoLoopbackServer,
+) -> Result<String, String> {
+    let args = server
+        .mpv_args_with_profile(baidupcsr_preview::MpvLaunchProfile::Isolated)
+        .map_err(|err| format!("video_loopback_url_error: {err:?}"))?;
+    let url = args
+        .iter()
+        .find(|arg| arg.starts_with("http://127.0.0.1:"))
+        .ok_or_else(|| "video_loopback_url_missing".to_string())?;
+    parse_http_request_path(url)
+}
+
+fn parse_http_request_path(url: &str) -> Result<String, String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| "loopback_url_must_be_http".to_string())?;
+    let slash = rest
+        .find('/')
+        .ok_or_else(|| "loopback_url_missing_path".to_string())?;
+    Ok(rest[slash..].to_string())
+}
+
+fn video_bench_loopback_get(
+    port: u16,
+    request_path: &str,
+    start: u64,
+    end: u64,
+) -> Result<VideoBenchHttpResponse, String> {
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|err| io_error_label(&err))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(60)))
+        .map_err(|err| io_error_label(&err))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| io_error_label(&err))?;
+    let request = format!(
+        "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes={start}-{end}\r\nConnection: close\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|err| io_error_label(&err))?;
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .map_err(|err| io_error_label(&err))?;
+    parse_video_bench_http_response(&response)
+}
+
+fn parse_video_bench_http_response(data: &[u8]) -> Result<VideoBenchHttpResponse, String> {
+    let header_end = data
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| "http_response_missing_header_end".to_string())?;
+    let body_start = header_end.saturating_add(4);
+    let header = String::from_utf8_lossy(&data[..header_end]);
+    let mut lines = header.split("\r\n");
+    let status_code = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| "http_response_bad_status".to_string())?;
+    let mut content_length = None;
+    let mut content_range = None;
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("content-length") {
+            content_length = value.trim().parse::<u64>().ok();
+        } else if name.trim().eq_ignore_ascii_case("content-range") {
+            content_range = Some(value.trim().to_string());
+        }
+    }
+    Ok(VideoBenchHttpResponse {
+        status_code,
+        body_len: data.len().saturating_sub(body_start),
+        content_length,
+        content_range,
+    })
+}
+
+fn format_gateway_range_event(
+    movie: &VideoBenchMovie,
+    offset: u64,
+    request_len: u64,
+    response: &VideoBenchHttpResponse,
+    elapsed: Duration,
+    ok: bool,
+    error: Option<&str>,
+) -> String {
+    let bytes_len = u64::try_from(response.body_len).unwrap_or(u64::MAX);
+    format!(
+        "{{\"type\":\"gateway_range\",\"path_hash\":{},\"offset\":{},\"request_bytes\":{},\"status\":{},\"content_length\":{},\"content_range\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"ok\":{},\"error\":{}}}",
+        json_string(movie.path_hash.as_str()),
+        offset,
+        request_len,
+        response.status_code,
+        json_optional_u64(response.content_length),
+        json_optional_string(response.content_range.as_deref()),
+        response.body_len,
+        elapsed.as_millis(),
+        throughput_mib_s(bytes_len, elapsed),
+        ok,
+        json_optional_string(error)
+    )
+}
+
+fn format_gateway_range_error_event(
+    movie: &VideoBenchMovie,
+    offset: u64,
+    request_len: u64,
+    elapsed: Duration,
+    error: &str,
+) -> String {
+    format!(
+        "{{\"type\":\"gateway_range\",\"path_hash\":{},\"offset\":{},\"request_bytes\":{},\"status\":null,\"content_length\":null,\"content_range\":null,\"bytes\":0,\"duration_ms\":{},\"throughput_mib_s\":0.000,\"ok\":false,\"error\":{}}}",
+        json_string(movie.path_hash.as_str()),
+        offset,
+        request_len,
+        elapsed.as_millis(),
+        json_string(error)
+    )
+}
+
+fn format_gateway_summary_event(
+    movie: &VideoBenchMovie,
+    requests: u64,
+    total_bytes: u64,
+    elapsed: Duration,
+    stats: &baidupcsr_preview::VideoProxyStats,
+    stop_reason: &str,
+) -> String {
+    let last_error = stats.last_error.as_ref().map(|err| format!("{err:?}"));
+    format!(
+        "{{\"type\":\"gateway_summary\",\"path_hash\":{},\"requests\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"cache_hits\":{},\"upstream_fetches\":{},\"prefetch_fetches\":{},\"used_bytes\":{},\"window_start\":{},\"window_end\":{},\"stop_reason\":{},\"last_error\":{}}}",
+        json_string(movie.path_hash.as_str()),
+        requests,
+        total_bytes,
+        elapsed.as_millis(),
+        throughput_mib_s(total_bytes, elapsed),
+        stats.cache_hits,
+        stats.upstream_fetches,
+        stats.prefetch_fetches,
+        stats.used_bytes,
+        json_optional_u64(stats.window_start),
+        json_optional_u64(stats.window_end_inclusive),
+        json_string(stop_reason),
+        json_optional_string(last_error.as_deref())
+    )
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len().saturating_add(2));
+    escaped.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            ch if ch.is_control() => {
+                let _ = write!(&mut escaped, "\\u{:04x}", u32::from(ch));
+            }
+            ch => escaped.push(ch),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn json_optional_string(value: Option<&str>) -> String {
+    value.map_or_else(|| "null".to_string(), json_string)
+}
+
+fn json_optional_u64(value: Option<u64>) -> String {
+    value.map_or_else(|| "null".to_string(), |value| value.to_string())
+}
+
+fn json_u64_array(values: &[u64]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        let _ = write!(&mut out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn json_position_array(values: &[VideoBenchPosition]) -> String {
+    let mut out = String::from("[");
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str(json_string(value.label().as_str()).as_str());
+    }
+    out.push(']');
+    out
+}
+
+fn throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= f64::EPSILON {
+        0.0
+    } else {
+        bytes as f64 / 1024.0 / 1024.0 / seconds
+    }
+}
+
+fn redacted_path_hash(path: &str) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("fnv1a64:{hash:016x}")
 }
 
 fn build_pcs_client(
@@ -1769,7 +2852,7 @@ fn build_pcs_client(
         baidupcsr_pcs::BlockingPcsClientOptions::new_with_pan(
             user_agent,
             pan_user_agent,
-            (!config.proxy.is_empty()).then(|| config.proxy.clone()),
+            proxy_from_config_or_env(config.proxy.as_str(), env::var_os(ENV_PROXY)),
         ),
     ))
 }
@@ -2002,6 +3085,10 @@ fn is_video_entry(entry: &baidupcsr_pcs::FileEntry) -> bool {
     !entry.is_dir
         && baidupcsr_preview::preview_kind_from_name(entry.server_filename.as_str())
             == baidupcsr_preview::PreviewKind::Video
+}
+
+fn default_video_prefetch_chunks(max_chunks: usize) -> usize {
+    max_chunks.saturating_sub(1).min(VIDEO_PREFETCH_CHUNK_LIMIT)
 }
 
 const fn mpv_profile_from_config(
@@ -2688,6 +3775,15 @@ fn download_dir_for_config(config: &baidupcsr_config::PcsConfig) -> PathBuf {
     }
 }
 
+fn proxy_from_config_or_env(config_proxy: &str, env_proxy: Option<OsString>) -> Option<String> {
+    if !config_proxy.is_empty() {
+        return Some(config_proxy.to_string());
+    }
+    env_proxy
+        .and_then(|value| value.into_string().ok())
+        .filter(|value| !value.is_empty())
+}
+
 fn persist_workdir_if_active(
     account_uid: u64,
     config_path: &Path,
@@ -2868,6 +3964,7 @@ const fn presence(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
 
@@ -2876,11 +3973,15 @@ mod tests {
     use super::{
         active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
         delete_plan_for_selection, download_target_path, fetch_first_successful_dlink_range,
-        is_local_open_size_allowed, is_video_entry, local_open_command_candidates,
-        local_open_target_path, pan_user_agent_for_config, parse_remote_command,
-        partial_download_path, persist_workdir_if_active, preview_key_for_entry,
-        rename_plan_for_selected, search_remote_by_listing_with, task_panel_item, tui_preview_kind,
-        DlinkRangeAttempt, ParsedRemoteCommand, RemoteSearchMode, LOCAL_OPEN_MAX_BYTES,
+        format_video_bench_start, is_local_open_size_allowed, is_video_entry, json_string,
+        local_open_command_candidates, local_open_target_path, pan_user_agent_for_config,
+        parse_byte_size_arg, parse_command, parse_http_request_path, parse_remote_command,
+        parse_video_bench_positions, partial_download_path, persist_workdir_if_active,
+        preview_key_for_entry, proxy_from_config_or_env, redacted_path_hash,
+        remote_parent_path_for_bench, rename_plan_for_selected, search_remote_by_listing_with,
+        task_panel_item, tui_preview_kind, video_bench_offset, CommandAction, DlinkRangeAttempt,
+        ParsedRemoteCommand, RemoteSearchMode, VideoBenchCase, VideoBenchCliOptions,
+        VideoBenchMovie, VideoBenchPosition, VideoBenchResolvedOptions, LOCAL_OPEN_MAX_BYTES,
     };
 
     fn config_fixture(name: &str) -> Result<baidupcsr_config::PcsConfig, String> {
@@ -3016,6 +4117,151 @@ mod tests {
     }
 
     #[test]
+    fn video_bench_command_parses_required_path_and_options() -> Result<(), String> {
+        let args = [
+            "video-bench",
+            "--path",
+            "电影/clip.mkv",
+            "--case",
+            "source",
+            "--duration",
+            "7",
+            "--chunk-size",
+            "2MiB",
+            "--max-chunks",
+            "9",
+            "--prefetch-chunks",
+            "3",
+            "--reps",
+            "2",
+            "--range-sizes",
+            "1MiB,4MiB",
+            "--positions",
+            "start,50,tail",
+            "--output",
+            "/tmp/bench.jsonl",
+            "--redact",
+        ]
+        .map(str::to_string);
+
+        let CommandAction::VideoBench(options) = parse_command(&args) else {
+            return Err("video-bench command did not parse".to_string());
+        };
+
+        assert_eq!(options.remote_path, "/电影/clip.mkv");
+        assert_eq!(options.bench_case, VideoBenchCase::Source);
+        assert_eq!(options.duration_seconds, 7);
+        assert_eq!(options.chunk_size_bytes, Some(2 * 1024 * 1024));
+        assert_eq!(options.max_chunks, Some(9));
+        assert_eq!(options.prefetch_chunks, Some(3));
+        assert_eq!(options.reps, 2);
+        assert_eq!(options.range_sizes, vec![1024 * 1024, 4 * 1024 * 1024]);
+        assert_eq!(
+            options.positions,
+            vec![
+                VideoBenchPosition::Start,
+                VideoBenchPosition::Percent(50),
+                VideoBenchPosition::Tail,
+            ]
+        );
+        assert_eq!(
+            options.output_path.as_deref(),
+            Some(Path::new("/tmp/bench.jsonl"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn video_bench_command_requires_path() {
+        let args = ["video-bench", "--case", "source"].map(str::to_string);
+
+        assert!(matches!(parse_command(&args), CommandAction::UsageError));
+    }
+
+    #[test]
+    fn video_bench_position_offsets_are_clamped_to_valid_ranges() {
+        assert_eq!(video_bench_offset(1_000, 100, VideoBenchPosition::Start), 0);
+        assert_eq!(
+            video_bench_offset(1_000, 100, VideoBenchPosition::Percent(50)),
+            450
+        );
+        assert_eq!(
+            video_bench_offset(1_000, 100, VideoBenchPosition::Tail),
+            900
+        );
+        assert_eq!(video_bench_offset(50, 100, VideoBenchPosition::Tail), 0);
+    }
+
+    #[test]
+    fn video_bench_parsers_accept_size_suffixes_and_positions() -> Result<(), String> {
+        assert_eq!(parse_byte_size_arg("4MiB")?, 4 * 1024 * 1024);
+        assert_eq!(parse_byte_size_arg("2g")?, 2 * 1024 * 1024 * 1024);
+
+        assert_eq!(
+            parse_video_bench_positions("start,p10,90,end")?,
+            vec![
+                VideoBenchPosition::Start,
+                VideoBenchPosition::Percent(10),
+                VideoBenchPosition::Percent(90),
+                VideoBenchPosition::Tail,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn video_bench_redaction_helpers_do_not_emit_raw_path() {
+        let path = "/电影/斯巴达300勇士.mkv";
+        let hash = redacted_path_hash(path);
+
+        assert!(hash.starts_with("fnv1a64:"));
+        assert!(!hash.contains("斯巴达"));
+        assert_eq!(
+            json_string("quote\" slash\\ line\n"),
+            "\"quote\\\" slash\\\\ line\\n\""
+        );
+    }
+
+    #[test]
+    fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
+        let mut entry = file(9, 1024);
+        entry.path = "/电影/斯巴达300勇士.mkv".to_string();
+        entry.server_filename = "斯巴达300勇士.mkv".to_string();
+        let movie = VideoBenchMovie {
+            entry,
+            size_bytes: 1024,
+            path_hash: redacted_path_hash("/电影/斯巴达300勇士.mkv"),
+            extension: "mkv".to_string(),
+        };
+        let resolved = VideoBenchResolvedOptions {
+            chunk_size_bytes: 1024,
+            max_chunks: 2,
+            prefetch_chunks: 1,
+            memory_limit_bytes: 2048,
+        };
+
+        let line =
+            format_video_bench_start(&VideoBenchCliOptions::default(), &resolved, &movie, 42);
+
+        assert!(line.contains("\"account_hash\""));
+        assert!(line.contains("\"path_hash\""));
+        assert!(!line.contains("account_uid"));
+        assert!(!line.contains("斯巴达"));
+        assert!(!line.contains("/电影"));
+    }
+
+    #[test]
+    fn video_bench_remote_parent_and_loopback_path_are_extracted() -> Result<(), String> {
+        assert_eq!(remote_parent_path_for_bench("/电影/clip.mkv"), "/电影");
+        assert_eq!(remote_parent_path_for_bench("/clip.mkv"), "/");
+        assert_eq!(
+            parse_http_request_path("http://127.0.0.1:1234/preview/video/token")?,
+            "/preview/video/token"
+        );
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "uses the machine-local BaiduPCS-Go config and network; prints no secret fields"]
     fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
         let config_path = baidupcsr_config::discover_config_file(None);
@@ -3083,6 +4329,26 @@ mod tests {
 
         assert_eq!(pan_user_agent_for_config(&config), "fixture-pan-ua");
         Ok(())
+    }
+
+    #[test]
+    fn proxy_from_config_or_env_prefers_configured_proxy() {
+        assert_eq!(
+            proxy_from_config_or_env(
+                "http://config-proxy:7890",
+                Some(OsString::from("http://env-proxy:7890"))
+            ),
+            Some("http://config-proxy:7890".to_string())
+        );
+    }
+
+    #[test]
+    fn proxy_from_config_or_env_uses_env_override_when_config_is_empty() {
+        assert_eq!(
+            proxy_from_config_or_env("", Some(OsString::from("http://127.0.0.1:7890"))),
+            Some("http://127.0.0.1:7890".to_string())
+        );
+        assert_eq!(proxy_from_config_or_env("", None), None);
     }
 
     #[test]

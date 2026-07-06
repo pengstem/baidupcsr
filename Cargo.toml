@@ -1,11 +1,11 @@
 [workspace]
 members = [
-    "crates/baidupcsr-cli",
-    "crates/baidupcsr-config",
-    "crates/baidupcsr-core",
-    "crates/baidupcsr-pcs",
-    "crates/baidupcsr-preview",
-    "crates/baidupcsr-tui",
+  "crates/baidupcsr-cli",
+  "crates/baidupcsr-config",
+  "crates/baidupcsr-core",
+  "crates/baidupcsr-pcs",
+  "crates/baidupcsr-preview",
+  "crates/baidupcsr-tui",
 ]
 resolver = "2"
 
@@ -24,6 +24,14 @@ expect_used = "deny"
 panic = "deny"
 
 [profile.release]
-lto = "thin"
+lto = true
 codegen-units = 1
-debug = "line-tables-only"
+strip = true
+panic = "abort"
+
+
+[profile.dev]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -1,6 +1,7 @@
 use std::{
     fmt,
     io::Read,
+    sync::{Arc, OnceLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -111,6 +112,7 @@ pub struct BlockingPcsClient {
     api: PcsApi,
     auth: PcsAuth,
     options: BlockingPcsClientOptions,
+    client: Arc<OnceLock<Result<reqwest::blocking::Client, PcsError>>>,
 }
 
 impl PcsApi {
@@ -333,6 +335,7 @@ impl BlockingPcsClient {
             },
             auth,
             options,
+            client: Arc::new(OnceLock::new()),
         }
     }
 
@@ -346,12 +349,12 @@ impl BlockingPcsClient {
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "list".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
         let status = response.status();
         let text = response.text().map_err(|source| PcsError::Network {
             operation: "list".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
 
         if !status.is_success() {
@@ -377,12 +380,12 @@ impl BlockingPcsClient {
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "locatedownload".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
         let status = response.status();
         let text = response.text().map_err(|source| PcsError::Network {
             operation: "locatedownload".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
 
         if !status.is_success() {
@@ -439,12 +442,12 @@ impl BlockingPcsClient {
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "search".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
         let status = response.status();
         let text = response.text().map_err(|source| PcsError::Network {
             operation: "search".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
 
         if !status.is_success() {
@@ -485,7 +488,7 @@ impl BlockingPcsClient {
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "download".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
 
         read_bounded_response(response, range, is_cancelled)
@@ -520,7 +523,7 @@ impl BlockingPcsClient {
 
         let response = builder.send().map_err(|source| PcsError::Network {
             operation: "download".to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })?;
 
         read_bounded_response(response, range, is_cancelled)
@@ -560,7 +563,19 @@ impl BlockingPcsClient {
     }
 
     fn build_client(&self, operation: &str) -> Result<reqwest::blocking::Client, PcsError> {
-        let mut builder = reqwest::blocking::Client::builder().timeout(self.options.timeout);
+        match self
+            .client
+            .get_or_init(|| self.build_reqwest_client(operation))
+        {
+            Ok(client) => Ok(client.clone()),
+            Err(err) => Err(err.clone()),
+        }
+    }
+
+    fn build_reqwest_client(&self, operation: &str) -> Result<reqwest::blocking::Client, PcsError> {
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(self.options.timeout)
+            .http1_only();
         if let Some(proxy) = self
             .options
             .proxy
@@ -569,16 +584,27 @@ impl BlockingPcsClient {
         {
             let proxy = reqwest::Proxy::all(proxy).map_err(|source| PcsError::Network {
                 operation: operation.to_string(),
-                message: source.to_string(),
+                message: reqwest_error_label(&source),
             })?;
             builder = builder.proxy(proxy);
         }
 
         builder.build().map_err(|source| PcsError::Network {
             operation: operation.to_string(),
-            message: source.to_string(),
+            message: reqwest_error_label(&source),
         })
     }
+}
+
+fn reqwest_error_label(source: &reqwest::Error) -> String {
+    let mut message = source.to_string();
+    let mut next = std::error::Error::source(source);
+    while let Some(cause) = next {
+        message.push_str(": ");
+        message.push_str(&cause.to_string());
+        next = cause.source();
+    }
+    message
 }
 
 impl FileOperation {
@@ -916,8 +942,8 @@ mod tests {
 
     use super::{
         copy_move_param_json, delete_param_json, dev_uid, locatedownload_sign_with,
-        BlockingPcsClientOptions, ByteRange, FileOperation, FileOperationPair, PcsApi,
-        PcsClientOptions, PcsError,
+        BlockingPcsClient, BlockingPcsClientOptions, ByteRange, FileOperation, FileOperationPair,
+        PcsApi, PcsClientOptions, PcsError,
     };
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -948,6 +974,22 @@ mod tests {
 
         assert_eq!(options.user_agent, "pcs-ua");
         assert_eq!(options.pan_user_agent, "pan-ua");
+    }
+
+    #[test]
+    fn blocking_client_clones_share_one_http_client_cache() {
+        let client = BlockingPcsClient::new(
+            PcsClientOptions {
+                app_id: 266_719,
+                pcs_addr: "pcs.baidu.com".to_string(),
+                enable_https: true,
+            },
+            super::PcsAuth::from_cookie_header("BDUSS=fake"),
+            BlockingPcsClientOptions::new_with_pan("pcs-ua", "pan-ua", None),
+        );
+        let cloned = client.clone();
+
+        assert!(std::sync::Arc::ptr_eq(&client.client, &cloned.client));
     }
 
     #[test]

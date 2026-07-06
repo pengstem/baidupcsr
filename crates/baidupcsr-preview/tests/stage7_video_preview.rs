@@ -133,6 +133,44 @@ fn loopback_server_prefetches_after_open_ended_far_seek() -> Result<(), String> 
 }
 
 #[test]
+fn loopback_server_prefetches_after_open_ended_far_seek_with_existing_window() -> Result<(), String>
+{
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let fetches_for_server = Arc::clone(&fetches);
+    let token = "tok_loopback_server_0011";
+    let server = VideoLoopbackServer::spawn_with_prefetch(
+        key(),
+        VideoToken::new(token).map_err(debug)?,
+        VideoCacheBudget::new(64, 6).map_err(debug)?,
+        2,
+        move |range| {
+            fetches_for_server.fetch_add(1, Ordering::AcqRel);
+            Ok(bytes_for_range(range))
+        },
+    )
+    .map_err(debug)?;
+
+    let first = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token
+    );
+    let far_seek = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=512-\r\n\r\n",
+        token
+    );
+
+    let first_response = raw_http(server.port(), &first)?;
+    assert!(first_response.starts_with("HTTP/1.1 206 Partial Content"));
+    wait_for_fetches(&fetches, 3)?;
+
+    let far_response = raw_http(server.port(), &far_seek)?;
+    assert!(far_response.starts_with("HTTP/1.1 206 Partial Content"));
+    assert_eq!(body(&far_response).len(), 64);
+    wait_for_fetches(&fetches, 6)?;
+    Ok(())
+}
+
+#[test]
 fn loopback_server_rejects_wrong_token_without_fetching_upstream() -> Result<(), String> {
     let fetches = Arc::new(AtomicUsize::new(0));
     let fetches_for_server = Arc::clone(&fetches);
@@ -193,6 +231,78 @@ fn loopback_server_reuses_chunk_cache_and_reports_stats() -> Result<(), String> 
     assert_eq!(server.stats().window_start, Some(0));
     assert_eq!(server.stats().window_end_inclusive, Some(63));
     assert_eq!(server.stats().last_error, None);
+    Ok(())
+}
+
+#[test]
+fn loopback_server_waits_for_matching_inflight_prefetch() -> Result<(), String> {
+    let ranges = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let ranges_for_server = Arc::clone(&ranges);
+    let gate_for_server = Arc::clone(&gate);
+    let token = "tok_loopback_server_0010";
+    let server = VideoLoopbackServer::spawn_with_prefetch(
+        key(),
+        VideoToken::new(token).map_err(debug)?,
+        VideoCacheBudget::new(64, 4).map_err(debug)?,
+        1,
+        move |range| {
+            ranges_for_server
+                .lock()
+                .map_err(|_| VideoPreviewError::LoopbackServerIo)?
+                .push(range);
+            if range == VideoRange::new(64, 127)? {
+                let (lock, cvar) = &*gate_for_server;
+                let mut released = lock
+                    .lock()
+                    .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                while !*released {
+                    released = cvar
+                        .wait(released)
+                        .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                }
+            }
+            Ok(bytes_for_range(range))
+        },
+    )
+    .map_err(debug)?;
+
+    let first_request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token
+    );
+    let second_request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=64-127\r\n\r\n",
+        token
+    );
+    let _ = raw_http(server.port(), &first_request)?;
+    wait_for_range(&ranges, VideoRange::new(64, 127).map_err(debug)?)?;
+
+    let port = server.port();
+    let second = thread::spawn(move || raw_http(port, &second_request));
+    thread::sleep(Duration::from_millis(50));
+    {
+        let (lock, cvar) = &*gate;
+        let mut released = lock.lock().map_err(|_| "gate lock poisoned".to_string())?;
+        *released = true;
+        cvar.notify_all();
+    }
+    let response = second
+        .join()
+        .map_err(|_| "second request thread panicked".to_string())??;
+
+    assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+    assert_eq!(body(&response).len(), 64);
+    let fetched_ranges = ranges.lock().map_err(|err| err.to_string())?;
+    let prefetched_range = VideoRange::new(64, 127).map_err(debug)?;
+    assert_eq!(
+        fetched_ranges
+            .iter()
+            .filter(|range| **range == prefetched_range)
+            .count(),
+        1
+    );
+    assert_eq!(server.stats().cache_hits, 1);
     Ok(())
 }
 
@@ -281,6 +391,61 @@ fn loopback_server_prefetches_forward_window_without_exceeding_budget() -> Resul
     wait_for_fetches(&fetches, 3)?;
     assert!(server.stats().used_bytes <= 256);
     assert!(server.stats().prefetch_fetches >= 2);
+    Ok(())
+}
+
+#[test]
+fn loopback_server_prefetches_forward_window_in_parallel() -> Result<(), String> {
+    let active_prefetches = Arc::new(AtomicUsize::new(0));
+    let max_active_prefetches = Arc::new(AtomicUsize::new(0));
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let active_for_server = Arc::clone(&active_prefetches);
+    let max_for_server = Arc::clone(&max_active_prefetches);
+    let gate_for_server = Arc::clone(&gate);
+    let token = "tok_loopback_server_0012";
+    let server = VideoLoopbackServer::spawn_with_prefetch(
+        key(),
+        VideoToken::new(token).map_err(debug)?,
+        VideoCacheBudget::new(64, 5).map_err(debug)?,
+        3,
+        move |range| {
+            if range.start >= 64 {
+                let active = active_for_server
+                    .fetch_add(1, Ordering::AcqRel)
+                    .saturating_add(1);
+                record_max_active(&max_for_server, active);
+                let (lock, cvar) = &*gate_for_server;
+                let mut released = lock
+                    .lock()
+                    .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                while !*released {
+                    released = cvar
+                        .wait(released)
+                        .map_err(|_| VideoPreviewError::LoopbackServerIo)?;
+                }
+                active_for_server.fetch_sub(1, Ordering::AcqRel);
+            }
+            Ok(bytes_for_range(range))
+        },
+    )
+    .map_err(debug)?;
+
+    let request = format!(
+        "GET /preview/video/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nRange: bytes=0-63\r\n\r\n",
+        token
+    );
+    let response = raw_http(server.port(), &request)?;
+    assert!(response.starts_with("HTTP/1.1 206 Partial Content"));
+
+    wait_for_fetches(&active_prefetches, 3)?;
+    {
+        let (lock, cvar) = &*gate;
+        let mut released = lock.lock().map_err(|err| err.to_string())?;
+        *released = true;
+        cvar.notify_all();
+    }
+    wait_for_prefetches(&server, 3)?;
+    assert!(max_active_prefetches.load(Ordering::Acquire) >= 3);
     Ok(())
 }
 
@@ -379,6 +544,46 @@ fn wait_for_fetches(fetches: &AtomicUsize, expected: usize) -> Result<(), String
         thread::sleep(Duration::from_millis(10));
     }
     Ok(())
+}
+
+fn wait_for_prefetches(server: &VideoLoopbackServer, expected: u64) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while server.stats().prefetch_fetches < expected {
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "timed out waiting for {expected} prefetches, saw {}",
+                server.stats().prefetch_fetches
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
+}
+
+fn record_max_active(max: &AtomicUsize, value: usize) {
+    let mut current = max.load(Ordering::Acquire);
+    while value > current {
+        match max.compare_exchange(current, value, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return,
+            Err(next) => current = next,
+        }
+    }
+}
+
+fn wait_for_range(ranges: &Mutex<Vec<VideoRange>>, expected: VideoRange) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let guard = ranges.lock().map_err(|err| err.to_string())?;
+            if guard.contains(&expected) {
+                return Ok(());
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("timed out waiting for range {expected:?}"));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn raw_http(port: u16, request: &str) -> Result<String, String> {
