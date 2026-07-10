@@ -1,219 +1,11 @@
-use std::collections::BTreeMap;
-use std::env;
-use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
-
-use serde::Deserialize;
-use serde_json::Value;
-
-const CONFIG_FILE_NAME: &str = "pcs_config.json";
-const ENV_CONFIG_DIR: &str = "BAIDUPCS_GO_CONFIG_DIR";
-const UI_CONFIG_FILE_NAME: &str = "ui_config.toml";
-const ENV_UI_CONFIG: &str = "BAIDUPCSR_UI_CONFIG";
-const ENV_CACHE_DIR: &str = "BAIDUPCSR_CACHE_DIR";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TargetOs {
-    Unix,
-    Windows,
-    Android,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ConfigDiscoveryInput {
-    config_dir_env: Option<PathBuf>,
-    executable_dir: PathBuf,
-    home_dir: Option<PathBuf>,
-    appdata_dir: Option<PathBuf>,
-    target_os: TargetOs,
-}
-
-#[derive(Debug)]
-pub enum ConfigError {
-    Read {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    Write {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-    Parse {
-        path: PathBuf,
-        source: serde_json::Error,
-    },
-    InvalidConfig {
-        path: PathBuf,
-        message: String,
-    },
-    InvalidUiConfig {
-        path: PathBuf,
-        message: String,
-    },
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, source } => {
-                write!(f, "failed to read config {}: {source}", path.display())
-            }
-            Self::Write { path, source } => {
-                write!(f, "failed to write config {}: {source}", path.display())
-            }
-            Self::Parse { path, source } => {
-                write!(f, "failed to parse config {}: {source}", path.display())
-            }
-            Self::InvalidConfig { path, message } => {
-                write!(f, "invalid config {}: {message}", path.display())
-            }
-            Self::InvalidUiConfig { path, message } => {
-                write!(f, "invalid UI config {}: {message}", path.display())
-            }
-        }
-    }
-}
-
-impl std::error::Error for ConfigError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Read { source, .. } | Self::Write { source, .. } => Some(source),
-            Self::Parse { source, .. } => Some(source),
-            Self::InvalidConfig { .. } | Self::InvalidUiConfig { .. } => None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct PcsConfig {
-    pub baidu_active_uid: u64,
-    pub baidu_user_list: Vec<BaiduUser>,
-    pub appid: i64,
-    pub cache_size: i64,
-    pub max_parallel: i64,
-    pub max_upload_parallel: i64,
-    pub max_download_load: i64,
-    pub max_upload_load: i64,
-    pub max_download_rate: i64,
-    pub max_upload_rate: i64,
-    pub user_agent: String,
-    pub pcs_ua: String,
-    pub pcs_addr: String,
-    pub pan_ua: String,
-    pub savedir: String,
-    pub enable_https: bool,
-    pub fix_pcs_addr: bool,
-    pub force_login_username: String,
-    pub proxy: String,
-    pub proxy_hostnames: String,
-    pub local_addrs: String,
-    pub no_check: bool,
-    pub ignore_illegal: bool,
-    pub u_policy: String,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct BaiduUser {
-    pub uid: u64,
-    pub name: String,
-    pub sex: String,
-    pub age: f64,
-    pub bduss: String,
-    pub ptoken: String,
-    pub stoken: String,
-    pub baiduid: String,
-    pub sboxtkn: String,
-    pub cookies: String,
-    pub accesstoken: String,
-    pub workdir: String,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AuthPresence {
-    pub bduss: bool,
-    pub stoken: bool,
-    pub cookies: bool,
-    pub access_token: bool,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct UiConfig {
-    pub video_preview: VideoPreviewConfig,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VideoPreviewConfig {
-    pub enabled: bool,
-    pub chunk_size_bytes: u64,
-    pub max_chunks: usize,
-    pub player_profile: VideoPlayerProfile,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VideoPlayerProfile {
-    User,
-    Isolated,
-}
-
-impl PcsConfig {
-    pub fn active_user(&self) -> Option<&BaiduUser> {
-        self.baidu_user_list
-            .iter()
-            .find(|user| user.uid == self.baidu_active_uid)
-    }
-}
-
-impl VideoPreviewConfig {
-    pub fn memory_limit_bytes(&self) -> u64 {
-        self.chunk_size_bytes
-            .saturating_mul(u64::try_from(self.max_chunks).unwrap_or(u64::MAX))
-    }
-}
-
-impl VideoPlayerProfile {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Isolated => "isolated",
-        }
-    }
-}
-
-impl Default for UiConfig {
-    fn default() -> Self {
-        Self {
-            video_preview: VideoPreviewConfig {
-                enabled: true,
-                chunk_size_bytes: 4 * 1024 * 1024,
-                max_chunks: 32,
-                player_profile: VideoPlayerProfile::User,
-            },
-        }
-    }
-}
-
-impl BaiduUser {
-    pub fn auth_presence(&self) -> AuthPresence {
-        AuthPresence {
-            bduss: !self.bduss.is_empty() || cookie_has_key(&self.cookies, "BDUSS"),
-            stoken: !self.stoken.is_empty() || cookie_has_key(&self.cookies, "STOKEN"),
-            cookies: !self.cookies.is_empty(),
-            access_token: !self.accesstoken.is_empty(),
-        }
-    }
-}
+use super::*;
 
 pub fn discover_config_file(config_dir_override: Option<PathBuf>) -> PathBuf {
     let input = discovery_input_from_env(config_dir_override);
     discover_config_file_from_input(&input)
 }
 
-fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> PathBuf {
+pub(crate) fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> PathBuf {
     if let Some(config_dir) = &input.config_dir_env {
         let config_dir = if config_dir.is_absolute() {
             config_dir.clone()
@@ -249,7 +41,9 @@ fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> PathBuf {
     }
 }
 
-fn discovery_input_from_env(config_dir_override: Option<PathBuf>) -> ConfigDiscoveryInput {
+pub(crate) fn discovery_input_from_env(
+    config_dir_override: Option<PathBuf>,
+) -> ConfigDiscoveryInput {
     let executable_dir = env::current_exe()
         .ok()
         .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -358,7 +152,7 @@ pub fn load_ui_config_or_default(path: &Path) -> Result<UiConfig, ConfigError> {
     }
 }
 
-fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
+pub(crate) fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
     let data = fs::read_to_string(path).map_err(|source| ConfigError::Read {
         path: path.to_path_buf(),
         source,
@@ -366,7 +160,7 @@ fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
     parse_ui_config(path, &data)
 }
 
-fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
+pub(crate) fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
     let mut config = UiConfig::default();
     for line in data.lines() {
         let line = line.split('#').next().unwrap_or("").trim();
@@ -407,7 +201,11 @@ fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
     Ok(config)
 }
 
-fn parse_value<T>(path: &Path, value: &str, message: &'static str) -> Result<T, ConfigError>
+pub(crate) fn parse_value<T>(
+    path: &Path,
+    value: &str,
+    message: &'static str,
+) -> Result<T, ConfigError>
 where
     T: std::str::FromStr,
 {
@@ -416,7 +214,10 @@ where
         .map_err(|_| invalid_ui_config(path, message))
 }
 
-fn parse_video_player_profile(path: &Path, value: &str) -> Result<VideoPlayerProfile, ConfigError> {
+pub(crate) fn parse_video_player_profile(
+    path: &Path,
+    value: &str,
+) -> Result<VideoPlayerProfile, ConfigError> {
     match value {
         "user" => Ok(VideoPlayerProfile::User),
         "isolated" => Ok(VideoPlayerProfile::Isolated),
@@ -427,21 +228,21 @@ fn parse_video_player_profile(path: &Path, value: &str) -> Result<VideoPlayerPro
     }
 }
 
-fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {
+pub(crate) fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {
     ConfigError::InvalidUiConfig {
         path: path.to_path_buf(),
         message: message.to_string(),
     }
 }
 
-fn invalid_config(path: &Path, message: &str) -> ConfigError {
+pub(crate) fn invalid_config(path: &Path, message: &str) -> ConfigError {
     ConfigError::InvalidConfig {
         path: path.to_path_buf(),
         message: message.to_string(),
     }
 }
 
-fn cookie_has_key(cookies: &str, key: &str) -> bool {
+pub(crate) fn cookie_has_key(cookies: &str, key: &str) -> bool {
     cookies.split(';').any(|item| {
         let item = item.trim();
         item.strip_prefix(key)
@@ -450,50 +251,12 @@ fn cookie_has_key(cookies: &str, key: &str) -> bool {
     })
 }
 
-fn current_target_os() -> TargetOs {
+pub(crate) fn current_target_os() -> TargetOs {
     if cfg!(windows) {
         TargetOs::Windows
     } else if cfg!(target_os = "android") {
         TargetOs::Android
     } else {
         TargetOs::Unix
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{discover_config_file_from_input, ConfigDiscoveryInput, TargetOs};
-    use std::path::PathBuf;
-
-    #[test]
-    fn discover_config_prefers_explicit_env_dir() {
-        let input = ConfigDiscoveryInput {
-            config_dir_env: Some(PathBuf::from("/tmp/baidupcsr-config")),
-            executable_dir: PathBuf::from("/opt/baidupcsr"),
-            home_dir: Some(PathBuf::from("/home/example")),
-            appdata_dir: None,
-            target_os: TargetOs::Unix,
-        };
-
-        assert_eq!(
-            discover_config_file_from_input(&input),
-            PathBuf::from("/tmp/baidupcsr-config/pcs_config.json")
-        );
-    }
-
-    #[test]
-    fn discover_config_uses_unix_home_config_dir_when_no_env_or_legacy_file() {
-        let input = ConfigDiscoveryInput {
-            config_dir_env: None,
-            executable_dir: PathBuf::from("/opt/baidupcsr"),
-            home_dir: Some(PathBuf::from("/home/example")),
-            appdata_dir: None,
-            target_os: TargetOs::Unix,
-        };
-
-        assert_eq!(
-            discover_config_file_from_input(&input),
-            PathBuf::from("/home/example/.config/BaiduPCS-Go/pcs_config.json")
-        );
     }
 }
