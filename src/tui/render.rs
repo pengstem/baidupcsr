@@ -481,14 +481,7 @@ pub(crate) fn preview_widget(
                 detail_line("Cache:", app.cache_source.user_label().to_string()),
             ]
         },
-        |entry| {
-            preview_detail_lines(
-                entry,
-                app.cache_source,
-                budget,
-                inner_width,
-            )
-        },
+        |entry| preview_detail_lines(entry, app.cache_source, budget, inner_width),
     );
     lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
@@ -583,10 +576,7 @@ pub(crate) fn preview_detail_lines(
         detail_line("Modified:", modified_time_label(entry.mtime)),
         detail_line("Cache:", source.user_label().to_string()),
         detail_line("ID:", entry.fs_id.to_string()),
-        detail_line(
-            "Path:",
-            truncate_cells(entry.path.as_str(), path_width),
-        ),
+        detail_line("Path:", truncate_cells(entry.path.as_str(), path_width)),
         detail_line("Action:", action.to_string()),
     ]
 }
@@ -1141,7 +1131,11 @@ pub(crate) fn task_status_line(app: &TuiApp) -> Option<Line<'static>> {
                 Line::raw(format!(
                     "{} {} running",
                     app.background_tasks,
-                    if app.background_tasks == 1 { "task" } else { "tasks" }
+                    if app.background_tasks == 1 {
+                        "task"
+                    } else {
+                        "tasks"
+                    }
                 ))
                 .style(meta_value_style())
             })
@@ -1186,5 +1180,3 @@ pub(crate) fn truncate_cells(value: &str, max_width: usize) -> String {
     output.push_str("...");
     output
 }
-
-

@@ -258,5 +258,3 @@ pub(crate) fn cancelled(operation: &str) -> PcsError {
         operation: operation.to_string(),
     }
 }
-
-

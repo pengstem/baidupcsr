@@ -246,4 +246,3 @@ pub(crate) fn invalid_config(path: &Path, message: &str) -> ConfigError {
 pub(crate) fn cookie_has_key(cookies: &str, key: &str) -> bool {
     cookies.contains(&format!("{key}="))
 }
-
