@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::config::VideoPlayerProfile;
 
 fn key() -> PreviewKey {
     PreviewKey {
@@ -29,7 +30,7 @@ fn video_session_exposes_only_loopback_token_url_to_player() -> Result<(), Video
     assert!(!session.player_url().contains("baidu"));
 
     let args = session
-        .mpv_args_with_profile(MpvLaunchProfile::User)
+        .mpv_args_with_profile(VideoPlayerProfile::User)
         .join(" ");
     assert!(args.contains("127.0.0.1:39177"));
     assert!(!args.contains("baidu"));
@@ -58,7 +59,7 @@ fn isolated_mpv_profile_disables_user_config_scripts_and_osc() -> Result<(), Vid
     let session = session()?;
 
     let args = session
-        .mpv_args_with_profile(MpvLaunchProfile::Isolated)
+        .mpv_args_with_profile(VideoPlayerProfile::Isolated)
         .join(" ");
     assert!(args.contains("127.0.0.1:39177"));
     assert!(!args.contains("baidu"));

@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::pcs::FileEntry;
-use crate::preview::PreviewKind;
+use crate::preview::{PreviewKind, PreviewStatus};
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 use std::convert::Infallible;
 
@@ -165,7 +165,7 @@ fn preview_panel_uses_empty_space_for_selected_file_details() {
             "dimensions=320x240".to_string(),
             "terminal=metadata".to_string(),
         ],
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Image,
             fetched_bytes: 4096,
             memory_limit_bytes: 16 * 1024 * 1024,

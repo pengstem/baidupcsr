@@ -1,4 +1,7 @@
-use crate::app::{RemoteOperationPlan, RemotePathPair, TaskError, TaskKind, TaskManager};
+use crate::{
+    app::{RemoteOperationPlan, TaskError, TaskKind, TaskManager},
+    pcs::FileOperationPair,
+};
 
 #[test]
 fn delete_plan_is_destructive_and_reports_related_directories() -> Result<(), String> {
@@ -36,11 +39,11 @@ fn mkdir_plan_is_non_destructive_and_refreshes_parent() -> Result<(), String> {
 #[test]
 fn copy_and_move_plans_deduplicate_related_directories() -> Result<(), String> {
     let pairs = vec![
-        RemotePathPair {
+        FileOperationPair {
             from: "/docs/a.txt".to_string(),
             to: "/backup/a.txt".to_string(),
         },
-        RemotePathPair {
+        FileOperationPair {
             from: "/docs/b.txt".to_string(),
             to: "/backup/b.txt".to_string(),
         },

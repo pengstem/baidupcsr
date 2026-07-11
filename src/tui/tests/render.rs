@@ -1,6 +1,6 @@
 use super::super::*;
 use crate::pcs::FileEntry;
-use crate::preview::PreviewKind;
+use crate::preview::{PreviewKind, PreviewStatus};
 use ratatui::{backend::TestBackend, buffer::Buffer, style::Color, Terminal};
 use std::convert::Infallible;
 
@@ -34,7 +34,7 @@ fn file_with_mtime(fs_id: i64, path: &str, size: i64, mtime: i64) -> FileEntry {
     }
 }
 
-fn draw_buffer(app: &TuiApp, preview: Option<PreviewBudget>, width: u16, height: u16) -> Buffer {
+fn draw_buffer(app: &TuiApp, preview: Option<PreviewStatus>, width: u16, height: u16) -> Buffer {
     let backend = TestBackend::new(width, height);
     let mut terminal = infallible(Terminal::new(backend));
     infallible(terminal.draw(|frame| render_app(frame, app, preview)));
@@ -42,7 +42,7 @@ fn draw_buffer(app: &TuiApp, preview: Option<PreviewBudget>, width: u16, height:
     terminal.backend().buffer().clone()
 }
 
-fn draw_to_text(app: &TuiApp, preview: Option<PreviewBudget>) -> String {
+fn draw_to_text(app: &TuiApp, preview: Option<PreviewStatus>) -> String {
     let buffer = draw_buffer(app, preview, 96, 24);
     buffer_to_text(&buffer)
 }
@@ -133,7 +133,7 @@ fn ratatui_render_draws_three_panes_and_preview_budget() {
 
     let screen = draw_to_text(
         &app,
-        Some(PreviewBudget {
+        Some(PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -278,7 +278,7 @@ fn ratatui_render_draws_text_preview_content() {
     app.finish_preview_text(
         "notes.md",
         "hello\nworld",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 11,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -383,7 +383,7 @@ fn ratatui_render_keeps_video_playback_diagnostics_visible() {
             "player_log=none".to_string(),
             "listen=127.0.0.1:42843".to_string(),
         ],
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Video,
             fetched_bytes: 1024,
             memory_limit_bytes: 64 * 1024 * 1024,
@@ -409,7 +409,7 @@ fn ratatui_render_keeps_preview_budget_visible_with_text_content() {
     app.finish_preview_text(
         "readme.txt",
         "line one\nline two\nline three\nline four\nline five\nline six\nline seven",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 96,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -563,7 +563,7 @@ fn ratatui_render_keeps_full_preview_content_and_truncates_task_lists() {
     app.finish_preview_text(
         "notes.md",
         "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -590,7 +590,7 @@ fn ratatui_render_draws_preview_scrollbar_for_long_preview_content() {
     app.finish_preview_text(
         "notes.md",
         "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 128,
             memory_limit_bytes: 16 * 1024 * 1024,

@@ -1,5 +1,5 @@
 use super::super::*;
-use crate::pcs::FileEntry;
+use crate::{pcs::FileEntry, preview::PreviewStatus};
 use ratatui::layout::Rect;
 
 fn file(fs_id: i64, path: &str) -> FileEntry {
@@ -85,7 +85,7 @@ fn preview_mouse_wheel_scrolls_preview_without_changing_selection() {
     app.finish_preview_text(
         "readme.md",
         "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 36,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -111,7 +111,7 @@ fn mouse_click_on_preview_scrollbar_moves_preview_to_bottom() {
     app.finish_preview_text(
         "readme.md",
         "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\nl13\nl14\nl15\nl16",
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Text,
             fetched_bytes: 48,
             memory_limit_bytes: 16 * 1024 * 1024,
@@ -133,7 +133,7 @@ fn mouse_click_on_preview_scrollbar_moves_preview_to_bottom() {
 fn preview_text_updates_panel_content_and_budget() {
     let mut app = TuiApp::new("/docs");
 
-    let budget = PreviewBudget {
+    let budget = PreviewStatus {
         kind: PreviewKind::Text,
         fetched_bytes: 11,
         memory_limit_bytes: 16 * 1024 * 1024,
@@ -161,7 +161,7 @@ fn video_preview_status_updates_panel() {
             "player=mpv".to_string(),
             "cache=0/1048576".to_string(),
         ],
-        PreviewBudget {
+        PreviewStatus {
             kind: PreviewKind::Video,
             fetched_bytes: 0,
             memory_limit_bytes: 1024 * 1024,

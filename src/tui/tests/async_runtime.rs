@@ -1,9 +1,5 @@
 use super::super::*;
-use crate::{
-    app::AppEvent,
-    pcs::{FileEntry, PcsError},
-    tui::shutdown_tasks,
-};
+use crate::{pcs::FileEntry, preview::PreviewStatus, tui::shutdown_tasks};
 use std::time::{Duration, Instant};
 use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -27,23 +23,11 @@ fn file(fs_id: i64, path: &str) -> FileEntry {
 #[tokio::test]
 async fn full_app_event_channel_does_not_block_local_ui_state_updates(
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (events, _receiver) = mpsc::channel(256);
-    for generation in 0..256 {
-        events.try_send(AppEvent::DirectoryLoaded {
-            generation,
-            path: "/blocked".to_string(),
-            result: Err(PcsError::Cancelled {
-                operation: "list".to_string(),
-            }),
-        })?;
+    let (events, _receiver) = mpsc::channel::<()>(256);
+    for _ in 0..256 {
+        events.try_send(())?;
     }
-    assert!(events
-        .try_send(AppEvent::DirectoryLoaded {
-            generation: 257,
-            path: "/blocked".to_string(),
-            result: Ok(Vec::new()),
-        })
-        .is_err());
+    assert!(events.try_send(()).is_err());
 
     let mut app = TuiApp::new("/");
     app.set_entries(vec![file(1, "/a.txt"), file(2, "/b.txt")]);
@@ -74,11 +58,11 @@ async fn shutdown_cancels_tasks_and_aborts_work_past_deadline() {
 }
 
 #[test]
-fn canonical_preview_kind_is_used_directly_by_tui_budget() {
-    let budget = PreviewBudget {
+fn canonical_preview_kind_is_used_directly_by_preview_status() {
+    let status = PreviewStatus {
         kind: crate::preview::PreviewKind::Video,
         fetched_bytes: 64,
         memory_limit_bytes: 128,
     };
-    assert_eq!(budget.kind, crate::preview::PreviewKind::Video);
+    assert_eq!(status.kind, crate::preview::PreviewKind::Video);
 }
