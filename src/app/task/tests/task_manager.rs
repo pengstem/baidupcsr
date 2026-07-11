@@ -1,4 +1,4 @@
-use super::super::*;
+use crate::app::{TaskError, TaskKind, TaskManager, TaskState, TransferProgress};
 
 #[test]
 fn download_task_tracks_progress_speed_and_completion() -> Result<(), TaskError> {

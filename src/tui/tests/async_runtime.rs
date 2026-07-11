@@ -1,7 +1,8 @@
 use super::super::*;
 use crate::{
-    app::{shutdown_tasks, AppEvent},
+    app::AppEvent,
     pcs::{FileEntry, PcsError},
+    tui::shutdown_tasks,
 };
 use std::time::{Duration, Instant};
 use tokio::{sync::mpsc, task::JoinSet};

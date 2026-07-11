@@ -45,14 +45,16 @@ fn client_options_keep_pan_user_agent_separate() {
 }
 
 #[test]
-fn blocking_client_clones_share_one_http_client_cache() -> Result<(), PcsError> {
+fn client_clone_preserves_request_configuration() -> Result<(), PcsError> {
     let client = PcsClient::new(
         api().options,
         PcsAuth::from_cookie_header("BDUSS=fake"),
         transport(),
     )?;
     let cloned = client.clone();
-    assert!(std::sync::Arc::ptr_eq(&client.client, &cloned.client));
+    assert_eq!(client.api, cloned.api);
+    assert_eq!(client.auth, cloned.auth);
+    assert_eq!(client.options, cloned.options);
     Ok(())
 }
 

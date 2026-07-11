@@ -1,8 +1,4 @@
-use super::{
-    MpvLaunchProfile, PreviewKey, RequestedVideoRange, VideoCacheBudget, VideoIntervalBuffer,
-    VideoPreviewError, VideoPreviewSession, VideoProxyMethod, VideoProxyRequest,
-    VideoProxyResponse, VideoRange, VideoToken,
-};
+use super::super::*;
 
 fn key() -> PreviewKey {
     PreviewKey {
@@ -83,7 +79,7 @@ fn isolated_mpv_profile_disables_user_config_scripts_and_osc() -> Result<(), Vid
 
 #[test]
 fn player_log_ring_keeps_recent_sanitized_lines() {
-    let mut log = super::PlayerLogRing::new(2);
+    let mut log = PlayerLogRing::new(2);
     log.push("Opening http://127.0.0.1:1234/preview/video/tok_secret");
     log.push("A: 00:00:01 / 00:20:00");
     log.push("Error: https://d.pcs.baidu.com/file/private?token=SECRET");
@@ -96,7 +92,7 @@ fn player_log_ring_keeps_recent_sanitized_lines() {
 
 #[test]
 fn player_log_ring_redacts_token_like_fields() {
-    let mut log = super::PlayerLogRing::new(2);
+    let mut log = PlayerLogRing::new(2);
     log.push("headers BDUSS=SECRET_BDUSS token=SECRET_TOKEN cookie=SECRET_COOKIE");
 
     let line = log.last_line().unwrap_or_default();
@@ -194,11 +190,11 @@ fn suffix_proxy_range_resolves_against_file_tail() -> Result<(), VideoPreviewErr
 #[test]
 fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoPreviewError> {
     assert_eq!(
-        super::parse_video_range_header("Range: bytes=4096-").transpose()?,
+        parse_video_range_header("Range: bytes=4096-").transpose()?,
         Some(RequestedVideoRange::OpenEnded(4096))
     );
     assert_eq!(
-        super::parse_video_range_header("Range: bytes=-8192").transpose()?,
+        parse_video_range_header("Range: bytes=-8192").transpose()?,
         Some(RequestedVideoRange::Suffix(8192))
     );
     Ok(())

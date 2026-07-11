@@ -1,21 +1,27 @@
 use std::ffi::OsString;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::pcs::FileEntry;
 
 use super::{
     active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
-    delete_plan_for_selection, download_target_path, fetch_first_successful_dlink_range,
-    format_video_bench_start, is_local_open_size_allowed, is_video_entry, json_string,
-    local_open_command_candidates, local_open_target_path, pan_user_agent_for_config,
-    parse_byte_size_arg, parse_command, parse_http_request_path, parse_remote_command,
-    parse_video_bench_positions, partial_download_path, persist_workdir_if_active,
-    preview_key_for_entry, proxy_from_config_or_env, redacted_path_hash,
-    remote_parent_path_for_bench, rename_plan_for_selected, search_remote_by_listing_with,
-    task_panel_item, video_bench_offset, CommandAction, DlinkRangeAttempt, ParsedRemoteCommand,
-    RemoteSearchMode, VideoBenchCase, VideoBenchCliOptions, VideoBenchMovie, VideoBenchPosition,
-    VideoBenchResolvedOptions, LOCAL_OPEN_MAX_BYTES,
+    delete_plan_for_selection, download_target_path, format_video_bench_start,
+    is_local_open_size_allowed, is_video_entry, json_string, local_open_command_candidates,
+    local_open_target_path, pan_user_agent_for_config, parse_byte_size_arg, parse_command,
+    parse_http_request_path, parse_remote_command, parse_video_bench_positions,
+    persist_workdir_if_active, preview_key_for_entry, proxy_from_config_or_env, redacted_path_hash,
+    remote_parent_path_for_bench, rename_plan_for_selected, run_remote_search_task,
+    task_panel_item, video_bench_offset, CommandAction, ParsedRemoteCommand, PcsVideoUpstream,
+    RemoteSearchMode, TransferTaskEvent, VideoBenchCase, VideoBenchCliOptions, VideoBenchMovie,
+    VideoBenchPosition, VideoBenchResolvedOptions, LOCAL_OPEN_MAX_BYTES,
 };
 
 fn config_fixture(name: &str) -> Result<crate::config::PcsConfig, String> {
@@ -61,6 +67,85 @@ fn remote_entry(fs_id: i64, path: &str, is_dir: bool) -> FileEntry {
         is_dir,
         has_subdir: is_dir,
     }
+}
+
+fn test_pcs_client(address: SocketAddr) -> Result<crate::pcs::PcsClient, crate::pcs::PcsError> {
+    crate::pcs::PcsClient::new(
+        crate::pcs::PcsClientOptions {
+            app_id: 266_719,
+            pcs_addr: address.to_string(),
+            enable_https: false,
+        },
+        crate::pcs::PcsAuth::from_cookie_header("BDUSS=redacted"),
+        crate::pcs::PcsTransportOptions {
+            user_agent: "cli-async-test".to_string(),
+            pan_user_agent: "cli-async-test".to_string(),
+            proxy: None,
+            timeout: Duration::from_secs(2),
+        },
+    )
+}
+
+async fn read_test_http_request(socket: &mut TcpStream) -> std::io::Result<String> {
+    let mut request = Vec::new();
+    let mut chunk = [0; 1024];
+    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+        let read = socket.read(&mut chunk).await?;
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..read]);
+        if request.len() > 16 * 1024 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "test HTTP request headers exceeded 16 KiB",
+            ));
+        }
+    }
+    String::from_utf8(request)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
+async fn write_test_http_response(
+    socket: &mut TcpStream,
+    status: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(header.as_bytes()).await?;
+    socket.write_all(body).await
+}
+
+async fn list_fixture_client(
+    responses: Vec<Vec<FileEntry>>,
+) -> Result<
+    (
+        crate::pcs::PcsClient,
+        JoinHandle<std::io::Result<Vec<String>>>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let bodies = responses
+        .into_iter()
+        .map(|entries| serde_json::to_vec(&serde_json::json!({ "errno": 0, "list": entries })))
+        .collect::<Result<Vec<_>, _>>()?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let client = test_pcs_client(address)?;
+    let server = tokio::spawn(async move {
+        let mut request_lines = Vec::with_capacity(bodies.len());
+        for body in bodies {
+            let (mut socket, _) = listener.accept().await?;
+            let request = read_test_http_request(&mut socket).await?;
+            request_lines.push(request.lines().next().unwrap_or_default().to_string());
+            write_test_http_response(&mut socket, "200 OK", &body).await?;
+        }
+        Ok(request_lines)
+    });
+    Ok((client, server))
 }
 
 fn pcs_error_kind(err: &crate::pcs::PcsError) -> String {
@@ -293,9 +378,9 @@ fn video_bench_remote_parent_and_loopback_path_are_extracted() -> Result<(), Str
     Ok(())
 }
 
-#[test]
+#[tokio::test]
 #[ignore = "uses the machine-local BaiduPCS-Go config and network; prints no secret fields"]
-fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
+async fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
     let config_path = crate::config::discover_config_file(None);
     let config = crate::config::load_config(&config_path)
         .map_err(|err| format!("live_config_load_failed: {err}"))?;
@@ -305,8 +390,10 @@ fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
     let bduss = bduss_from_user(user).ok_or_else(|| "live_bduss_missing".to_string())?;
     let client = build_pcs_client(&config, user)
         .map_err(|err| format!("live_client_build_failed: {err}"))?;
+    let cancel = CancellationToken::new();
     let entries = client
-        .list(user.workdir.as_str())
+        .list(user.workdir.as_str(), &cancel)
+        .await
         .map_err(|err| format!("live_list_failed: {err}"))?;
     let entry = entries
         .into_iter()
@@ -314,7 +401,8 @@ fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
         .ok_or_else(|| "live_video_missing".to_string())?;
 
     let urls = client
-        .locate_download_urls(entry.path.as_str(), user.uid, bduss.as_str())
+        .locate_download_urls(entry.path.as_str(), user.uid, bduss.as_str(), &cancel)
+        .await
         .map_err(|err| format!("live_locatedownload_failed: {}", pcs_error_kind(&err)))?;
     println!("live_locatedownload_url_count={}", urls.len());
     let first_url = urls
@@ -324,7 +412,8 @@ fn live_video_dlink_range_smoke_is_redacted() -> Result<(), String> {
     let range = crate::pcs::ByteRange::new(0, 1023)
         .map_err(|err| format!("live_range_invalid: {}", pcs_error_kind(&err)))?;
     let bytes = client
-        .download_url_range_with_cancel(first_url.as_str(), range, || false)
+        .download_url_range(first_url.as_str(), range, &cancel)
+        .await
         .map_err(|err| format!("live_dlink_range_failed: {}", pcs_error_kind(&err)))?;
 
     println!("live_dlink_range_bytes={}", bytes.len());
@@ -388,10 +477,6 @@ fn download_target_uses_sanitized_filename_under_download_dir() {
     let target = download_target_path(Path::new("/tmp/downloads"), "../bad/name?.txt");
 
     assert_eq!(target, Path::new("/tmp/downloads").join(".._bad_name?.txt"));
-    assert_eq!(
-        partial_download_path(&target),
-        Path::new("/tmp/downloads").join(".._bad_name?.txt.part")
-    );
 }
 
 #[test]
@@ -681,37 +766,43 @@ fn remote_command_search_accepts_current_and_api_modes() -> Result<(), String> {
     Ok(())
 }
 
-#[test]
-fn recursive_list_search_finds_nested_files_and_directories() -> Result<(), String> {
-    let mut batches = Vec::new();
-
-    let summary = search_remote_by_listing_with(
+#[tokio::test]
+async fn async_recursive_list_search_emits_nested_matches() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (client, server) = list_fixture_client(vec![
+        vec![
+            remote_entry(1, "/docs/album-photo", true),
+            remote_entry(2, "/docs/readme.md", false),
+        ],
+        vec![remote_entry(
+            3,
+            "/docs/album-photo/holiday-photo.jpg",
+            false,
+        )],
+    ])
+    .await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let mut manager = crate::app::TaskManager::new();
+    let task_id = manager.enqueue_remote_operation("search");
+    let summary = run_remote_search_task(
+        client,
+        tx.clone(),
+        task_id,
         "/docs",
         "photo",
-        true,
-        None,
-        |path| match path {
-            "/docs" => Ok(vec![
-                remote_entry(1, "/docs/album-photo", true),
-                remote_entry(2, "/docs/readme.md", false),
-            ]),
-            "/docs/album-photo" => Ok(vec![remote_entry(
-                3,
-                "/docs/album-photo/holiday-photo.jpg",
-                false,
-            )]),
-            other => Err(crate::pcs::PcsError::Remote {
-                operation: "list".to_string(),
-                code: -1,
-                message: format!("unexpected path {other}"),
-            }),
-        },
-        |entries, _summary| {
-            batches.extend(entries);
-            true
-        },
+        RemoteSearchMode::RecursiveList,
+        &CancellationToken::new(),
     )
-    .map_err(|err| err.to_string())?;
+    .await?;
+    drop(tx);
+    let server_result = tokio::time::timeout(Duration::from_secs(1), server).await?;
+    let requests = server_result??;
+    let mut batches = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let TransferTaskEvent::SearchBatch { entries, .. } = event {
+            batches.extend(entries);
+        }
+    }
 
     assert_eq!(summary.scanned_dirs, 2);
     assert_eq!(summary.scanned_entries, 3);
@@ -723,60 +814,105 @@ fn recursive_list_search_finds_nested_files_and_directories() -> Result<(), Stri
             .collect::<Vec<_>>(),
         vec!["/docs/album-photo", "/docs/album-photo/holiday-photo.jpg"]
     );
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].contains("path=%2Fdocs"));
+    assert!(requests[1].contains("path=%2Fdocs%2Falbum-photo"));
     Ok(())
 }
 
-#[test]
-fn current_list_search_does_not_descend_into_nested_directories() -> Result<(), String> {
-    let mut batches = Vec::new();
-
-    let summary = search_remote_by_listing_with(
+#[tokio::test]
+async fn async_current_list_search_does_not_descend_into_nested_directories(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (client, server) = list_fixture_client(vec![vec![
+        remote_entry(1, "/docs/photo-dir", true),
+        remote_entry(2, "/docs/photo.txt", false),
+    ]])
+    .await?;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+    let mut manager = crate::app::TaskManager::new();
+    let task_id = manager.enqueue_remote_operation("search");
+    let summary = run_remote_search_task(
+        client,
+        tx.clone(),
+        task_id,
         "/docs",
         "photo",
-        false,
-        None,
-        |_path| {
-            Ok(vec![
-                remote_entry(1, "/docs/photo-dir", true),
-                remote_entry(2, "/docs/photo.txt", false),
-            ])
-        },
-        |entries, _summary| {
-            batches.extend(entries);
-            true
-        },
+        RemoteSearchMode::CurrentList,
+        &CancellationToken::new(),
     )
-    .map_err(|err| err.to_string())?;
+    .await?;
+    drop(tx);
+    let server_result = tokio::time::timeout(Duration::from_secs(1), server).await?;
+    let requests = server_result??;
+    let mut batches = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        if let TransferTaskEvent::SearchBatch { entries, .. } = event {
+            batches.extend(entries);
+        }
+    }
 
     assert_eq!(summary.scanned_dirs, 1);
     assert_eq!(summary.scanned_entries, 2);
     assert_eq!(summary.matches, 2);
     assert_eq!(batches.len(), 2);
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("path=%2Fdocs"));
     Ok(())
 }
 
-#[test]
-fn dlink_range_fetch_tries_later_candidates_after_network_failure() {
-    let urls = vec![
-        "https://bad.invalid/file".to_string(),
-        "https://good.invalid/file".to_string(),
-    ];
-    let mut attempted = Vec::new();
-
-    let result = fetch_first_successful_dlink_range(&urls, |url| {
-        attempted.push(url.to_string());
-        if url.contains("bad") {
-            Err(crate::pcs::PcsError::Network {
-                operation: "download".to_string(),
-                message: "redacted".to_string(),
-            })
-        } else {
-            Ok(vec![1, 2, 3])
+#[tokio::test]
+async fn async_dlink_range_fetch_tries_later_candidates_after_network_failure(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let located_body = serde_json::to_vec(&serde_json::json!({
+        "errno": 0,
+        "urls": [
+            { "url": format!("http://{address}/bad"), "encrypt": 0 },
+            { "url": format!("http://{address}/good"), "encrypt": 0 }
+        ]
+    }))?;
+    let server = tokio::spawn(async move {
+        let mut request_lines = Vec::new();
+        for _ in 0..3 {
+            let (mut socket, _) = listener.accept().await?;
+            let request = read_test_http_request(&mut socket).await?;
+            let first_line = request.lines().next().unwrap_or_default().to_string();
+            let (status, body): (&str, &[u8]) = if first_line.contains("method=locatedownload") {
+                ("200 OK", &located_body)
+            } else if first_line.contains(" /bad ") {
+                (
+                    "502 Bad Gateway",
+                    br#"{"errno":-1,"error_msg":"fixture failure"}"#,
+                )
+            } else if first_line.contains(" /good ") {
+                ("206 Partial Content", &[1, 2, 3])
+            } else {
+                ("404 Not Found", br#"{"errno":-1}"#)
+            };
+            request_lines.push(first_line);
+            write_test_http_response(&mut socket, status, body).await?;
         }
+        Ok::<_, std::io::Error>(request_lines)
     });
+    let client = test_pcs_client(address)?;
+    let upstream = PcsVideoUpstream::new(client, "/video.mp4".to_string(), 42, "bduss".to_string());
+    let bytes = crate::app::RangeFetcher::fetch_range(
+        &upstream,
+        "/video.mp4",
+        crate::pcs::ByteRange::new(0, 2)?,
+        &CancellationToken::new(),
+    )
+    .await?;
+    let server_result = tokio::time::timeout(Duration::from_secs(1), server).await?;
+    let requests = server_result??;
 
-    assert_eq!(result, DlinkRangeAttempt::Bytes(vec![1, 2, 3]));
-    assert_eq!(attempted, urls);
+    assert_eq!(bytes, vec![1, 2, 3]);
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].contains("method=locatedownload"));
+    assert!(requests[1].contains(" /bad "));
+    assert!(requests[2].contains(" /good "));
+    Ok(())
 }
 
 #[test]

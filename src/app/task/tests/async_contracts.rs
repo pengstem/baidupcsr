@@ -1,5 +1,7 @@
-use super::super::*;
-use crate::app::{AppCommand, AppController, AppEvent};
+use crate::app::{
+    download_to_path, AppCommand, AppController, AppEvent, DownloadOutcome, DownloadSpec,
+    RangeFetcher,
+};
 use crate::pcs::{ByteRange, FileEntry, PcsError};
 use crate::preview::{PreviewKey, PreviewKind, PreviewPayload};
 use std::{
@@ -29,7 +31,7 @@ fn file(fs_id: i64, path: &str) -> FileEntry {
 
 #[test]
 fn refresh_commands_advance_directory_generation_monotonically() {
-    let mut controller = AppController::default();
+    let mut controller = AppController::new("/");
     let initial = controller.directory_generation();
     controller.dispatch(AppCommand::Refresh {
         path: "/docs".to_string(),
@@ -46,7 +48,7 @@ fn refresh_commands_advance_directory_generation_monotonically() {
 
 #[test]
 fn selection_changes_advance_preview_generation_monotonically() {
-    let mut controller = AppController::default();
+    let mut controller = AppController::new("/");
     let initial = controller.preview_generation();
     controller.dispatch(AppCommand::SelectionChanged {
         entry: Some(file(1, "/docs/a.txt")),
@@ -137,7 +139,7 @@ fn stale_preview_loaded_event_cannot_replace_current_payload() {
 
 #[test]
 fn quit_command_marks_controller_quitting_immediately() {
-    let mut controller = AppController::default();
+    let mut controller = AppController::new("/");
     assert!(!controller.is_quitting());
     controller.dispatch(AppCommand::Quit);
     assert!(controller.is_quitting());
@@ -197,7 +199,10 @@ async fn download_cancel_preserves_partial_file_and_reports_written_bytes(
         panic!("cancelled download must return DownloadOutcome::Cancelled");
     };
     assert_eq!(bytes_written, 4);
-    assert_ne!(partial_path, target);
+    assert_eq!(
+        partial_path.to_string_lossy(),
+        format!("{}.part", target.to_string_lossy())
+    );
     assert_eq!(tokio::fs::read(&partial_path).await?, vec![1; 4]);
     assert_eq!(
         progress_rx.recv().await.expect("progress event").bytes_done,

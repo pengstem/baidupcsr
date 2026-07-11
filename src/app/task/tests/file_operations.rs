@@ -1,4 +1,4 @@
-use super::super::*;
+use crate::app::{RemoteOperationPlan, RemotePathPair, TaskError, TaskKind, TaskManager};
 
 #[test]
 fn delete_plan_is_destructive_and_reports_related_directories() -> Result<(), String> {

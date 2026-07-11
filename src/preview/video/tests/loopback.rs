@@ -72,17 +72,18 @@ async fn spawn(
     chunks: usize,
     prefetch: usize,
     upstream: Arc<FakeUpstream>,
-) -> Result<(VideoLoopbackServer, CancellationToken), VideoError> {
+) -> Result<(VideoLoopbackServer, CancellationToken), String> {
     let cancel = CancellationToken::new();
     let server = VideoLoopbackServer::spawn_with_prefetch(
         content_length,
-        VideoToken::new("fixture_token_123456")?,
-        VideoCacheBudget::new(chunk_size, chunks)?,
+        VideoToken::new("fixture_token_123456").map_err(|error| format!("{error:?}"))?,
+        VideoCacheBudget::new(chunk_size, chunks).map_err(|error| format!("{error:?}"))?,
         prefetch,
         upstream,
         cancel.clone(),
     )
-    .await?;
+    .await
+    .map_err(|error| error.to_string())?;
     Ok((server, cancel))
 }
 
