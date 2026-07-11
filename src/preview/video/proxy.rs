@@ -61,7 +61,12 @@ impl PlayerLogRing {
 }
 
 pub(crate) fn sanitize_player_log_line(line: &str) -> String {
-    line.split_whitespace()
+    let normalized: String = line
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    normalized
+        .split_whitespace()
         .map(sanitize_player_log_part)
         .collect::<Vec<_>>()
         .join(" ")
