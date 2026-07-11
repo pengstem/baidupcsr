@@ -480,6 +480,7 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
         ..crate::preview::VideoProxyStats::default()
     };
     let escaped_error = "bad quote \" slash \\ line\ncontrol \u{0001}";
+    let escaped_stop_reason = "done quote \" slash \\ line\ncontrol \u{0001}";
     let elapsed = Duration::from_secs(1);
     let events = [
         format_video_bench_start(&options, &resolved, &movie, 42),
@@ -512,7 +513,14 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
             None,
         ),
         format_gateway_range_error_event(&movie, 0, 1024, elapsed, escaped_error),
-        format_gateway_summary_event(&movie, 1, BENCHMARK_BYTES as u64, elapsed, &stats, "eof"),
+        format_gateway_summary_event(
+            &movie,
+            1,
+            BENCHMARK_BYTES as u64,
+            elapsed,
+            &stats,
+            escaped_stop_reason,
+        ),
     ];
 
     for event in &events {
@@ -533,7 +541,15 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
         }
     }
 
-    assert_eq!(events[3]["error"], escaped_error);
+    let sanitized_error = events[3]["error"]
+        .as_str()
+        .ok_or_else(|| "source error field must be a string".to_string())?;
+    assert!(sanitized_error.contains("bad quote \" slash \\ line"));
+    assert!(!sanitized_error
+        .chars()
+        .any(|character| matches!(character, '\n' | '\r')));
+    assert!(!sanitized_error.chars().any(char::is_control));
+    assert_eq!(events[6]["stop_reason"], escaped_stop_reason);
     assert_eq!(events[2]["throughput_mib_s"], 1.235);
     assert_eq!(events[3]["throughput_mib_s"], 0.0);
     assert_eq!(events[4]["throughput_mib_s"], 1.235);
