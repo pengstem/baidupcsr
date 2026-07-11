@@ -326,7 +326,7 @@ fn video_bench_position_offsets_are_clamped_to_valid_ranges() {
 #[test]
 fn video_bench_parsers_accept_size_suffixes_and_positions() -> Result<(), String> {
     assert_eq!(parse_byte_size_arg("4MiB")?, 4 * 1024 * 1024);
-    assert_eq!(parse_byte_size_arg("2GiB")?, 2 * 1024 * 1024 * 1024);
+    assert_eq!(parse_byte_size_arg("2g")?, 2 * 1024 * 1024 * 1024);
 
     assert_eq!(
         parse_video_bench_positions("start,p10,90,end")?,
@@ -338,6 +338,23 @@ fn video_bench_parsers_accept_size_suffixes_and_positions() -> Result<(), String
         ]
     );
     Ok(())
+}
+
+#[test]
+fn byte_size_parser_accepts_legacy_binary_suffix_aliases() -> Result<(), String> {
+    assert_eq!(parse_byte_size_arg("2k")?, 2 * 1024);
+    assert_eq!(parse_byte_size_arg("2kb")?, 2 * 1024);
+    assert_eq!(parse_byte_size_arg("2m")?, 2 * 1024 * 1024);
+    assert_eq!(parse_byte_size_arg("2mb")?, 2 * 1024 * 1024);
+    assert_eq!(parse_byte_size_arg("2g")?, 2 * 1024 * 1024 * 1024);
+    assert_eq!(parse_byte_size_arg("2gb")?, 2 * 1024 * 1024 * 1024);
+    Ok(())
+}
+
+#[test]
+fn byte_size_parser_rejects_values_that_overflow_u64() {
+    assert!(parse_byte_size_arg("18446744073709551616").is_err());
+    assert!(parse_byte_size_arg("18446744073709551615g").is_err());
 }
 
 #[test]

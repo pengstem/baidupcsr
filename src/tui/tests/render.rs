@@ -257,11 +257,18 @@ fn ratatui_render_marquees_selected_long_wide_names_without_breaking_layout() {
         false,
     )]);
 
-    let rendered = buffer_to_text(&draw_buffer(&app, None, 64, 16));
+    let first = buffer_to_text(&draw_buffer(&app, None, 64, 16));
+    for _ in 0..24 {
+        app.advance_tick();
+    }
+    let later = buffer_to_text(&draw_buffer(&app, None, 64, 16));
 
-    assert!(rendered.contains("..."));
-    assert!(rendered.contains("Preview"));
-    assert!(rendered.contains("1/1"));
+    assert_ne!(first, later);
+    assert!(!first.contains("..."));
+    assert!(!later.contains("..."));
+    assert!(first.contains("Preview"));
+    assert!(later.contains("Preview"));
+    assert!(later.contains("1/1"));
 }
 
 #[test]
@@ -340,7 +347,7 @@ fn ratatui_render_shows_sort_menu_options() {
 }
 
 #[test]
-fn ratatui_render_truncates_preview_name_and_path() {
+fn ratatui_render_marquees_preview_name_and_path() {
     let mut app = TuiApp::new("/docs");
     app.set_entries(vec![file_with_name(
         1,
@@ -350,11 +357,17 @@ fn ratatui_render_truncates_preview_name_and_path() {
         false,
     )]);
 
-    let rendered = buffer_to_text(&draw_buffer(&app, None, 80, 18));
+    let first = buffer_to_text(&draw_buffer(&app, None, 80, 18));
+    for _ in 0..24 {
+        app.advance_tick();
+    }
+    let later = buffer_to_text(&draw_buffer(&app, None, 80, 18));
 
-    assert!(rendered.contains("Name:"));
-    assert!(rendered.contains("Path:"));
-    assert!(rendered.contains("..."));
+    assert_ne!(first, later);
+    assert!(first.contains("Name:"));
+    assert!(later.contains("Name:"));
+    assert!(first.contains("Path:"));
+    assert!(later.contains("Path:"));
 }
 
 #[test]

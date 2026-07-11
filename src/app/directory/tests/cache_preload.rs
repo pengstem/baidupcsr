@@ -54,6 +54,17 @@ fn directory_cache_store_round_trips_entries_in_cache_dir() -> Result<(), Box<dy
 }
 
 #[test]
+fn directory_cache_store_uses_stable_fnv_snapshot_filename() {
+    let store = DirectoryCacheStore::new("/tmp/baidupcsr-cache-contract");
+
+    assert_eq!(stable_path_hash("/remote/docs"), 0x4d21_26de_0d6d_a6d6);
+    assert_eq!(
+        store.snapshot_path(42, "/remote/docs"),
+        std::path::PathBuf::from("/tmp/baidupcsr-cache-contract/dir-42-4d2126de0d6da6d6.json")
+    );
+}
+
+#[test]
 fn paged_preload_planner_limits_work_to_visible_page_neighbors() {
     let entries: Vec<FileEntry> = (0..40)
         .map(|index| entry(index, &format!("/root/dir-{index:02}"), true))
