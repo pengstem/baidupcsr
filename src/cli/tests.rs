@@ -423,7 +423,8 @@ fn video_bench_test_movie() -> VideoBenchMovie {
 }
 
 #[test]
-fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
+fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() -> Result<(), serde_json::Error>
+{
     let movie = video_bench_test_movie();
     let resolved = VideoBenchResolvedOptions {
         chunk_size_bytes: 1024,
@@ -433,13 +434,14 @@ fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
     };
 
     let event = format_video_bench_start(&VideoBenchCliOptions::default(), &resolved, &movie, 42);
-    let line = serde_json::to_string(&event).expect("bench start event should serialize");
+    let line = serde_json::to_string(&event)?;
 
     assert!(event["account_hash"].is_string());
     assert!(event["movie"]["path_hash"].is_string());
     assert!(event.get("account_uid").is_none());
     assert!(!line.contains("斯巴达"));
     assert!(!line.contains("/电影"));
+    Ok(())
 }
 
 #[test]
@@ -559,14 +561,16 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
 }
 
 #[test]
-fn video_bench_redacted_events_do_not_leak_sensitive_inputs() {
+fn video_bench_redacted_events_do_not_leak_sensitive_inputs() -> Result<(), serde_json::Error> {
     let raw_path = "/电影/斯巴达300勇士.mkv";
     let raw_token = "SECRET_TOKEN_123";
     let raw_url = "https://d.pcs.baidu.com/file/private?token=SECRET_TOKEN_123";
     let movie = video_bench_test_movie();
-    let mut options = VideoBenchCliOptions::default();
-    options.remote_path = raw_path.to_string();
-    options.redact = true;
+    let options = VideoBenchCliOptions {
+        remote_path: raw_path.to_string(),
+        redact: true,
+        ..VideoBenchCliOptions::default()
+    };
     let resolved = VideoBenchResolvedOptions {
         chunk_size_bytes: 1024,
         max_chunks: 2,
@@ -603,13 +607,13 @@ fn video_bench_redacted_events_do_not_leak_sensitive_inputs() {
     let events = events
         .iter()
         .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()
-        .expect("redacted benchmark events should serialize")
+        .collect::<Result<Vec<_>, _>>()?
         .join("\n");
 
     assert!(!events.contains(raw_path));
     assert!(!events.contains(raw_token));
     assert!(!events.contains(raw_url));
+    Ok(())
 }
 
 #[test]
