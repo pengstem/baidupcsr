@@ -245,7 +245,19 @@ pub(crate) fn parse_byte_size_arg(value: &str) -> Result<u64, String> {
     if trimmed.is_empty() {
         return Err("byte size must not be empty".to_string());
     }
-    trimmed
+    let digit_count = trimmed.bytes().take_while(u8::is_ascii_digit).count();
+    if digit_count == 0 {
+        return Err(format!("invalid byte size {value}"));
+    }
+    let suffix = trimmed[digit_count..].to_ascii_lowercase();
+    let normalized = match suffix.as_str() {
+        "k" | "kb" | "kib" => format!("{} KiB", &trimmed[..digit_count]),
+        "m" | "mb" | "mib" => format!("{} MiB", &trimmed[..digit_count]),
+        "g" | "gb" | "gib" => format!("{} GiB", &trimmed[..digit_count]),
+        "" | "b" => trimmed.to_string(),
+        _ => return Err(format!("invalid byte size {value}")),
+    };
+    normalized
         .parse::<bytesize::ByteSize>()
         .map(|size| size.as_u64())
         .map_err(|_| format!("invalid byte size {value}"))

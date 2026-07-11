@@ -245,7 +245,9 @@ impl BrowserRuntime {
                     account_bduss = bduss_from_user(user);
                     match build_pcs_client(&loaded, user) {
                         Ok(c) => client = Some(c),
-                        Err(_) => startup_notice = Some("auth_error".to_string()),
+                        Err(message) => {
+                            startup_notice = Some(format!("auth_error: {message}"));
+                        }
                     }
                 } else {
                     download_dir = download_dir_for_config(&loaded);

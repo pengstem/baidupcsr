@@ -197,10 +197,12 @@ impl DirectoryCacheStore {
 }
 
 fn stable_path_hash(path: &str) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    path.hash(&mut hasher);
-    hasher.finish()
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in path.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

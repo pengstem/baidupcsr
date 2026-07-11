@@ -1,11 +1,19 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TargetOs {
+    Unix,
+    Windows,
+    Android,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ConfigDiscoveryInput {
     pub(crate) config_dir_env: Option<PathBuf>,
     pub(crate) executable_dir: PathBuf,
     pub(crate) home_dir: Option<PathBuf>,
     pub(crate) appdata_dir: Option<PathBuf>,
+    pub(crate) target_os: TargetOs,
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -20,18 +20,13 @@ pub(crate) fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> P
         return legacy_path;
     }
 
-    if cfg!(windows) {
-        input
+    match input.target_os {
+        TargetOs::Windows => input
             .appdata_dir
             .as_ref()
             .map(|path| path.join("BaiduPCS-Go").join(CONFIG_FILE_NAME))
-            .unwrap_or(legacy_path)
-    } else if cfg!(target_os = "android") {
-        PathBuf::from("/sdcard/Download")
-            .join("BaiduPCS-Go")
-            .join(CONFIG_FILE_NAME)
-    } else {
-        input
+            .unwrap_or(legacy_path),
+        TargetOs::Unix => input
             .home_dir
             .as_ref()
             .map(|path| {
@@ -39,7 +34,10 @@ pub(crate) fn discover_config_file_from_input(input: &ConfigDiscoveryInput) -> P
                     .join("BaiduPCS-Go")
                     .join(CONFIG_FILE_NAME)
             })
-            .unwrap_or(legacy_path)
+            .unwrap_or(legacy_path),
+        TargetOs::Android => PathBuf::from("/sdcard/Download")
+            .join("BaiduPCS-Go")
+            .join(CONFIG_FILE_NAME),
     }
 }
 
@@ -58,6 +56,7 @@ pub(crate) fn discovery_input_from_env(
         executable_dir,
         home_dir: env::var_os("HOME").map(PathBuf::from),
         appdata_dir: env::var_os("APPDATA").map(PathBuf::from),
+        target_os: current_target_os(),
     }
 }
 
@@ -244,5 +243,20 @@ pub(crate) fn invalid_config(path: &Path, message: &str) -> ConfigError {
 }
 
 pub(crate) fn cookie_has_key(cookies: &str, key: &str) -> bool {
-    cookies.contains(&format!("{key}="))
+    cookies.split(';').any(|item| {
+        let item = item.trim();
+        item.strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+            .is_some_and(|value| !value.is_empty())
+    })
+}
+
+pub(crate) fn current_target_os() -> TargetOs {
+    if cfg!(windows) {
+        TargetOs::Windows
+    } else if cfg!(target_os = "android") {
+        TargetOs::Android
+    } else {
+        TargetOs::Unix
+    }
 }

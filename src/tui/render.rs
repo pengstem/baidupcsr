@@ -333,7 +333,7 @@ pub(crate) fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
                 let name_width = columns.name_width;
                 let name_value = format!("{}{}", entry.server_filename, suffix);
                 let name = if selected {
-                    truncate_cells(name_value.as_str(), name_width)
+                    marquee_cells(name_value.as_str(), name_width, app.marquee_tick)
                 } else {
                     truncate_cells(name_value.as_str(), name_width)
                 };
@@ -476,12 +476,20 @@ pub(crate) fn preview_widget(
         || {
             let name_width = detail_value_width(inner_width, "Name:");
             vec![
-                detail_line("Name:", truncate_cells(title, name_width)),
+                detail_line("Name:", marquee_cells(title, name_width, app.marquee_tick)),
                 detail_line("Kind:", "none".to_string()),
                 detail_line("Cache:", app.cache_source.user_label().to_string()),
             ]
         },
-        |entry| preview_detail_lines(entry, app.cache_source, budget, inner_width),
+        |entry| {
+            preview_detail_lines(
+                entry,
+                app.cache_source,
+                budget,
+                inner_width,
+                app.marquee_tick,
+            )
+        },
     );
     lines.push(Line::raw("").style(surface_style()));
     if budget.kind == PreviewKind::Video && !app.preview_lines.is_empty() {
@@ -555,6 +563,7 @@ pub(crate) fn preview_detail_lines(
     source: CacheSource,
     budget: PreviewStatus,
     inner_width: usize,
+    marquee_tick: u64,
 ) -> Vec<Line<'static>> {
     let item_type = if entry.is_dir { "directory" } else { "file" };
     let action = if entry.is_dir {
@@ -569,14 +578,17 @@ pub(crate) fn preview_detail_lines(
     vec![
         detail_line(
             "Name:",
-            truncate_cells(entry.server_filename.as_str(), name_width),
+            marquee_cells(entry.server_filename.as_str(), name_width, marquee_tick),
         ),
         detail_line("Kind:", format!("{item_type} · {}", budget.kind.label())),
         detail_line("Size:", file_size_label(entry)),
         detail_line("Modified:", modified_time_label(entry.mtime)),
         detail_line("Cache:", source.user_label().to_string()),
         detail_line("ID:", entry.fs_id.to_string()),
-        detail_line("Path:", truncate_cells(entry.path.as_str(), path_width)),
+        detail_line(
+            "Path:",
+            marquee_cells(entry.path.as_str(), path_width, marquee_tick),
+        ),
         detail_line("Action:", action.to_string()),
     ]
 }
@@ -1178,5 +1190,73 @@ pub(crate) fn truncate_cells(value: &str, max_width: usize) -> String {
         used += width;
     }
     output.push_str("...");
+    output
+}
+
+pub(crate) fn marquee_cells(value: &str, max_width: usize, tick: u64) -> String {
+    let width = UnicodeWidthStr::width(value);
+    if width <= max_width {
+        return value.to_string();
+    }
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let offset = marquee_offset(width, max_width, tick);
+    cell_window(value, offset, max_width)
+}
+
+pub(crate) fn marquee_offset(width: usize, max_width: usize, tick: u64) -> usize {
+    let overflow = width.saturating_sub(max_width);
+    if overflow == 0 {
+        return 0;
+    }
+
+    let speed = 1 + (overflow / 32).min(4);
+    let move_ticks = overflow.div_ceil(speed).max(1) as u64;
+    let pause = MARQUEE_EDGE_PAUSE_TICKS;
+    let cycle = pause
+        .saturating_add(move_ticks)
+        .saturating_add(pause)
+        .saturating_add(move_ticks);
+    let mut phase = tick % cycle.max(1);
+    if phase < pause {
+        return 0;
+    }
+    phase = phase.saturating_sub(pause);
+    if phase < move_ticks {
+        return (phase as usize).saturating_mul(speed).min(overflow);
+    }
+    phase = phase.saturating_sub(move_ticks);
+    if phase < pause {
+        return overflow;
+    }
+    phase = phase.saturating_sub(pause);
+    overflow.saturating_sub((phase as usize).saturating_mul(speed).min(overflow))
+}
+
+pub(crate) fn cell_window(value: &str, start: usize, max_width: usize) -> String {
+    if max_width == 0 {
+        return String::new();
+    }
+
+    let mut output = String::new();
+    let mut cursor: usize = 0;
+    let mut used: usize = 0;
+    for ch in value.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        let next_cursor = cursor.saturating_add(width);
+        if width > 0 && next_cursor <= start {
+            cursor = next_cursor;
+            continue;
+        }
+        if used.saturating_add(width) > max_width {
+            break;
+        }
+        output.push(ch);
+        used = used.saturating_add(width);
+        cursor = next_cursor;
+    }
+
     output
 }
