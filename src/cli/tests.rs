@@ -432,11 +432,12 @@ fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
         memory_limit_bytes: 2048,
     };
 
-    let line = format_video_bench_start(&VideoBenchCliOptions::default(), &resolved, &movie, 42);
+    let event = format_video_bench_start(&VideoBenchCliOptions::default(), &resolved, &movie, 42);
+    let line = serde_json::to_string(&event).expect("bench start event should serialize");
 
-    assert!(line.contains("\"account_hash\""));
-    assert!(line.contains("\"path_hash\""));
-    assert!(!line.contains("account_uid"));
+    assert!(event["account_hash"].is_string());
+    assert!(event["movie"]["path_hash"].is_string());
+    assert!(event.get("account_uid").is_none());
     assert!(!line.contains("斯巴达"));
     assert!(!line.contains("/电影"));
 }
@@ -480,7 +481,7 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
     };
     let escaped_error = "bad quote \" slash \\ line\ncontrol \u{0001}";
     let elapsed = Duration::from_secs(1);
-    let lines = [
+    let events = [
         format_video_bench_start(&options, &resolved, &movie, 42),
         format_video_bench_end(&options),
         format_source_range_event(
@@ -514,38 +515,30 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
         format_gateway_summary_event(&movie, 1, BENCHMARK_BYTES as u64, elapsed, &stats, "eof"),
     ];
 
-    for line in &lines {
+    for event in &events {
+        if !event.is_object() {
+            return Err(format!("event must be a JSON object: {event:?}"));
+        }
+        let line = serde_json::to_string(event).map_err(|error| error.to_string())?;
         if line
             .chars()
             .any(|character| matches!(character, '\n' | '\r'))
         {
             return Err(format!("event contains a literal line break: {line:?}"));
         }
-        let value: serde_json::Value = serde_json::from_str(line)
-            .map_err(|error| format!("event is not valid JSON: {error}: {line:?}"))?;
-        if !value.is_object() {
-            return Err(format!("event must be a JSON object: {line:?}"));
-        }
-        if let Some(throughput) = value.get("throughput_mib_s") {
+        if let Some(throughput) = event.get("throughput_mib_s") {
             if !throughput.is_number() {
                 return Err(format!("throughput must be numeric: {line:?}"));
             }
         }
     }
 
-    let error_event: serde_json::Value =
-        serde_json::from_str(&lines[3]).map_err(|error| error.to_string())?;
-    assert_eq!(error_event["error"], escaped_error);
-    let throughput_values = lines
-        .iter()
-        .map(|line| serde_json::from_str::<serde_json::Value>(line))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    assert_eq!(throughput_values[2]["throughput_mib_s"], 1.235);
-    assert_eq!(throughput_values[3]["throughput_mib_s"], 0.0);
-    assert_eq!(throughput_values[4]["throughput_mib_s"], 1.235);
-    assert_eq!(throughput_values[5]["throughput_mib_s"], 0.0);
-    assert_eq!(throughput_values[6]["throughput_mib_s"], 1.235);
+    assert_eq!(events[3]["error"], escaped_error);
+    assert_eq!(events[2]["throughput_mib_s"], 1.235);
+    assert_eq!(events[3]["throughput_mib_s"], 0.0);
+    assert_eq!(events[4]["throughput_mib_s"], 1.235);
+    assert_eq!(events[5]["throughput_mib_s"], 0.0);
+    assert_eq!(events[6]["throughput_mib_s"], 1.235);
     Ok(())
 }
 
@@ -590,8 +583,13 @@ fn video_bench_redacted_events_do_not_leak_sensitive_inputs() {
             sensitive_error.as_str(),
         ),
         format_gateway_summary_event(&movie, 0, 0, Duration::from_millis(1), &stats, "error"),
-    ]
-    .join("\n");
+    ];
+    let events = events
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("redacted benchmark events should serialize")
+        .join("\n");
 
     assert!(!events.contains(raw_path));
     assert!(!events.contains(raw_token));
