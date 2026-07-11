@@ -20,12 +20,20 @@ struct FakeUpstream {
     max_active: AtomicUsize,
     ranges: Mutex<Vec<VideoRange>>,
     delay: Duration,
+    response_len: Option<usize>,
 }
 
 impl FakeUpstream {
     fn with_delay(delay: Duration) -> Self {
         Self {
             delay,
+            ..Self::default()
+        }
+    }
+
+    fn with_response_len(response_len: usize) -> Self {
+        Self {
+            response_len: Some(response_len),
             ..Self::default()
         }
     }
@@ -66,6 +74,9 @@ impl VideoUpstream for FakeUpstream {
                 }
             }
             self.active.fetch_sub(1, Ordering::AcqRel);
+            if let Some(response_len) = self.response_len {
+                return Ok(vec![0x5a; response_len]);
+            }
             Ok((range.start..=range.end_inclusive)
                 .map(|offset| u8::try_from(offset % 251).unwrap_or_default())
                 .collect())
@@ -148,6 +159,34 @@ async fn wait_for_fetches(
         }
     })
     .await
+}
+
+async fn assert_malformed_upstream_returns_bad_gateway(
+    response_len: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let upstream = Arc::new(FakeUpstream::with_response_len(response_len));
+    let (server, _) = spawn(4096, 64, 2, 0, upstream).await?;
+    let response = raw_http(server.local_url(), "GET", Some("bytes=0-63")).await?;
+    let response_header = header(&response)?;
+
+    assert!(response_header.contains("502 Bad Gateway"));
+    assert!(response_header.contains("Content-Length: 0"));
+    assert!(!response_header.contains("Content-Range:"));
+    assert!(body(&response)?.is_empty());
+    server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn loopback_server_returns_clean_502_for_short_upstream_body(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_malformed_upstream_returns_bad_gateway(63).await
+}
+
+#[tokio::test]
+async fn loopback_server_returns_clean_502_for_long_upstream_body(
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_malformed_upstream_returns_bad_gateway(65).await
 }
 
 #[tokio::test]

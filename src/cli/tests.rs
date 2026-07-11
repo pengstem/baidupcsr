@@ -119,6 +119,19 @@ async fn write_test_http_response(
     socket.write_all(body).await
 }
 
+async fn write_test_range_response(
+    socket: &mut TcpStream,
+    range: &str,
+    body: &[u8],
+) -> std::io::Result<()> {
+    let header = format!(
+        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: {range}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    socket.write_all(header.as_bytes()).await?;
+    socket.write_all(body).await
+}
+
 async fn list_fixture_client(
     responses: Vec<Vec<FileEntry>>,
 ) -> Result<
@@ -890,8 +903,13 @@ async fn async_dlink_range_fetch_tries_later_candidates_after_network_failure(
             } else {
                 ("404 Not Found", br#"{"errno":-1}"#)
             };
+            let is_good_range = first_line.contains(" /good ");
             request_lines.push(first_line);
-            write_test_http_response(&mut socket, status, body).await?;
+            if is_good_range {
+                write_test_range_response(&mut socket, "bytes 0-2/3", body).await?;
+            } else {
+                write_test_http_response(&mut socket, status, body).await?;
+            }
         }
         Ok::<_, std::io::Error>(request_lines)
     });
