@@ -60,17 +60,6 @@ pub trait RangeFetcher: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, PcsError>> + Send + 'a>>;
 }
 
-impl RangeFetcher for crate::pcs::PcsClient {
-    fn fetch_range<'a>(
-        &'a self,
-        path: &'a str,
-        range: ByteRange,
-        cancel: &'a CancellationToken,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, PcsError>> + Send + 'a>> {
-        Box::pin(self.download_range(path, range, cancel))
-    }
-}
-
 pub async fn download_to_path<F: RangeFetcher>(
     fetcher: &F,
     spec: &DownloadSpec,

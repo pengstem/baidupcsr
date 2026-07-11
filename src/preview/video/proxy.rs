@@ -92,12 +92,6 @@ pub(crate) fn is_sensitive_log_key(key: &str) -> bool {
         )
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum MpvLaunchProfile {
-    User,
-    Isolated,
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct VideoPreviewSession {
     pub(crate) key: PreviewKey,
@@ -131,16 +125,19 @@ impl VideoPreviewSession {
         )
     }
 
-    pub(crate) fn mpv_args_with_profile(&self, profile: MpvLaunchProfile) -> Vec<String> {
+    pub(crate) fn mpv_args_with_profile(
+        &self,
+        profile: crate::config::VideoPlayerProfile,
+    ) -> Vec<String> {
         let mut args = match profile {
-            MpvLaunchProfile::User => vec![
+            crate::config::VideoPlayerProfile::User => vec![
                 "--no-terminal".to_string(),
                 "--cache-on-disk=no".to_string(),
                 "--cache=yes".to_string(),
                 "--cache-pause=no".to_string(),
                 "--demuxer-readahead-secs=20".to_string(),
             ],
-            MpvLaunchProfile::Isolated => vec![
+            crate::config::VideoPlayerProfile::Isolated => vec![
                 "--no-config".to_string(),
                 "--load-scripts=no".to_string(),
                 "--osc=no".to_string(),
@@ -154,7 +151,7 @@ impl VideoPreviewSession {
             "--demuxer-max-back-bytes=0".to_string(),
             "--force-window=immediate".to_string(),
         ]);
-        if profile == MpvLaunchProfile::Isolated {
+        if profile == crate::config::VideoPlayerProfile::Isolated {
             args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
         }
         args.extend([
@@ -280,7 +277,7 @@ impl VideoLoopbackServer {
 
     pub fn mpv_args_with_profile(
         &self,
-        profile: MpvLaunchProfile,
+        profile: crate::config::VideoPlayerProfile,
     ) -> Result<Vec<String>, VideoError> {
         Ok(self.session.mpv_args_with_profile(profile))
     }

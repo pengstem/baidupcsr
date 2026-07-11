@@ -48,48 +48,6 @@ pub enum PreviewAction {
     MetadataOnly,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PreviewPayload {
-    Text {
-        content: String,
-        status: PreviewStatus,
-    },
-    Image {
-        metadata: ImagePreviewMetadata,
-        status: PreviewStatus,
-    },
-    Metadata {
-        kind: PreviewKind,
-        reason: String,
-    },
-}
-
-impl PreviewPayload {
-    pub fn text(content: impl Into<String>, status: PreviewStatus) -> Self {
-        Self::Text {
-            content: content.into(),
-            status,
-        }
-    }
-
-    pub fn metadata(kind: PreviewKind, reason: impl Into<String>) -> Self {
-        Self::Metadata {
-            kind,
-            reason: reason.into(),
-        }
-    }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum PreviewError {
-    #[error("preview request was cancelled")]
-    Cancelled,
-    #[error(transparent)]
-    Pcs(#[from] crate::pcs::PcsError),
-    #[error("preview data is invalid: {message}")]
-    InvalidData { message: String },
-}
-
 pub struct PreviewPlan {
     pub kind: PreviewKind,
     pub action: PreviewAction,

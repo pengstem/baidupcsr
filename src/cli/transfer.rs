@@ -262,15 +262,6 @@ pub(crate) fn default_video_prefetch_chunks(max_chunks: usize) -> usize {
     max_chunks.saturating_sub(1).min(VIDEO_PREFETCH_CHUNK_LIMIT)
 }
 
-pub(crate) const fn mpv_profile_from_config(
-    profile: crate::config::VideoPlayerProfile,
-) -> crate::preview::MpvLaunchProfile {
-    match profile {
-        crate::config::VideoPlayerProfile::User => crate::preview::MpvLaunchProfile::User,
-        crate::config::VideoPlayerProfile::Isolated => crate::preview::MpvLaunchProfile::Isolated,
-    }
-}
-
 pub(crate) fn active_player_log_line(log: &Arc<Mutex<crate::preview::PlayerLogRing>>) -> String {
     match log
         .lock()

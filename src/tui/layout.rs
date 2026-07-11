@@ -152,7 +152,7 @@ pub(crate) fn proportional_position(value: usize, max_value: usize, max_input: u
         as usize
 }
 
-pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewBudget>) {
+pub fn render_app(frame: &mut Frame<'_>, app: &TuiApp, preview: Option<PreviewStatus>) {
     frame.render_widget(Block::new().style(surface_style()), frame.area());
 
     let layout = full_layout(frame.area(), !app.task_items.is_empty());

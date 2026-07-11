@@ -51,7 +51,7 @@ pub(crate) fn parse_remote_command(
                 .ok_or_else(|| "copy requires a target directory".to_string())?;
             let pairs = command_target_paths_or_args(app, &args)?
                 .into_iter()
-                .map(|path| crate::app::RemotePathPair {
+                .map(|path| crate::pcs::FileOperationPair {
                     to: join_remote_path(
                         resolve_remote_path(app.path(), target_dir).as_str(),
                         remote_file_name(path.as_str()).as_str(),
@@ -69,7 +69,7 @@ pub(crate) fn parse_remote_command(
                 .ok_or_else(|| "move requires a target directory".to_string())?;
             let pairs = command_target_paths_or_args(app, &args)?
                 .into_iter()
-                .map(|path| crate::app::RemotePathPair {
+                .map(|path| crate::pcs::FileOperationPair {
                     to: join_remote_path(
                         resolve_remote_path(app.path(), target_dir).as_str(),
                         remote_file_name(path.as_str()).as_str(),
@@ -191,33 +191,15 @@ pub(crate) async fn execute_remote_operation(
                 .await
                 .map_err(|err| pcs_error_label(&err))
         }
-        crate::app::RemoteOperationKind::Copy { pairs } => {
-            let pairs = pcs_operation_pairs(pairs);
-            client
-                .copy_paths(&pairs, cancel)
-                .await
-                .map_err(|err| pcs_error_label(&err))
-        }
-        crate::app::RemoteOperationKind::Move { pairs } => {
-            let pairs = pcs_operation_pairs(pairs);
-            client
-                .move_paths(&pairs, cancel)
-                .await
-                .map_err(|err| pcs_error_label(&err))
-        }
+        crate::app::RemoteOperationKind::Copy { pairs } => client
+            .copy_paths(pairs, cancel)
+            .await
+            .map_err(|err| pcs_error_label(&err)),
+        crate::app::RemoteOperationKind::Move { pairs } => client
+            .move_paths(pairs, cancel)
+            .await
+            .map_err(|err| pcs_error_label(&err)),
     }
-}
-
-pub(crate) fn pcs_operation_pairs(
-    pairs: &[crate::app::RemotePathPair],
-) -> Vec<crate::pcs::FileOperationPair> {
-    pairs
-        .iter()
-        .map(|pair| crate::pcs::FileOperationPair {
-            from: pair.from.clone(),
-            to: pair.to.clone(),
-        })
-        .collect()
 }
 
 pub(crate) fn resolve_remote_path(current_dir: &str, path: &str) -> String {
@@ -354,16 +336,6 @@ pub(crate) fn preview_key_for_entry(
 
 pub(crate) fn nonnegative_size(size: i64) -> u64 {
     u64::try_from(size).unwrap_or(0)
-}
-
-pub(crate) const fn preview_budget_from_status(
-    status: crate::preview::PreviewStatus,
-) -> crate::tui::PreviewBudget {
-    crate::tui::PreviewBudget {
-        kind: status.kind,
-        fetched_bytes: status.fetched_bytes,
-        memory_limit_bytes: status.memory_limit_bytes,
-    }
 }
 
 pub(crate) fn pcs_user_agent_for_config(config: &crate::config::PcsConfig) -> &str {

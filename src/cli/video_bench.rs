@@ -542,7 +542,7 @@ pub(crate) fn loopback_request_path(
     server: &crate::preview::VideoLoopbackServer,
 ) -> Result<String, String> {
     let args = server
-        .mpv_args_with_profile(crate::preview::MpvLaunchProfile::Isolated)
+        .mpv_args_with_profile(crate::config::VideoPlayerProfile::Isolated)
         .map_err(|err| format!("video_loopback_url_error: {err:?}"))?;
     let url = args
         .iter()

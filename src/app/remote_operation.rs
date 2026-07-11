@@ -1,18 +1,23 @@
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemotePathPair {
-    pub from: String,
-    pub to: String,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RemoteOperationKind {
-    Mkdir { path: String },
-    Delete { paths: Vec<String> },
-    Rename { from: String, to: String },
-    Copy { pairs: Vec<RemotePathPair> },
-    Move { pairs: Vec<RemotePathPair> },
+    Mkdir {
+        path: String,
+    },
+    Delete {
+        paths: Vec<String>,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
+    Copy {
+        pairs: Vec<crate::pcs::FileOperationPair>,
+    },
+    Move {
+        pairs: Vec<crate::pcs::FileOperationPair>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,11 +64,11 @@ impl RemoteOperationPlan {
         })
     }
 
-    pub fn copy(pairs: Vec<RemotePathPair>) -> Result<Self, String> {
+    pub fn copy(pairs: Vec<crate::pcs::FileOperationPair>) -> Result<Self, String> {
         Self::copy_or_move("copy", pairs, false)
     }
 
-    pub fn move_paths(pairs: Vec<RemotePathPair>) -> Result<Self, String> {
+    pub fn move_paths(pairs: Vec<crate::pcs::FileOperationPair>) -> Result<Self, String> {
         Self::copy_or_move("move", pairs, true)
     }
 
@@ -95,7 +100,7 @@ impl RemoteOperationPlan {
 
     fn copy_or_move(
         label: &'static str,
-        pairs: Vec<RemotePathPair>,
+        pairs: Vec<crate::pcs::FileOperationPair>,
         is_move: bool,
     ) -> Result<Self, String> {
         let pairs = normalize_nonempty_pairs(pairs)?;
@@ -132,14 +137,16 @@ fn normalize_nonempty_paths(paths: Vec<String>) -> Result<Vec<String>, String> {
         .collect()
 }
 
-fn normalize_nonempty_pairs(pairs: Vec<RemotePathPair>) -> Result<Vec<RemotePathPair>, String> {
+fn normalize_nonempty_pairs(
+    pairs: Vec<crate::pcs::FileOperationPair>,
+) -> Result<Vec<crate::pcs::FileOperationPair>, String> {
     if pairs.is_empty() {
         return Err("operation requires at least one remote path pair".to_string());
     }
     pairs
         .into_iter()
         .map(|pair| {
-            Ok(RemotePathPair {
+            Ok(crate::pcs::FileOperationPair {
                 from: normalize_remote_path(pair.from.as_str())?,
                 to: normalize_remote_path(pair.to.as_str())?,
             })

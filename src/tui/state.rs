@@ -302,7 +302,7 @@ pub struct TuiApp {
     pub(crate) cache_source: CacheSource,
     pub(crate) preview_title: String,
     pub(crate) preview_lines: Vec<String>,
-    pub(crate) preview_budget: PreviewBudget,
+    pub(crate) preview_budget: PreviewStatus,
     pub(crate) task_items: Vec<TaskPanelItem>,
     pub(crate) task_speed_history: BTreeMap<u64, Vec<u64>>,
     pub(crate) preload_lines: Vec<String>,
@@ -620,7 +620,7 @@ impl TuiApp {
         self.preview_scroll_offset = 0;
     }
 
-    pub fn finish_preview_text(&mut self, title: &str, content: &str, budget: PreviewBudget) {
+    pub fn finish_preview_text(&mut self, title: &str, content: &str, budget: PreviewStatus) {
         self.preview_title = title.to_string();
         self.preview_lines = content.lines().map(str::to_string).collect();
         self.preview_budget = budget;
@@ -632,11 +632,11 @@ impl TuiApp {
         title: &str,
         kind: PreviewKind,
         reason: impl Into<String>,
-        budget: PreviewBudget,
+        budget: PreviewStatus,
     ) {
         self.preview_title = title.to_string();
         self.preview_lines = vec![format!("metadata: {}", reason.into())];
-        self.preview_budget = PreviewBudget { kind, ..budget };
+        self.preview_budget = PreviewStatus { kind, ..budget };
         self.preview_scroll_offset = 0;
     }
 
@@ -647,10 +647,10 @@ impl TuiApp {
         self.preview_scroll_offset = 0;
     }
 
-    pub fn finish_preview_video(&mut self, title: &str, lines: Vec<String>, budget: PreviewBudget) {
+    pub fn finish_preview_video(&mut self, title: &str, lines: Vec<String>, budget: PreviewStatus) {
         self.preview_title = title.to_string();
         self.preview_lines = lines;
-        self.preview_budget = PreviewBudget {
+        self.preview_budget = PreviewStatus {
             kind: PreviewKind::Video,
             ..budget
         };
@@ -661,11 +661,11 @@ impl TuiApp {
         &mut self,
         title: &str,
         lines: Vec<String>,
-        budget: PreviewBudget,
+        budget: PreviewStatus,
     ) {
         self.preview_title = title.to_string();
         self.preview_lines = lines;
-        self.preview_budget = PreviewBudget {
+        self.preview_budget = PreviewStatus {
             kind: PreviewKind::Image,
             ..budget
         };

@@ -456,7 +456,7 @@ pub(crate) fn files_widget(app: &TuiApp, area: Rect) -> Table<'_> {
 
 pub(crate) fn preview_widget(
     app: &TuiApp,
-    preview: Option<PreviewBudget>,
+    preview: Option<PreviewStatus>,
     area: Rect,
 ) -> Paragraph<'_> {
     let inner = inner_rect(area);
@@ -531,7 +531,7 @@ pub(crate) fn preview_widget(
 pub(crate) fn render_preview_pane(
     frame: &mut Frame<'_>,
     app: &TuiApp,
-    preview: Option<PreviewBudget>,
+    preview: Option<PreviewStatus>,
     area: Rect,
 ) {
     frame.render_widget(preview_widget(app, preview, area), area);
@@ -561,7 +561,7 @@ pub(crate) fn render_preview_pane(
 pub(crate) fn preview_detail_lines(
     entry: &FileEntry,
     source: CacheSource,
-    budget: PreviewBudget,
+    budget: PreviewStatus,
     inner_width: usize,
     marquee_tick: u64,
 ) -> Vec<Line<'static>> {
@@ -593,8 +593,8 @@ pub(crate) fn preview_detail_lines(
     ]
 }
 
-pub(crate) fn default_preview_budget() -> PreviewBudget {
-    PreviewBudget {
+pub(crate) fn default_preview_budget() -> PreviewStatus {
+    PreviewStatus {
         kind: PreviewKind::Metadata,
         fetched_bytes: 0,
         memory_limit_bytes: 16 * 1024 * 1024,
@@ -1267,11 +1267,4 @@ pub(crate) fn cell_window(value: &str, start: usize, max_width: usize) -> String
     }
 
     output
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PreviewBudget {
-    pub kind: PreviewKind,
-    pub fetched_bytes: u64,
-    pub memory_limit_bytes: u64,
 }

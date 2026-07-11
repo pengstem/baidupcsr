@@ -51,7 +51,6 @@ pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
 }
 
 pub(crate) struct BrowserRuntime {
-    pub(crate) controller: crate::app::AppController,
     pub(crate) client: Option<crate::pcs::PcsClient>,
     pub(crate) account_uid: u64,
     pub(crate) account_bduss: Option<String>,
@@ -89,14 +88,12 @@ pub(crate) struct BrowserRuntime {
 }
 
 pub(crate) struct DirectoryLoadResult {
-    pub(crate) app_generation: Option<crate::app::Generation>,
     pub(crate) generation: crate::app::RefreshGeneration,
     pub(crate) path: String,
     pub(crate) result: Result<Vec<crate::pcs::FileEntry>, crate::pcs::PcsError>,
 }
 
 pub(crate) struct PreviewLoadResult {
-    pub(crate) app_generation: Option<crate::app::Generation>,
     pub(crate) request: crate::preview::PreviewRequest,
     pub(crate) kind: PreviewFetchKind,
     pub(crate) title: String,
@@ -112,7 +109,6 @@ pub(crate) struct PreviewLoadJob {
     pub(crate) fetch_bytes: u64,
     pub(crate) preview_epoch: u64,
     pub(crate) cancel: tokio_util::sync::CancellationToken,
-    pub(crate) app_generation: Option<crate::app::Generation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,21 +174,6 @@ pub(crate) enum TransferTaskEvent {
     },
 }
 
-impl TransferTaskEvent {
-    pub(crate) const fn task_id(&self) -> crate::app::TaskId {
-        match self {
-            Self::Progress { id, .. }
-            | Self::Completed { id, .. }
-            | Self::Failed { id, .. }
-            | Self::Cancelled { id, .. }
-            | Self::RemoteCompleted { id, .. }
-            | Self::RemoteFailed { id, .. }
-            | Self::SearchBatch { id, .. }
-            | Self::SearchCompleted { id, .. } => *id,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ParsedRemoteCommand {
     Operation(crate::app::RemoteOperationPlan),
@@ -247,7 +228,6 @@ impl BrowserRuntime {
             Ok(config) => config,
             Err(err) => {
                 return Self {
-                    controller: crate::app::AppController::new("/"),
                     client: None,
                     account_uid: 0,
                     account_bduss: None,
@@ -290,7 +270,6 @@ impl BrowserRuntime {
 
         let Some(user) = config.active_user() else {
             return Self {
-                controller: crate::app::AppController::new("/"),
                 client: None,
                 account_uid: 0,
                 account_bduss: None,
@@ -341,8 +320,6 @@ impl BrowserRuntime {
 
         match client {
             Ok(client) => Self {
-                controller: crate::app::AppController::new(initial_path.clone())
-                    .with_account_uid(user.uid),
                 client: Some(client),
                 account_uid: user.uid,
                 account_bduss,
@@ -379,8 +356,6 @@ impl BrowserRuntime {
                 shutdown_complete: false,
             },
             Err(message) => Self {
-                controller: crate::app::AppController::new(initial_path.clone())
-                    .with_account_uid(user.uid),
                 client: None,
                 account_uid: user.uid,
                 account_bduss,
@@ -430,11 +405,7 @@ impl BrowserRuntime {
     }
 
     pub(crate) async fn shutdown(&mut self) {
-        for effect in self.controller.dispatch(crate::app::AppCommand::Quit) {
-            if effect == crate::app::AppEffect::Shutdown {
-                self.root.cancel();
-            }
-        }
+        self.root.cancel();
         if let Some(cancel) = self.directory_cancellation.take() {
             cancel.cancel();
         }
@@ -471,7 +442,6 @@ impl BrowserRuntime {
     ) {
         match event {
             crate::tui::TuiRuntimeEvent::Tick => {
-                let _ = self.controller.dispatch(crate::app::AppCommand::Tick);
                 self.reap_finished_tasks();
                 self.drain_directory_results(app);
                 self.drain_preview_results(app);
@@ -728,7 +698,9 @@ impl BrowserRuntime {
         path: String,
         preferred_selection_path: Option<&str>,
     ) {
-        let app_generation = self.begin_directory_command(path.as_str());
+        if let Some(cancel) = self.directory_cancellation.take() {
+            cancel.cancel();
+        }
         self.cancel_preview_load();
         self.stop_active_video();
         self.current_path.clone_from(&path);
@@ -742,16 +714,6 @@ impl BrowserRuntime {
         app.begin_preview(path.as_str(), "directory loading");
 
         let Some(client) = self.client.clone() else {
-            let error = crate::pcs::PcsError::Network {
-                operation: "list".to_string(),
-                message: "client unavailable".to_string(),
-            };
-            self.controller
-                .reduce(crate::app::AppEvent::DirectoryLoaded {
-                    generation: app_generation,
-                    path: path.clone(),
-                    result: Err(error),
-                });
             let view = self.cache.snapshot(path.as_str());
             app.finish_directory_error(
                 path.as_str(),
@@ -765,30 +727,9 @@ impl BrowserRuntime {
 
         let cancel = self.root.child_token();
         self.directory_cancellation = Some(cancel.clone());
-        self.spawn_directory_load(client, path, view.generation, Some(app_generation), cancel);
+        self.spawn_directory_load(client, path, view.generation, cancel);
         app.set_background_tasks(self.inflight);
         self.prefetch_visible_page(app);
-    }
-
-    pub(crate) fn begin_directory_command(&mut self, path: &str) -> crate::app::Generation {
-        let effects = self.controller.dispatch(crate::app::AppCommand::Refresh {
-            path: path.to_string(),
-        });
-        let mut generation = self.controller.directory_generation();
-        for effect in effects {
-            match effect {
-                crate::app::AppEffect::CancelDirectory => {
-                    if let Some(cancel) = self.directory_cancellation.take() {
-                        cancel.cancel();
-                    }
-                }
-                crate::app::AppEffect::LoadDirectory {
-                    generation: next, ..
-                } => generation = next,
-                _ => {}
-            }
-        }
-        generation
     }
 
     pub(crate) fn prefetch_visible_page(&mut self, app: &mut crate::tui::TuiApp) {
@@ -838,7 +779,7 @@ impl BrowserRuntime {
         };
         let generation = self.cache.begin_refresh(path.as_str());
         let cancel = self.root.child_token();
-        self.spawn_directory_load(client, path, generation, None, cancel);
+        self.spawn_directory_load(client, path, generation, cancel);
         app.set_background_tasks(self.inflight);
     }
 
@@ -887,7 +828,6 @@ impl BrowserRuntime {
             fetch_bytes,
             preview_epoch,
             cancel,
-            app_generation: None,
         });
     }
 
@@ -896,7 +836,6 @@ impl BrowserRuntime {
         client: crate::pcs::PcsClient,
         path: String,
         generation: crate::app::RefreshGeneration,
-        app_generation: Option<crate::app::Generation>,
         cancel: tokio_util::sync::CancellationToken,
     ) {
         self.inflight = self.inflight.saturating_add(1);
@@ -905,7 +844,6 @@ impl BrowserRuntime {
             let result = client.list(path.as_str(), &cancel).await;
             let _ = tx
                 .send(DirectoryLoadResult {
-                    app_generation,
                     generation,
                     path,
                     result,
@@ -918,14 +856,6 @@ impl BrowserRuntime {
         while let Ok(result) = self.rx.try_recv() {
             self.inflight = self.inflight.saturating_sub(1);
             let path = result.path;
-            if let Some(generation) = result.app_generation {
-                self.controller
-                    .reduce(crate::app::AppEvent::DirectoryLoaded {
-                        generation,
-                        path: path.clone(),
-                        result: result.result.clone(),
-                    });
-            }
             match result.result {
                 Ok(entries) => {
                     let entries_for_store = entries.clone();
@@ -978,7 +908,8 @@ impl BrowserRuntime {
 
     pub(crate) fn update_preview_for_selection(&mut self, app: &mut crate::tui::TuiApp) {
         let selected = app.selected_entry().cloned();
-        let app_generation = self.begin_preview_command(selected.clone());
+        self.cancel_preview_load();
+        self.preview_cancellation = selected.as_ref().map(|_| self.root.child_token());
         let preview_epoch = self
             .preview_epoch
             .fetch_add(1, Ordering::AcqRel)
@@ -996,7 +927,7 @@ impl BrowserRuntime {
             size,
             PREVIEW_MEMORY_LIMIT_BYTES,
         );
-        let budget = crate::tui::PreviewBudget {
+        let budget = crate::preview::PreviewStatus {
             kind: plan.kind,
             fetched_bytes: 0,
             memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
@@ -1012,18 +943,10 @@ impl BrowserRuntime {
                 entry.server_filename.as_str(),
                 crate::preview::PreviewKind::Video,
                 reason,
-                crate::tui::PreviewBudget {
+                crate::preview::PreviewStatus {
                     kind: crate::preview::PreviewKind::Video,
                     ..budget
                 },
-            );
-            self.reduce_preview_payload(
-                app_generation,
-                preview_key_for_entry(self.account_uid, &entry),
-                crate::preview::PreviewPayload::metadata(
-                    crate::preview::PreviewKind::Video,
-                    reason,
-                ),
             );
             return;
         }
@@ -1041,60 +964,13 @@ impl BrowserRuntime {
                     reason.as_str(),
                     budget,
                 );
-                self.reduce_preview_payload(
-                    app_generation,
-                    preview_key_for_entry(self.account_uid, &entry),
-                    crate::preview::PreviewPayload::metadata(plan.kind, reason),
-                );
             }
             crate::preview::PreviewAction::FetchText => {
-                self.start_text_preview_load(app, entry, size, preview_epoch, app_generation);
+                self.start_text_preview_load(app, entry, size, preview_epoch);
             }
             crate::preview::PreviewAction::FetchImageMetadata => {
-                self.start_image_metadata_preview_load(
-                    app,
-                    entry,
-                    size,
-                    preview_epoch,
-                    app_generation,
-                );
+                self.start_image_metadata_preview_load(app, entry, size, preview_epoch);
             }
-        }
-    }
-
-    pub(crate) fn begin_preview_command(
-        &mut self,
-        entry: Option<crate::pcs::FileEntry>,
-    ) -> Option<crate::app::Generation> {
-        let effects = self
-            .controller
-            .dispatch(crate::app::AppCommand::SelectionChanged { entry });
-        let mut generation = None;
-        for effect in effects {
-            match effect {
-                crate::app::AppEffect::CancelPreview => self.cancel_preview_load(),
-                crate::app::AppEffect::LoadPreview {
-                    generation: next, ..
-                } => generation = Some(next),
-                _ => {}
-            }
-        }
-        self.preview_cancellation = generation.map(|_| self.root.child_token());
-        generation
-    }
-
-    pub(crate) fn reduce_preview_payload(
-        &mut self,
-        generation: Option<crate::app::Generation>,
-        key: crate::preview::PreviewKey,
-        payload: crate::preview::PreviewPayload,
-    ) {
-        if let Some(generation) = generation {
-            self.controller.reduce(crate::app::AppEvent::PreviewLoaded {
-                generation,
-                key,
-                result: Ok(payload),
-            });
         }
     }
 
@@ -1104,22 +980,12 @@ impl BrowserRuntime {
         entry: crate::pcs::FileEntry,
         size: u64,
         preview_epoch: u64,
-        app_generation: Option<crate::app::Generation>,
     ) {
         let key = preview_key_for_entry(self.account_uid, &entry);
         if let Some(text) = self.preview_manager.get(&key) {
             let content = text.content.clone();
             let status = text.status;
-            self.reduce_preview_payload(
-                app_generation,
-                key,
-                crate::preview::PreviewPayload::text(content.clone(), status),
-            );
-            app.finish_preview_text(
-                entry.server_filename.as_str(),
-                content.as_str(),
-                preview_budget_from_status(status),
-            );
+            app.finish_preview_text(entry.server_filename.as_str(), content.as_str(), status);
             return;
         }
 
@@ -1133,16 +999,7 @@ impl BrowserRuntime {
         let fetch_bytes = size.min(TEXT_PREVIEW_FETCH_BYTES);
         if fetch_bytes == 0 {
             if let Some(status) = self.preview_manager.finish_text_request(request, b"") {
-                self.reduce_preview_payload(
-                    app_generation,
-                    key,
-                    crate::preview::PreviewPayload::text("", status),
-                );
-                app.finish_preview_text(
-                    entry.server_filename.as_str(),
-                    "",
-                    preview_budget_from_status(status),
-                );
+                app.finish_preview_text(entry.server_filename.as_str(), "", status);
             }
             return;
         }
@@ -1161,7 +1018,6 @@ impl BrowserRuntime {
             fetch_bytes,
             preview_epoch,
             cancel,
-            app_generation,
         });
         app.set_background_tasks(self.inflight);
     }
@@ -1172,7 +1028,6 @@ impl BrowserRuntime {
         entry: crate::pcs::FileEntry,
         size: u64,
         preview_epoch: u64,
-        app_generation: Option<crate::app::Generation>,
     ) {
         let Some(client) = self.client.clone() else {
             app.finish_preview_error(entry.server_filename.as_str(), "client unavailable");
@@ -1183,21 +1038,10 @@ impl BrowserRuntime {
         app.begin_preview(entry.server_filename.as_str(), "loading image metadata");
         let fetch_bytes = size.min(TEXT_PREVIEW_FETCH_BYTES);
         if fetch_bytes == 0 {
-            let metadata = crate::preview::parse_image_metadata(&[]);
-            let status = crate::preview::PreviewStatus {
-                kind: crate::preview::PreviewKind::Image,
-                fetched_bytes: 0,
-                memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
-            };
-            self.reduce_preview_payload(
-                app_generation,
-                key,
-                crate::preview::PreviewPayload::Image { metadata, status },
-            );
             app.finish_preview_image_metadata(
                 entry.server_filename.as_str(),
                 vec!["image=empty".to_string()],
-                crate::tui::PreviewBudget {
+                crate::preview::PreviewStatus {
                     kind: crate::preview::PreviewKind::Image,
                     fetched_bytes: 0,
                     memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
@@ -1220,7 +1064,6 @@ impl BrowserRuntime {
             fetch_bytes,
             preview_epoch,
             cancel,
-            app_generation,
         });
         app.set_background_tasks(self.inflight);
     }
@@ -1243,7 +1086,6 @@ impl BrowserRuntime {
             };
             let _ = tx
                 .send(PreviewLoadResult {
-                    app_generation: job.app_generation,
                     request: job.request,
                     kind: job.kind,
                     title: job.title,
@@ -1272,16 +1114,11 @@ impl BrowserRuntime {
                     if let Some(status) = status {
                         if let Some(text) = self.preview_manager.get(&key) {
                             let content = text.content.clone();
-                            self.reduce_preview_payload(
-                                result.app_generation,
-                                key,
-                                crate::preview::PreviewPayload::text(content.clone(), status),
-                            );
                             if self.selected_preview_key(app) == Some(key) {
                                 app.finish_preview_text(
                                     result.title.as_str(),
                                     content.as_str(),
-                                    preview_budget_from_status(status),
+                                    status,
                                 );
                             }
                         }
@@ -1296,16 +1133,11 @@ impl BrowserRuntime {
                             fetched_bytes: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                             memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
                         };
-                        self.reduce_preview_payload(
-                            result.app_generation,
-                            key,
-                            crate::preview::PreviewPayload::Image { metadata, status },
-                        );
                         if self.selected_preview_key(app) == Some(key) {
                             app.finish_preview_image_metadata(
                                 result.title.as_str(),
                                 image_preview_lines(metadata),
-                                crate::tui::PreviewBudget {
+                                crate::preview::PreviewStatus {
                                     kind: crate::preview::PreviewKind::Image,
                                     fetched_bytes: status.fetched_bytes,
                                     memory_limit_bytes: PREVIEW_MEMORY_LIMIT_BYTES,
@@ -1315,19 +1147,6 @@ impl BrowserRuntime {
                     }
                 }
                 Err(error) => {
-                    if let Some(generation) = result.app_generation {
-                        let preview_error = match error.clone() {
-                            crate::pcs::PcsError::Cancelled { .. } => {
-                                crate::preview::PreviewError::Cancelled
-                            }
-                            error => crate::preview::PreviewError::Pcs(error),
-                        };
-                        self.controller.reduce(crate::app::AppEvent::PreviewLoaded {
-                            generation,
-                            key: result.request.key(),
-                            result: Err(preview_error),
-                        });
-                    }
                     if self.selected_preview_key(app) == Some(result.request.key()) {
                         app.finish_preview_error(
                             result.title.as_str(),
@@ -1422,23 +1241,14 @@ impl BrowserRuntime {
             app.set_notice(format!("task_cancel_error: #{}", id.value()));
             return;
         }
-        for effect in self
-            .controller
-            .dispatch(crate::app::AppCommand::CancelTask { task_id: id })
-        {
-            if let crate::app::AppEffect::CancelTask { task_id } = effect {
-                if let Some(cancellation) = self.task_cancellations.get(&task_id) {
-                    cancellation.cancel();
-                }
-            }
+        if let Some(cancellation) = self.task_cancellations.get(&id) {
+            cancellation.cancel();
         }
-        self.sync_controller_task(id);
         app.set_notice(format!("task_cancel_requested: #{}", id.value()));
     }
 
     pub(crate) fn drain_transfer_task_events(&mut self, app: &mut crate::tui::TuiApp) {
         while let Ok(event) = self.task_rx.try_recv() {
-            let task_id = event.task_id();
             match event {
                 TransferTaskEvent::Progress {
                     id,
@@ -1467,7 +1277,6 @@ impl BrowserRuntime {
                 TransferTaskEvent::Failed { id, mode, message } => {
                     let _ = self.task_manager.fail(id);
                     self.task_cancellations.remove(&id);
-                    self.record_runtime_failure("transfer", message.clone());
                     if mode == TransferWorkerMode::LocalOpen {
                         app.set_notice(format!("open_failed: #{} {}", id.value(), message));
                     } else {
@@ -1496,7 +1305,6 @@ impl BrowserRuntime {
                 TransferTaskEvent::RemoteFailed { id, message } => {
                     let _ = self.task_manager.fail(id);
                     self.task_cancellations.remove(&id);
-                    self.record_runtime_failure("remote_operation", message.clone());
                     app.set_notice(format!("operation_failed: #{} {}", id.value(), message));
                 }
                 TransferTaskEvent::SearchBatch {
@@ -1543,28 +1351,12 @@ impl BrowserRuntime {
                         }
                         Err(message) => {
                             let _ = self.task_manager.fail(id);
-                            self.record_runtime_failure("search", message.clone());
                             app.finish_search_error(format!("#{} {}", id.value(), message));
                         }
                     }
                 }
             }
-            self.sync_controller_task(task_id);
         }
-    }
-
-    pub(crate) fn sync_controller_task(&mut self, id: crate::app::TaskId) {
-        if let Some(task) = self.task_manager.snapshot(id) {
-            self.controller
-                .reduce(crate::app::AppEvent::TaskChanged { task });
-        }
-    }
-
-    pub(crate) fn record_runtime_failure(&mut self, operation: &'static str, message: String) {
-        self.controller.reduce(crate::app::AppEvent::Failed {
-            operation,
-            error: crate::app::AppError::Runtime(message),
-        });
     }
 
     pub(crate) fn refresh_related_dirs(&mut self, app: &mut crate::tui::TuiApp, dirs: Vec<String>) {
@@ -1582,7 +1374,7 @@ impl BrowserRuntime {
             } else {
                 let generation = self.cache.begin_refresh(dir.as_str());
                 let cancel = self.root.child_token();
-                self.spawn_directory_load(client.clone(), dir, generation, None, cancel);
+                self.spawn_directory_load(client.clone(), dir, generation, cancel);
             }
         }
     }
@@ -1684,7 +1476,7 @@ impl BrowserRuntime {
                 entry.server_filename.as_str(),
                 crate::preview::PreviewKind::Video,
                 "video preview disabled by sidecar kill switch",
-                crate::tui::PreviewBudget {
+                crate::preview::PreviewStatus {
                     kind: crate::preview::PreviewKind::Video,
                     fetched_bytes: 0,
                     memory_limit_bytes: self.video_config.memory_limit_bytes(),
@@ -1772,9 +1564,7 @@ impl BrowserRuntime {
                 return;
             }
         };
-        let mpv_args = match server
-            .mpv_args_with_profile(mpv_profile_from_config(self.video_config.player_profile))
-        {
+        let mpv_args = match server.mpv_args_with_profile(self.video_config.player_profile) {
             Ok(args) => args,
             Err(err) => {
                 app.finish_preview_error(
@@ -1889,7 +1679,7 @@ impl BrowserRuntime {
         app.finish_preview_video(
             active.title.as_str(),
             lines,
-            crate::tui::PreviewBudget {
+            crate::preview::PreviewStatus {
                 kind: crate::preview::PreviewKind::Video,
                 fetched_bytes: stats.used_bytes,
                 memory_limit_bytes: memory_limit,

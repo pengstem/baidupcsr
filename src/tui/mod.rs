@@ -1,5 +1,5 @@
 use crate::pcs::FileEntry;
-use crate::preview::PreviewKind;
+use crate::preview::{PreviewKind, PreviewStatus};
 
 #[cfg(test)]
 mod tests;
