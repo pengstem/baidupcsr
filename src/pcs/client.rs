@@ -222,7 +222,11 @@ pub(crate) async fn send_request(
     operation: &str,
     cancel: &CancellationToken,
 ) -> Result<reqwest::Response, PcsError> {
+    if cancel.is_cancelled() {
+        return Err(cancelled(operation));
+    }
     tokio::select! {
+        biased;
         _ = cancel.cancelled() => Err(cancelled(operation)),
         response = builder.send() => response.map_err(|source| PcsError::Network {
             operation: operation.to_string(),
@@ -236,7 +240,11 @@ pub(crate) async fn response_text(
     operation: &str,
     cancel: &CancellationToken,
 ) -> Result<String, PcsError> {
+    if cancel.is_cancelled() {
+        return Err(cancelled(operation));
+    }
     tokio::select! {
+        biased;
         _ = cancel.cancelled() => Err(cancelled(operation)),
         text = response.text() => text.map_err(|source| PcsError::Network {
             operation: operation.to_string(),

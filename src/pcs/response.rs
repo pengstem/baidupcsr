@@ -283,6 +283,9 @@ pub(crate) async fn read_bounded_response(
     range: ByteRange,
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>, PcsError> {
+    if cancel.is_cancelled() {
+        return Err(cancelled("download"));
+    }
     let status = response.status();
     if !status.is_success() {
         let text = response_text(response, "download", cancel).await?;
@@ -294,6 +297,7 @@ pub(crate) async fn read_bounded_response(
     let mut stream = response.bytes_stream();
     while bytes.len() < limit {
         let next = tokio::select! {
+            biased;
             _ = cancel.cancelled() => return Err(cancelled("download")),
             next = stream.next() => next,
         };

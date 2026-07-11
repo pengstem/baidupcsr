@@ -181,6 +181,7 @@ impl VideoPreviewSession {
 
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -238,7 +239,7 @@ impl VideoLoopbackServer {
             stats: VideoProxyStats::default(),
         }));
         let (stats_tx, stats_rx) = watch::channel(VideoProxyStats::default());
-        let semaphore = Arc::new(Semaphore::new(prefetch_chunks.max(1)));
+        let prefetch_semaphore = Arc::new(Semaphore::new(prefetch_chunks.max(1)));
         let session_for_task = session.clone();
         let cancel_for_task = cancel.clone();
         let upstream: Arc<dyn VideoUpstream> = upstream;
@@ -249,7 +250,7 @@ impl VideoLoopbackServer {
                 state,
                 stats_tx,
                 upstream,
-                semaphore,
+                prefetch_semaphore,
                 prefetch_chunks,
                 cancel_for_task,
             )
@@ -314,57 +315,117 @@ pub(crate) async fn serve_async_video(
     state: Arc<TokioMutex<AsyncVideoState>>,
     stats_tx: watch::Sender<VideoProxyStats>,
     upstream: Arc<dyn VideoUpstream>,
-    semaphore: Arc<Semaphore>,
+    prefetch_semaphore: Arc<Semaphore>,
     prefetch_chunks: usize,
     cancel: CancellationToken,
 ) -> Result<(), VideoError> {
     let mut connections = JoinSet::new();
+    let mut prefetches = JoinSet::new();
     loop {
         let has_connections = !connections.is_empty();
+        let has_prefetches = !prefetches.is_empty();
         let accepted = tokio::select! {
             _ = cancel.cancelled() => {
-                connections.abort_all();
-                while connections.join_next().await.is_some() {}
+                drain_tasks(&mut connections).await;
+                drain_tasks(&mut prefetches).await;
+                cancel_inflight(&state, &stats_tx).await;
                 return Ok(());
             },
-            _ = connections.join_next(), if has_connections => continue,
-            accepted = listener.accept() => accepted.map_err(io_video_error)?,
+            completed = connections.join_next(), if has_connections => {
+                if let Some(Ok(ranges)) = completed {
+                    for range in ranges {
+                        if !reserve_prefetch(range, &state).await {
+                            continue;
+                        }
+                        let state = Arc::clone(&state);
+                        let stats_tx = stats_tx.clone();
+                        let upstream = Arc::clone(&upstream);
+                        let semaphore = Arc::clone(&prefetch_semaphore);
+                        let cancel = cancel.child_token();
+                        prefetches.spawn(async move {
+                            let _ = fetch_prefetch(
+                                range,
+                                &state,
+                                &stats_tx,
+                                &upstream,
+                                &semaphore,
+                                &cancel,
+                            )
+                            .await;
+                        });
+                    }
+                }
+                continue;
+            },
+            _ = prefetches.join_next(), if has_prefetches => continue,
+            accepted = listener.accept() => match accepted {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    cancel.cancel();
+                    drain_tasks(&mut connections).await;
+                    drain_tasks(&mut prefetches).await;
+                    cancel_inflight(&state, &stats_tx).await;
+                    return Err(io_video_error(error));
+                }
+            },
         };
         let (stream, _) = accepted;
         let session = session.clone();
         let state = Arc::clone(&state);
         let stats_tx = stats_tx.clone();
         let upstream = Arc::clone(&upstream);
-        let semaphore = Arc::clone(&semaphore);
         let cancel = cancel.child_token();
         connections.spawn(async move {
-            let _ = handle_async_connection(
+            handle_async_connection(
                 stream,
                 session,
                 state,
                 stats_tx,
                 upstream,
-                semaphore,
                 prefetch_chunks,
                 cancel,
             )
-            .await;
+            .await
+            .unwrap_or_default()
         });
     }
 }
 
-// Connection context is explicit so cancellation and resource limits cannot drift apart.
-#[expect(clippy::too_many_arguments)]
+async fn drain_tasks<T: 'static>(tasks: &mut JoinSet<T>) {
+    let drained = tokio::time::timeout(Duration::from_millis(250), async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
+    }
+}
+
+async fn cancel_inflight(
+    state: &Arc<TokioMutex<AsyncVideoState>>,
+    stats_tx: &watch::Sender<VideoProxyStats>,
+) {
+    let mut state = state.lock().await;
+    if state.inflight.is_empty() {
+        return;
+    }
+    for notify in state.inflight.drain().map(|(_, notify)| notify) {
+        notify.notify_waiters();
+    }
+    state.stats.last_error = Some(VideoError::Cancelled);
+    let _ = stats_tx.send(state.stats.clone());
+}
+
 pub(crate) async fn handle_async_connection(
     mut stream: TcpStream,
     session: VideoPreviewSession,
     state: Arc<TokioMutex<AsyncVideoState>>,
     stats_tx: watch::Sender<VideoProxyStats>,
     upstream: Arc<dyn VideoUpstream>,
-    semaphore: Arc<Semaphore>,
     prefetch_chunks: usize,
     cancel: CancellationToken,
-) -> Result<(), VideoError> {
+) -> Result<Vec<VideoRange>, VideoError> {
     let request = read_async_request(&mut stream, &cancel).await?;
     if !session.token.matches(&request.token) {
         write_http_error(&mut stream, 403, "Forbidden").await?;
@@ -379,9 +440,13 @@ pub(crate) async fn handle_async_connection(
             .write_all(response.as_bytes())
             .await
             .map_err(io_video_error)?;
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let force_prefetch = matches!(
+        request.range,
+        Some(RequestedVideoRange::OpenEnded(_)) | None
+    );
     let requested = request
         .range
         .unwrap_or_else(|| session.default_range().into());
@@ -392,10 +457,8 @@ pub(crate) async fn handle_async_connection(
     let range = requested
         .resolve(session.key.size, max_len)
         .map_err(|_| VideoError::InvalidRange)?;
-    let bytes = cached_fetch(
-        range, &state, &stats_tx, &upstream, &semaphore, &cancel, false,
-    )
-    .await?;
+    let window_before = state.lock().await.cache.window();
+    let (bytes, cache_hit) = cached_fetch(range, &state, &stats_tx, &upstream, &cancel).await?;
     let response = format!(
         "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
         bytes.len(), range.start, range.end_inclusive, session.key.size
@@ -406,6 +469,18 @@ pub(crate) async fn handle_async_connection(
         .map_err(io_video_error)?;
     stream.write_all(&bytes).await.map_err(io_video_error)?;
 
+    if !should_prefetch_after(
+        range,
+        window_before,
+        force_prefetch,
+        cache_hit,
+        session.budget.chunk_size_bytes,
+        session.budget.memory_limit_bytes(),
+    ) {
+        return Ok(Vec::new());
+    }
+
+    let mut ranges = Vec::with_capacity(prefetch_chunks);
     for index in 1..=prefetch_chunks {
         let start = range.end_inclusive.saturating_add(1).saturating_add(
             session
@@ -420,29 +495,55 @@ pub(crate) async fn handle_async_connection(
             .saturating_add(session.budget.chunk_size_bytes)
             .saturating_sub(1)
             .min(session.key.size.saturating_sub(1));
-        let prefetch_range = VideoRange {
+        ranges.push(VideoRange {
             start,
             end_inclusive: end,
-        };
-        let state = Arc::clone(&state);
-        let stats_tx = stats_tx.clone();
-        let upstream = Arc::clone(&upstream);
-        let semaphore = Arc::clone(&semaphore);
-        let cancel = cancel.child_token();
-        tokio::spawn(async move {
-            let _ = cached_fetch(
-                prefetch_range,
-                &state,
-                &stats_tx,
-                &upstream,
-                &semaphore,
-                &cancel,
-                true,
-            )
-            .await;
         });
     }
-    Ok(())
+    Ok(ranges)
+}
+
+pub(crate) fn should_prefetch_after(
+    range: VideoRange,
+    window_before: Option<VideoRange>,
+    force_prefetch: bool,
+    cache_hit: bool,
+    chunk_size_bytes: u64,
+    memory_limit_bytes: u64,
+) -> bool {
+    if cache_hit || range.len() >= memory_limit_bytes {
+        return false;
+    }
+    if force_prefetch {
+        return true;
+    }
+    match window_before {
+        None => range.start == 0 || range.len() == chunk_size_bytes,
+        Some(window) => {
+            range.start
+                <= window
+                    .end_inclusive
+                    .saturating_add(chunk_size_bytes)
+                    .saturating_add(1)
+        }
+    }
+}
+
+pub(crate) async fn reserve_prefetch(
+    range: VideoRange,
+    state: &Arc<TokioMutex<AsyncVideoState>>,
+) -> bool {
+    let mut state = state.lock().await;
+    if state.cache.contains(range)
+        || state
+            .inflight
+            .keys()
+            .any(|inflight| inflight.contains(range))
+    {
+        return false;
+    }
+    state.inflight.insert(range, Arc::new(Notify::new()));
+    true
 }
 
 pub(crate) async fn cached_fetch(
@@ -450,19 +551,18 @@ pub(crate) async fn cached_fetch(
     state: &Arc<TokioMutex<AsyncVideoState>>,
     stats_tx: &watch::Sender<VideoProxyStats>,
     upstream: &Arc<dyn VideoUpstream>,
-    semaphore: &Arc<Semaphore>,
     cancel: &CancellationToken,
-    prefetch: bool,
-) -> Result<Vec<u8>, VideoError> {
+) -> Result<(Vec<u8>, bool), VideoError> {
     loop {
         let wait =
             {
                 let mut state = state.lock().await;
                 if let Some(bytes) = state.cache.get(range) {
                     state.stats.cache_hits = state.stats.cache_hits.saturating_add(1);
+                    state.stats.last_error = None;
                     update_stats(&mut state);
                     let _ = stats_tx.send(state.stats.clone());
-                    return Ok(bytes);
+                    return Ok((bytes, true));
                 }
                 if let Some(notify) = state.inflight.iter().find_map(|(inflight, notify)| {
                     inflight.contains(range).then(|| Arc::clone(notify))
@@ -477,6 +577,7 @@ pub(crate) async fn cached_fetch(
             };
         if let Some(notify) = wait {
             tokio::select! {
+                biased;
                 _ = cancel.cancelled() => return Err(VideoError::Cancelled),
                 _ = notify => continue,
             }
@@ -484,43 +585,83 @@ pub(crate) async fn cached_fetch(
         break;
     }
 
-    let permit = tokio::select! {
-        _ = cancel.cancelled() => return finish_fetch_error(range, state, stats_tx, VideoError::Cancelled).await,
-        permit = semaphore.acquire() => permit.map_err(|_| VideoError::Cancelled)?,
+    let fetched = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(VideoError::Cancelled),
+        fetched = upstream.fetch(range, cancel) => fetched,
     };
-    let fetched = upstream.fetch(range, cancel).await;
-    drop(permit);
     match fetched {
         Ok(bytes) => {
-            let mut state = state.lock().await;
-            let notify = state.inflight.remove(&range);
-            state
-                .cache
-                .put(range, bytes.clone())
-                .map_err(|error| VideoError::Upstream(format!("{error:?}")))?;
-            state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
-            if prefetch {
-                state.stats.prefetch_fetches = state.stats.prefetch_fetches.saturating_add(1);
-            }
-            state.stats.last_range_start = Some(range.start);
-            state.stats.last_range_end_inclusive = Some(range.end_inclusive);
-            update_stats(&mut state);
-            let _ = stats_tx.send(state.stats.clone());
-            if let Some(notify) = notify {
-                notify.notify_waiters();
-            }
-            Ok(bytes)
+            let response_bytes = bytes.clone();
+            store_fetched_range(range, bytes, false, state, stats_tx).await?;
+            Ok((response_bytes, false))
         }
-        Err(error) => finish_fetch_error(range, state, stats_tx, error).await,
+        Err(error) => Err(record_fetch_error(range, state, stats_tx, error).await),
     }
 }
 
-pub(crate) async fn finish_fetch_error(
+pub(crate) async fn fetch_prefetch(
+    range: VideoRange,
+    state: &Arc<TokioMutex<AsyncVideoState>>,
+    stats_tx: &watch::Sender<VideoProxyStats>,
+    upstream: &Arc<dyn VideoUpstream>,
+    semaphore: &Arc<Semaphore>,
+    cancel: &CancellationToken,
+) -> Result<(), VideoError> {
+    let permit = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        permit = semaphore.acquire() => permit.ok(),
+    };
+    let Some(permit) = permit else {
+        return Err(record_fetch_error(range, state, stats_tx, VideoError::Cancelled).await);
+    };
+    let fetched = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(VideoError::Cancelled),
+        fetched = upstream.fetch(range, cancel) => fetched,
+    };
+    drop(permit);
+    match fetched {
+        Ok(bytes) => store_fetched_range(range, bytes, true, state, stats_tx).await,
+        Err(error) => Err(record_fetch_error(range, state, stats_tx, error).await),
+    }
+}
+
+pub(crate) async fn store_fetched_range(
+    range: VideoRange,
+    bytes: Vec<u8>,
+    prefetch: bool,
+    state: &Arc<TokioMutex<AsyncVideoState>>,
+    stats_tx: &watch::Sender<VideoProxyStats>,
+) -> Result<(), VideoError> {
+    let mut state = state.lock().await;
+    let notify = state.inflight.remove(&range);
+    let stored = state
+        .cache
+        .put(range, bytes)
+        .map_err(|error| VideoError::Upstream(format!("{error:?}")));
+    state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
+    if prefetch {
+        state.stats.prefetch_fetches = state.stats.prefetch_fetches.saturating_add(1);
+    }
+    state.stats.last_range_start = Some(range.start);
+    state.stats.last_range_end_inclusive = Some(range.end_inclusive);
+    state.stats.last_error = stored.as_ref().err().cloned();
+    update_stats(&mut state);
+    let _ = stats_tx.send(state.stats.clone());
+    if let Some(notify) = notify {
+        notify.notify_waiters();
+    }
+    stored
+}
+
+pub(crate) async fn record_fetch_error(
     range: VideoRange,
     state: &Arc<TokioMutex<AsyncVideoState>>,
     stats_tx: &watch::Sender<VideoProxyStats>,
     error: VideoError,
-) -> Result<Vec<u8>, VideoError> {
+) -> VideoError {
     let mut state = state.lock().await;
     let notify = state.inflight.remove(&range);
     state.stats.last_error = Some(error.clone());
@@ -528,7 +669,7 @@ pub(crate) async fn finish_fetch_error(
     if let Some(notify) = notify {
         notify.notify_waiters();
     }
-    Err(error)
+    error
 }
 
 pub(crate) fn update_stats(state: &mut AsyncVideoState) {

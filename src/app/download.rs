@@ -170,14 +170,18 @@ pub async fn download_to_path<F: RangeFetcher>(
             speed_bytes_per_sec: 0,
         };
         tokio::select! {
-            _ = cancel.cancelled() => {
-                file.flush().await?;
-                return Ok(DownloadOutcome::Cancelled {
-                    partial_path,
-                    bytes_written: offset,
-                });
-            }
+            biased;
             _ = progress.send(update) => {}
+            _ = cancel.cancelled() => {
+                let _ = progress.try_send(update);
+            }
+        }
+        if cancel.is_cancelled() {
+            file.flush().await?;
+            return Ok(DownloadOutcome::Cancelled {
+                partial_path,
+                bytes_written: offset,
+            });
         }
     }
     file.flush().await?;

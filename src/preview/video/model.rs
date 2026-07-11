@@ -260,6 +260,12 @@ impl VideoIntervalBuffer {
         Some(bytes)
     }
 
+    pub(crate) fn contains(&self, range: VideoRange) -> bool {
+        self.intervals
+            .iter()
+            .any(|interval| interval.range.contains(range))
+    }
+
     pub(crate) fn window(&self) -> Option<VideoRange> {
         let mut start = u64::MAX;
         let mut end = 0;
