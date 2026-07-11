@@ -458,7 +458,15 @@ pub(crate) async fn handle_async_connection(
         .resolve(session.key.size, max_len)
         .map_err(|_| VideoError::InvalidRange)?;
     let window_before = state.lock().await.cache.window();
-    let (bytes, cache_hit) = cached_fetch(range, &state, &stats_tx, &upstream, &cancel).await?;
+    let (bytes, cache_hit) = match cached_fetch(range, &state, &stats_tx, &upstream, &cancel).await
+    {
+        Ok(result) => result,
+        Err(error @ VideoError::Upstream(_)) => {
+            write_http_error(&mut stream, 502, "Bad Gateway").await?;
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
     let response = format!(
         "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
         bytes.len(), range.start, range.end_inclusive, session.key.size

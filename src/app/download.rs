@@ -107,9 +107,9 @@ pub async fn download_to_path<F: RangeFetcher>(
     }
 
     let partial_path = partial_path(&spec.target);
-    let mut offset = match tokio::fs::metadata(&partial_path).await {
-        Ok(metadata) => metadata.len(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+    let (mut offset, mut partial_exists) = match tokio::fs::metadata(&partial_path).await {
+        Ok(metadata) => (metadata.len(), true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (0, false),
         Err(error) => return Err(TaskError::Io(error)),
     };
     if offset > spec.size {
@@ -118,6 +118,11 @@ pub async fn download_to_path<F: RangeFetcher>(
                 partial_path.display().to_string(),
             ));
         }
+        tokio::fs::remove_file(&partial_path).await?;
+        offset = 0;
+        partial_exists = false;
+    }
+    if offset == spec.size && partial_exists {
         tokio::fs::remove_file(&partial_path).await?;
         offset = 0;
     }
@@ -152,18 +157,18 @@ pub async fn download_to_path<F: RangeFetcher>(
             }
             Err(error) => return Err(TaskError::Pcs(error)),
         };
-        if chunk.is_empty() {
-            return Err(TaskError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "remote download returned an empty chunk",
-            )));
-        }
         let requested_len = end.saturating_sub(offset).saturating_add(1);
-        let write_len = usize::try_from(requested_len)
-            .unwrap_or(usize::MAX)
-            .min(chunk.len());
-        file.write_all(&chunk[..write_len]).await?;
-        offset = offset.saturating_add(u64::try_from(write_len).unwrap_or(u64::MAX));
+        let actual_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+        if actual_len != requested_len {
+            return Err(TaskError::Pcs(PcsError::Network {
+                operation: "download".to_string(),
+                message: format!(
+                    "range fetch returned {actual_len} bytes for a {requested_len}-byte request"
+                ),
+            }));
+        }
+        file.write_all(&chunk).await?;
+        offset = offset.saturating_add(requested_len);
         let update = TransferProgress {
             bytes_done: offset,
             bytes_total: Some(spec.size),

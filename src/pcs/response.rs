@@ -286,16 +286,33 @@ pub(crate) async fn read_bounded_response(
     if cancel.is_cancelled() {
         return Err(cancelled("download"));
     }
-    let status = response.status();
-    if !status.is_success() {
-        let text = response_text(response, "download", cancel).await?;
-        return Err(parse_remote_error("download", &text));
+    if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(download_protocol_error(format!(
+            "expected HTTP 206 Partial Content, received {}",
+            response.status()
+        )));
     }
 
-    let limit = usize::try_from(range.read_limit_bytes()).unwrap_or(usize::MAX);
-    let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
+    validate_content_range(response.headers(), range)?;
+    let requested_len = range.read_limit_bytes();
+    if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
+        let content_length = content_length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| download_protocol_error("invalid Content-Length header"))?;
+        if content_length != requested_len {
+            return Err(download_protocol_error(format!(
+                "Content-Length {content_length} does not match requested range length {requested_len}"
+            )));
+        }
+    }
+
+    let capacity = usize::try_from(requested_len)
+        .map_err(|_| download_protocol_error("requested range is too large for this platform"))?;
+    let mut bytes = Vec::with_capacity(capacity.min(64 * 1024));
     let mut stream = response.bytes_stream();
-    while bytes.len() < limit {
+    loop {
         let next = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(cancelled("download")),
@@ -308,10 +325,74 @@ pub(crate) async fn read_bounded_response(
             operation: "download".to_string(),
             message: reqwest_error_label(&source),
         })?;
-        let remaining = limit.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        if bytes.len().saturating_add(chunk.len()) > capacity {
+            return Err(download_protocol_error(format!(
+                "response body exceeds requested range length {requested_len}"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.len() != capacity {
+        return Err(download_protocol_error(format!(
+            "response body length {} does not match requested range length {requested_len}",
+            bytes.len()
+        )));
     }
     Ok(bytes)
+}
+
+fn validate_content_range(
+    headers: &reqwest::header::HeaderMap,
+    requested: ByteRange,
+) -> Result<(), PcsError> {
+    let value = headers
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| download_protocol_error("missing or invalid Content-Range header"))?;
+    let (unit, value) = value
+        .split_once(char::is_whitespace)
+        .ok_or_else(|| download_protocol_error("invalid Content-Range header"))?;
+    if !unit.eq_ignore_ascii_case("bytes") {
+        return Err(download_protocol_error("Content-Range unit must be bytes"));
+    }
+    let (bounds, total) = value
+        .trim()
+        .split_once('/')
+        .ok_or_else(|| download_protocol_error("invalid Content-Range header"))?;
+    let (start, end) = bounds
+        .split_once('-')
+        .ok_or_else(|| download_protocol_error("invalid Content-Range bounds"))?;
+    let start = start
+        .parse::<u64>()
+        .map_err(|_| download_protocol_error("invalid Content-Range start"))?;
+    let end = end
+        .parse::<u64>()
+        .map_err(|_| download_protocol_error("invalid Content-Range end"))?;
+    if start != requested.start() || end != requested.end_inclusive() {
+        return Err(download_protocol_error(format!(
+            "Content-Range {start}-{end} does not match requested range {}-{}",
+            requested.start(),
+            requested.end_inclusive()
+        )));
+    }
+    if total != "*" {
+        let total = total
+            .parse::<u64>()
+            .map_err(|_| download_protocol_error("invalid Content-Range total"))?;
+        if total <= end {
+            return Err(download_protocol_error(
+                "Content-Range total must be greater than its end offset",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn download_protocol_error(message: impl Into<String>) -> PcsError {
+    PcsError::Network {
+        operation: "download".to_string(),
+        message: message.into(),
+    }
 }
 
 pub(crate) fn now_unix_seconds() -> i64 {

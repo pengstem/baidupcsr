@@ -226,7 +226,7 @@ impl VideoIntervalBuffer {
         bytes: Vec<u8>,
     ) -> Result<(), VideoPreviewError> {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        if len > range.len() || len > self.budget.memory_limit_bytes() {
+        if len != range.len() || len > self.budget.memory_limit_bytes() {
             return Err(VideoPreviewError::VideoChunkTooLarge);
         }
 
