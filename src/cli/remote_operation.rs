@@ -449,8 +449,8 @@ pub(crate) fn cookie_value<'a>(cookies: &'a str, key: &str) -> Option<&'a str> {
 pub(crate) fn pcs_error_label(err: &crate::pcs::PcsError) -> String {
     match err {
         crate::pcs::PcsError::Cancelled { .. } => "cancelled".to_string(),
-        crate::pcs::PcsError::Parse { .. } => "parse".to_string(),
-        crate::pcs::PcsError::Network { .. } => "network".to_string(),
+        crate::pcs::PcsError::Parse { message, .. } => format!("parse: {message}"),
+        crate::pcs::PcsError::Network { message, .. } => format!("network: {message}"),
         crate::pcs::PcsError::Remote { code, .. } => format!("remote_code={code}"),
     }
 }

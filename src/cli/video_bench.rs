@@ -1,4 +1,5 @@
 use super::*;
+use futures_util::StreamExt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct VideoBenchResolvedOptions {
@@ -43,8 +44,12 @@ impl VideoBenchOutput {
         Ok(Self { writer })
     }
 
-    pub(crate) fn emit(&mut self, line: &str) -> Result<(), String> {
-        writeln!(self.writer, "{line}").map_err(|err| io_error_label(&err))
+    pub(crate) fn emit<T: serde::Serialize + ?Sized>(&mut self, event: &T) -> Result<(), String> {
+        serde_json::to_writer(&mut self.writer, event)
+            .map_err(|err| crate::pcs::error_chain_message(&err))?;
+        self.writer
+            .write_all(b"\n")
+            .map_err(|err| io_error_label(&err))
     }
 
     pub(crate) fn flush(&mut self) -> Result<(), String> {
@@ -71,7 +76,9 @@ pub(crate) async fn run_video_bench(options: &VideoBenchCliOptions) -> Result<()
     }
 
     let mut output = VideoBenchOutput::new(options.output_path.as_deref())?;
-    output.emit(format_video_bench_start(options, &resolved, &movie, user.uid).as_str())?;
+    output.emit(&video_bench_start_event(
+        options, &resolved, &movie, user.uid,
+    ))?;
     if options.bench_case.includes_source() {
         run_video_source_bench(
             &mut output,
@@ -95,7 +102,7 @@ pub(crate) async fn run_video_bench(options: &VideoBenchCliOptions) -> Result<()
         )
         .await?;
     }
-    output.emit(format_video_bench_end(options).as_str())?;
+    output.emit(&video_bench_end_event(options))?;
     output.flush()
 }
 
@@ -169,38 +176,47 @@ pub(crate) fn remote_parent_path_for_bench(path: &str) -> String {
     }
 }
 
-pub(crate) fn format_video_bench_start(
+pub(crate) fn video_bench_start_event(
     options: &VideoBenchCliOptions,
     resolved: &VideoBenchResolvedOptions,
     movie: &VideoBenchMovie,
     account_uid: u64,
-) -> String {
-    format!(
-        "{{\"type\":\"bench_start\",\"case\":{},\"redacted\":{},\"account_hash\":{},\"movie\":{{\"path_hash\":{},\"extension\":{},\"size_bytes\":{},\"mtime\":{}}},\"config\":{{\"duration_seconds\":{},\"chunk_size_bytes\":{},\"max_chunks\":{},\"prefetch_chunks\":{},\"memory_limit_bytes\":{},\"reps\":{},\"range_sizes\":{},\"positions\":{}}}}}",
-        json_string(options.bench_case.as_str()),
-        options.redact,
-        json_string(redacted_path_hash(&account_uid.to_string()).as_str()),
-        json_string(movie.path_hash.as_str()),
-        json_string(movie.extension.as_str()),
-        movie.size_bytes,
-        movie.entry.mtime,
-        options.duration_seconds,
-        resolved.chunk_size_bytes,
-        resolved.max_chunks,
-        resolved.prefetch_chunks,
-        resolved.memory_limit_bytes,
-        options.reps,
-        json_u64_array(&options.range_sizes),
-        json_position_array(&options.positions)
-    )
+) -> serde_json::Value {
+    let positions: Vec<String> = options
+        .positions
+        .iter()
+        .map(|position| position.label())
+        .collect();
+    serde_json::json!({
+        "type": "bench_start",
+        "case": options.bench_case.as_str(),
+        "redacted": options.redact,
+        "account_hash": redacted_path_hash(&account_uid.to_string()),
+        "movie": {
+            "path_hash": movie.path_hash,
+            "extension": movie.extension,
+            "size_bytes": movie.size_bytes,
+            "mtime": movie.entry.mtime,
+        },
+        "config": {
+            "duration_seconds": options.duration_seconds,
+            "chunk_size_bytes": resolved.chunk_size_bytes,
+            "max_chunks": resolved.max_chunks,
+            "prefetch_chunks": resolved.prefetch_chunks,
+            "memory_limit_bytes": resolved.memory_limit_bytes,
+            "reps": options.reps,
+            "range_sizes": options.range_sizes,
+            "positions": positions,
+        },
+    })
 }
 
-pub(crate) fn format_video_bench_end(options: &VideoBenchCliOptions) -> String {
-    format!(
-        "{{\"type\":\"bench_end\",\"case\":{},\"redacted\":{}}}",
-        json_string(options.bench_case.as_str()),
-        options.redact
-    )
+pub(crate) fn video_bench_end_event(options: &VideoBenchCliOptions) -> serde_json::Value {
+    serde_json::json!({
+        "type": "bench_end",
+        "case": options.bench_case.as_str(),
+        "redacted": options.redact,
+    })
 }
 
 pub(crate) struct VideoBenchRangeFetch {
@@ -229,16 +245,13 @@ pub(crate) async fn run_video_source_bench(
         .await
         .map_err(|err| format!("locatedownload_failed: {}", pcs_error_label(&err)))?;
     let locate_elapsed = locate_started.elapsed();
-    output.emit(
-        format!(
-            "{{\"type\":\"source_locatedownload\",\"path_hash\":{},\"duration_ms\":{},\"url_count\":{},\"ok\":{}}}",
-            json_string(movie.path_hash.as_str()),
-            locate_elapsed.as_millis(),
-            urls.len(),
-            !urls.is_empty()
-        )
-        .as_str(),
-    )?;
+    output.emit(&serde_json::json!({
+        "type": "source_locatedownload",
+        "path_hash": movie.path_hash,
+        "duration_ms": locate_elapsed.as_millis(),
+        "url_count": urls.len(),
+        "ok": !urls.is_empty(),
+    }))?;
     if urls.is_empty() {
         return Err("locatedownload_empty".to_string());
     }
@@ -266,30 +279,24 @@ pub(crate) async fn run_video_source_bench(
                 .await;
                 let elapsed = started.elapsed();
                 match result {
-                    Ok(fetch) => output.emit(
-                        format_source_range_event(
-                            movie,
-                            position,
-                            rep,
-                            offset,
-                            request_len,
-                            &fetch,
-                            elapsed,
-                        )
-                        .as_str(),
-                    )?,
-                    Err(error) => output.emit(
-                        format_source_error_event(
-                            movie,
-                            position,
-                            rep,
-                            offset,
-                            request_len,
-                            elapsed,
-                            error.as_str(),
-                        )
-                        .as_str(),
-                    )?,
+                    Ok(fetch) => output.emit(&source_range_event(
+                        movie,
+                        position,
+                        rep,
+                        offset,
+                        request_len,
+                        &fetch,
+                        elapsed,
+                    ))?,
+                    Err(error) => output.emit(&source_error_event(
+                        movie,
+                        position,
+                        rep,
+                        offset,
+                        request_len,
+                        elapsed,
+                        error.as_str(),
+                    ))?,
                 }
             }
         }
@@ -355,7 +362,7 @@ pub(crate) async fn try_video_bench_dlink_candidates(
     Err(last_error)
 }
 
-pub(crate) fn format_source_range_event(
+pub(crate) fn source_range_event(
     movie: &VideoBenchMovie,
     position: VideoBenchPosition,
     rep: usize,
@@ -363,25 +370,26 @@ pub(crate) fn format_source_range_event(
     request_len: u64,
     fetch: &VideoBenchRangeFetch,
     elapsed: Duration,
-) -> String {
+) -> serde_json::Value {
     let bytes_len = u64::try_from(fetch.bytes_len).unwrap_or(u64::MAX);
-    format!(
-        "{{\"type\":\"source_range\",\"path_hash\":{},\"position\":{},\"rep\":{},\"offset\":{},\"request_bytes\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"candidate_index\":{},\"refresh_count\":{},\"ok\":{},\"error\":null}}",
-        json_string(movie.path_hash.as_str()),
-        json_string(position.label().as_str()),
-        rep,
-        offset,
-        request_len,
-        fetch.bytes_len,
-        elapsed.as_millis(),
-        throughput_mib_s(bytes_len, elapsed),
-        fetch.candidate_index,
-        fetch.refresh_count,
-        bytes_len == request_len
-    )
+    serde_json::json!({
+        "type": "source_range",
+        "path_hash": movie.path_hash,
+        "position": position.label(),
+        "rep": rep,
+        "offset": offset,
+        "request_bytes": request_len,
+        "bytes": fetch.bytes_len,
+        "duration_ms": elapsed.as_millis(),
+        "throughput_mib_s": rounded_throughput_mib_s(bytes_len, elapsed),
+        "candidate_index": fetch.candidate_index,
+        "refresh_count": fetch.refresh_count,
+        "ok": bytes_len == request_len,
+        "error": serde_json::Value::Null,
+    })
 }
 
-pub(crate) fn format_source_error_event(
+pub(crate) fn source_error_event(
     movie: &VideoBenchMovie,
     position: VideoBenchPosition,
     rep: usize,
@@ -389,17 +397,22 @@ pub(crate) fn format_source_error_event(
     request_len: u64,
     elapsed: Duration,
     error: &str,
-) -> String {
-    format!(
-        "{{\"type\":\"source_range\",\"path_hash\":{},\"position\":{},\"rep\":{},\"offset\":{},\"request_bytes\":{},\"bytes\":0,\"duration_ms\":{},\"throughput_mib_s\":0.000,\"candidate_index\":null,\"refresh_count\":null,\"ok\":false,\"error\":{}}}",
-        json_string(movie.path_hash.as_str()),
-        json_string(position.label().as_str()),
-        rep,
-        offset,
-        request_len,
-        elapsed.as_millis(),
-        json_string(error)
-    )
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "source_range",
+        "path_hash": movie.path_hash,
+        "position": position.label(),
+        "rep": rep,
+        "offset": offset,
+        "request_bytes": request_len,
+        "bytes": 0,
+        "duration_ms": elapsed.as_millis(),
+        "throughput_mib_s": 0.0,
+        "candidate_index": serde_json::Value::Null,
+        "refresh_count": serde_json::Value::Null,
+        "ok": false,
+        "error": error,
+    })
 }
 
 pub(crate) fn video_bench_offset(
@@ -448,22 +461,29 @@ pub(crate) async fn run_video_gateway_bench(
         budget,
         resolved.prefetch_chunks,
         upstream,
-        cancel,
+        cancel.clone(),
     )
     .await
     .map_err(|err| format!("video_server_error: {err:?}"))?;
-    let request_path = loopback_request_path(&server)?;
-    output.emit(
-        format!(
-            "{{\"type\":\"gateway_start\",\"path_hash\":{},\"port\":{},\"chunk_size_bytes\":{},\"prefetch_chunks\":{},\"duration_seconds\":{}}}",
-            json_string(movie.path_hash.as_str()),
-            server.port(),
-            resolved.chunk_size_bytes,
-            resolved.prefetch_chunks,
-            duration_seconds
-        )
-        .as_str(),
-    )?;
+    let gateway_client = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|err| {
+            format!(
+                "gateway_client_failed: {}",
+                crate::pcs::error_chain_message(&err)
+            )
+        })?;
+    output.emit(&serde_json::json!({
+        "type": "gateway_start",
+        "path_hash": movie.path_hash,
+        "port": server.port(),
+        "chunk_size_bytes": resolved.chunk_size_bytes,
+        "prefetch_chunks": resolved.prefetch_chunks,
+        "duration_seconds": duration_seconds,
+    }))?;
 
     let started = Instant::now();
     let deadline = Duration::from_secs(duration_seconds);
@@ -481,7 +501,9 @@ pub(crate) async fn run_video_gateway_bench(
         }
         let end = offset.saturating_add(request_len).saturating_sub(1);
         let request_started = Instant::now();
-        let response = video_bench_loopback_get(server.port(), request_path.as_str(), offset, end);
+        let response =
+            video_bench_loopback_get(&gateway_client, server.local_url(), offset, end, &cancel)
+                .await;
         let elapsed = request_started.elapsed();
         match response {
             Ok(response) => {
@@ -490,18 +512,15 @@ pub(crate) async fn run_video_gateway_bench(
                     && bytes_len > 0
                     && response.content_length == Some(bytes_len)
                     && response.content_range.is_some();
-                output.emit(
-                    format_gateway_range_event(
-                        movie,
-                        offset,
-                        request_len,
-                        &response,
-                        elapsed,
-                        ok,
-                        None,
-                    )
-                    .as_str(),
-                )?;
+                output.emit(&gateway_range_event(
+                    movie,
+                    offset,
+                    request_len,
+                    &response,
+                    elapsed,
+                    ok,
+                    None,
+                ))?;
                 if !ok {
                     stop_reason = "http_error";
                     break;
@@ -511,16 +530,13 @@ pub(crate) async fn run_video_gateway_bench(
                 offset = offset.saturating_add(bytes_len);
             }
             Err(error) => {
-                output.emit(
-                    format_gateway_range_error_event(
-                        movie,
-                        offset,
-                        request_len,
-                        elapsed,
-                        error.as_str(),
-                    )
-                    .as_str(),
-                )?;
+                output.emit(&gateway_range_error_event(
+                    movie,
+                    offset,
+                    request_len,
+                    elapsed,
+                    error.as_str(),
+                ))?;
                 stop_reason = "error";
                 break;
             }
@@ -532,97 +548,70 @@ pub(crate) async fn run_video_gateway_bench(
 
     let elapsed = started.elapsed();
     let stats = server.stats();
-    output.emit(
-        format_gateway_summary_event(movie, requests, total_bytes, elapsed, &stats, stop_reason)
-            .as_str(),
-    )
+    output.emit(&gateway_summary_event(
+        movie,
+        requests,
+        total_bytes,
+        elapsed,
+        &stats,
+        stop_reason,
+    ))
 }
 
-pub(crate) fn loopback_request_path(
-    server: &crate::preview::VideoLoopbackServer,
-) -> Result<String, String> {
-    let args = server
-        .mpv_args_with_profile(crate::config::VideoPlayerProfile::Isolated)
-        .map_err(|err| format!("video_loopback_url_error: {err:?}"))?;
-    let url = args
-        .iter()
-        .find(|arg| arg.starts_with("http://127.0.0.1:"))
-        .ok_or_else(|| "video_loopback_url_missing".to_string())?;
-    parse_http_request_path(url)
-}
-
-pub(crate) fn parse_http_request_path(url: &str) -> Result<String, String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| "loopback_url_must_be_http".to_string())?;
-    let slash = rest
-        .find('/')
-        .ok_or_else(|| "loopback_url_missing_path".to_string())?;
-    Ok(rest[slash..].to_string())
-}
-
-pub(crate) fn video_bench_loopback_get(
-    port: u16,
-    request_path: &str,
+pub(crate) async fn video_bench_loopback_get(
+    client: &reqwest::Client,
+    url: &str,
     start: u64,
     end: u64,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<VideoBenchHttpResponse, String> {
-    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(|err| io_error_label(&err))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .map_err(|err| io_error_label(&err))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
-        .map_err(|err| io_error_label(&err))?;
-    let request = format!(
-        "GET {request_path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nRange: bytes={start}-{end}\r\nConnection: close\r\n\r\n"
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|err| io_error_label(&err))?;
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|err| io_error_label(&err))?;
-    parse_video_bench_http_response(&response)
-}
-
-pub(crate) fn parse_video_bench_http_response(
-    data: &[u8],
-) -> Result<VideoBenchHttpResponse, String> {
-    let header_end = data
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or_else(|| "http_response_missing_header_end".to_string())?;
-    let body_start = header_end.saturating_add(4);
-    let header = String::from_utf8_lossy(&data[..header_end]);
-    let mut lines = header.split("\r\n");
-    let status_code = lines
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|value| value.parse::<u16>().ok())
-        .ok_or_else(|| "http_response_bad_status".to_string())?;
-    let mut content_length = None;
-    let mut content_range = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err("cancelled".to_string()),
+        response = client
+            .get(url)
+            .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
+            .send() => response.map_err(|err| {
+                format!("gateway_request_failed: {}", crate::pcs::error_chain_message(&err))
+            })?,
+    };
+    let status_code = response.status().as_u16();
+    let content_length = response.content_length();
+    let content_range = response
+        .headers()
+        .get(reqwest::header::CONTENT_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let mut body_len = 0_usize;
+    let mut stream = response.bytes_stream();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err("cancelled".to_string()),
+            chunk = stream.next() => chunk,
         };
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            content_length = value.trim().parse::<u64>().ok();
-        } else if name.trim().eq_ignore_ascii_case("content-range") {
-            content_range = Some(value.trim().to_string());
-        }
+        let Some(chunk) = chunk else {
+            break;
+        };
+        let chunk = chunk.map_err(|err| {
+            format!(
+                "gateway_body_failed: {}",
+                crate::pcs::error_chain_message(&err)
+            )
+        })?;
+        body_len = body_len
+            .checked_add(chunk.len())
+            .ok_or_else(|| "gateway_body_too_large".to_string())?;
     }
     Ok(VideoBenchHttpResponse {
         status_code,
-        body_len: data.len().saturating_sub(body_start),
+        body_len,
         content_length,
         content_range,
     })
 }
 
-pub(crate) fn format_gateway_range_event(
+pub(crate) fn gateway_range_event(
     movie: &VideoBenchMovie,
     offset: u64,
     request_len: u64,
@@ -630,118 +619,72 @@ pub(crate) fn format_gateway_range_event(
     elapsed: Duration,
     ok: bool,
     error: Option<&str>,
-) -> String {
+) -> serde_json::Value {
     let bytes_len = u64::try_from(response.body_len).unwrap_or(u64::MAX);
-    format!(
-        "{{\"type\":\"gateway_range\",\"path_hash\":{},\"offset\":{},\"request_bytes\":{},\"status\":{},\"content_length\":{},\"content_range\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"ok\":{},\"error\":{}}}",
-        json_string(movie.path_hash.as_str()),
-        offset,
-        request_len,
-        response.status_code,
-        json_optional_u64(response.content_length),
-        json_optional_string(response.content_range.as_deref()),
-        response.body_len,
-        elapsed.as_millis(),
-        throughput_mib_s(bytes_len, elapsed),
-        ok,
-        json_optional_string(error)
-    )
+    serde_json::json!({
+        "type": "gateway_range",
+        "path_hash": movie.path_hash,
+        "offset": offset,
+        "request_bytes": request_len,
+        "status": response.status_code,
+        "content_length": response.content_length,
+        "content_range": response.content_range,
+        "bytes": response.body_len,
+        "duration_ms": elapsed.as_millis(),
+        "throughput_mib_s": rounded_throughput_mib_s(bytes_len, elapsed),
+        "ok": ok,
+        "error": error,
+    })
 }
 
-pub(crate) fn format_gateway_range_error_event(
+pub(crate) fn gateway_range_error_event(
     movie: &VideoBenchMovie,
     offset: u64,
     request_len: u64,
     elapsed: Duration,
     error: &str,
-) -> String {
-    format!(
-        "{{\"type\":\"gateway_range\",\"path_hash\":{},\"offset\":{},\"request_bytes\":{},\"status\":null,\"content_length\":null,\"content_range\":null,\"bytes\":0,\"duration_ms\":{},\"throughput_mib_s\":0.000,\"ok\":false,\"error\":{}}}",
-        json_string(movie.path_hash.as_str()),
-        offset,
-        request_len,
-        elapsed.as_millis(),
-        json_string(error)
-    )
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "gateway_range",
+        "path_hash": movie.path_hash,
+        "offset": offset,
+        "request_bytes": request_len,
+        "status": serde_json::Value::Null,
+        "content_length": serde_json::Value::Null,
+        "content_range": serde_json::Value::Null,
+        "bytes": 0,
+        "duration_ms": elapsed.as_millis(),
+        "throughput_mib_s": 0.0,
+        "ok": false,
+        "error": error,
+    })
 }
 
-pub(crate) fn format_gateway_summary_event(
+pub(crate) fn gateway_summary_event(
     movie: &VideoBenchMovie,
     requests: u64,
     total_bytes: u64,
     elapsed: Duration,
     stats: &crate::preview::VideoProxyStats,
     stop_reason: &str,
-) -> String {
+) -> serde_json::Value {
     let last_error = stats.last_error.as_ref().map(|err| format!("{err:?}"));
-    format!(
-        "{{\"type\":\"gateway_summary\",\"path_hash\":{},\"requests\":{},\"bytes\":{},\"duration_ms\":{},\"throughput_mib_s\":{:.3},\"cache_hits\":{},\"upstream_fetches\":{},\"prefetch_fetches\":{},\"used_bytes\":{},\"window_start\":{},\"window_end\":{},\"stop_reason\":{},\"last_error\":{}}}",
-        json_string(movie.path_hash.as_str()),
-        requests,
-        total_bytes,
-        elapsed.as_millis(),
-        throughput_mib_s(total_bytes, elapsed),
-        stats.cache_hits,
-        stats.upstream_fetches,
-        stats.prefetch_fetches,
-        stats.used_bytes,
-        json_optional_u64(stats.window_start),
-        json_optional_u64(stats.window_end_inclusive),
-        json_string(stop_reason),
-        json_optional_string(last_error.as_deref())
-    )
-}
-
-pub(crate) fn json_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len().saturating_add(2));
-    escaped.push('"');
-    for ch in value.chars() {
-        match ch {
-            '"' => escaped.push_str("\\\""),
-            '\\' => escaped.push_str("\\\\"),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            ch if ch.is_control() => {
-                let _ = write!(&mut escaped, "\\u{:04x}", u32::from(ch));
-            }
-            ch => escaped.push(ch),
-        }
-    }
-    escaped.push('"');
-    escaped
-}
-
-pub(crate) fn json_optional_string(value: Option<&str>) -> String {
-    value.map_or_else(|| "null".to_string(), json_string)
-}
-
-pub(crate) fn json_optional_u64(value: Option<u64>) -> String {
-    value.map_or_else(|| "null".to_string(), |value| value.to_string())
-}
-
-pub(crate) fn json_u64_array(values: &[u64]) -> String {
-    let mut out = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        let _ = write!(&mut out, "{value}");
-    }
-    out.push(']');
-    out
-}
-
-pub(crate) fn json_position_array(values: &[VideoBenchPosition]) -> String {
-    let mut out = String::from("[");
-    for (index, value) in values.iter().enumerate() {
-        if index > 0 {
-            out.push(',');
-        }
-        out.push_str(json_string(value.label().as_str()).as_str());
-    }
-    out.push(']');
-    out
+    serde_json::json!({
+        "type": "gateway_summary",
+        "path_hash": movie.path_hash,
+        "requests": requests,
+        "bytes": total_bytes,
+        "duration_ms": elapsed.as_millis(),
+        "throughput_mib_s": rounded_throughput_mib_s(total_bytes, elapsed),
+        "cache_hits": stats.cache_hits,
+        "upstream_fetches": stats.upstream_fetches,
+        "prefetch_fetches": stats.prefetch_fetches,
+        "used_bytes": stats.used_bytes,
+        "window_start": stats.window_start,
+        "window_end": stats.window_end_inclusive,
+        "stop_reason": stop_reason,
+        "last_error": last_error,
+    })
 }
 
 pub(crate) fn throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
@@ -751,6 +694,10 @@ pub(crate) fn throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
     } else {
         bytes as f64 / 1024.0 / 1024.0 / seconds
     }
+}
+
+pub(crate) fn rounded_throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
+    (throughput_mib_s(bytes, elapsed) * 1_000.0).round() / 1_000.0
 }
 
 pub(crate) fn redacted_path_hash(path: &str) -> String {

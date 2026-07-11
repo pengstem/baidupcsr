@@ -323,7 +323,7 @@ pub(crate) async fn read_bounded_response(
         };
         let chunk = chunk.map_err(|source| PcsError::Network {
             operation: "download".to_string(),
-            message: source.to_string(),
+            message: error_chain_message(&source),
         })?;
         if bytes.len().saturating_add(chunk.len()) > capacity {
             return Err(download_protocol_error(format!(

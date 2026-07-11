@@ -27,13 +27,13 @@ impl PcsClient {
         if let Some(proxy) = options.proxy.as_ref().filter(|value| !value.is_empty()) {
             let proxy = reqwest::Proxy::all(proxy).map_err(|source| PcsError::Network {
                 operation: "client_init".to_string(),
-                message: source.to_string(),
+                message: error_chain_message(&source),
             })?;
             builder = builder.proxy(proxy);
         }
         let client = builder.build().map_err(|source| PcsError::Network {
             operation: "client_init".to_string(),
-            message: source.to_string(),
+            message: error_chain_message(&source),
         })?;
 
         Ok(Self {
@@ -230,7 +230,7 @@ pub(crate) async fn send_request(
         _ = cancel.cancelled() => Err(cancelled(operation)),
         response = builder.send() => response.map_err(|source| PcsError::Network {
             operation: operation.to_string(),
-            message: source.to_string(),
+            message: error_chain_message(&source),
         }),
     }
 }
@@ -248,7 +248,7 @@ pub(crate) async fn response_text(
         _ = cancel.cancelled() => Err(cancelled(operation)),
         text = response.text() => text.map_err(|source| PcsError::Network {
             operation: operation.to_string(),
-            message: source.to_string(),
+            message: error_chain_message(&source),
         }),
     }
 }
