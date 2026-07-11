@@ -68,7 +68,7 @@ pub(crate) fn sanitize_player_log_line(line: &str) -> String {
 }
 
 pub(crate) fn sanitize_player_log_part(part: &str) -> String {
-    if part.starts_with("http://") || part.starts_with("https://") {
+    if part.contains("http://") || part.contains("https://") {
         return "<redacted-url>".to_string();
     }
     let Some((key, _value)) = part.split_once('=') else {

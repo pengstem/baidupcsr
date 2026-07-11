@@ -455,6 +455,10 @@ pub(crate) fn pcs_error_label(err: &crate::pcs::PcsError) -> String {
     }
 }
 
+pub(crate) fn error_chain_label(error: &dyn std::error::Error) -> String {
+    crate::pcs::error_chain_message(error)
+}
+
 pub(crate) fn io_error_label(err: &std::io::Error) -> String {
     format!("io:{:?}", err.kind())
 }

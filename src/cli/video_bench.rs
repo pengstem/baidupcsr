@@ -45,8 +45,7 @@ impl VideoBenchOutput {
     }
 
     pub(crate) fn emit<T: serde::Serialize + ?Sized>(&mut self, event: &T) -> Result<(), String> {
-        serde_json::to_writer(&mut self.writer, event)
-            .map_err(|err| crate::pcs::error_chain_message(&err))?;
+        serde_json::to_writer(&mut self.writer, event).map_err(|err| error_chain_label(&err))?;
         self.writer
             .write_all(b"\n")
             .map_err(|err| io_error_label(&err))
@@ -76,7 +75,7 @@ pub(crate) async fn run_video_bench(options: &VideoBenchCliOptions) -> Result<()
     }
 
     let mut output = VideoBenchOutput::new(options.output_path.as_deref())?;
-    output.emit(&video_bench_start_event(
+    output.emit(&format_video_bench_start(
         options, &resolved, &movie, user.uid,
     ))?;
     if options.bench_case.includes_source() {
@@ -102,7 +101,7 @@ pub(crate) async fn run_video_bench(options: &VideoBenchCliOptions) -> Result<()
         )
         .await?;
     }
-    output.emit(&video_bench_end_event(options))?;
+    output.emit(&format_video_bench_end(options))?;
     output.flush()
 }
 
@@ -176,7 +175,7 @@ pub(crate) fn remote_parent_path_for_bench(path: &str) -> String {
     }
 }
 
-pub(crate) fn video_bench_start_event(
+pub(crate) fn format_video_bench_start(
     options: &VideoBenchCliOptions,
     resolved: &VideoBenchResolvedOptions,
     movie: &VideoBenchMovie,
@@ -211,7 +210,7 @@ pub(crate) fn video_bench_start_event(
     })
 }
 
-pub(crate) fn video_bench_end_event(options: &VideoBenchCliOptions) -> serde_json::Value {
+pub(crate) fn format_video_bench_end(options: &VideoBenchCliOptions) -> serde_json::Value {
     serde_json::json!({
         "type": "bench_end",
         "case": options.bench_case.as_str(),
@@ -279,7 +278,7 @@ pub(crate) async fn run_video_source_bench(
                 .await;
                 let elapsed = started.elapsed();
                 match result {
-                    Ok(fetch) => output.emit(&source_range_event(
+                    Ok(fetch) => output.emit(&format_source_range_event(
                         movie,
                         position,
                         rep,
@@ -288,7 +287,7 @@ pub(crate) async fn run_video_source_bench(
                         &fetch,
                         elapsed,
                     ))?,
-                    Err(error) => output.emit(&source_error_event(
+                    Err(error) => output.emit(&format_source_error_event(
                         movie,
                         position,
                         rep,
@@ -362,7 +361,7 @@ pub(crate) async fn try_video_bench_dlink_candidates(
     Err(last_error)
 }
 
-pub(crate) fn source_range_event(
+pub(crate) fn format_source_range_event(
     movie: &VideoBenchMovie,
     position: VideoBenchPosition,
     rep: usize,
@@ -389,7 +388,7 @@ pub(crate) fn source_range_event(
     })
 }
 
-pub(crate) fn source_error_event(
+pub(crate) fn format_source_error_event(
     movie: &VideoBenchMovie,
     position: VideoBenchPosition,
     rep: usize,
@@ -411,7 +410,7 @@ pub(crate) fn source_error_event(
         "candidate_index": serde_json::Value::Null,
         "refresh_count": serde_json::Value::Null,
         "ok": false,
-        "error": error,
+        "error": sanitize_video_bench_error(movie, error),
     })
 }
 
@@ -470,12 +469,7 @@ pub(crate) async fn run_video_gateway_bench(
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(60))
         .build()
-        .map_err(|err| {
-            format!(
-                "gateway_client_failed: {}",
-                crate::pcs::error_chain_message(&err)
-            )
-        })?;
+        .map_err(|err| format!("gateway_client_failed: {}", error_chain_label(&err)))?;
     output.emit(&serde_json::json!({
         "type": "gateway_start",
         "path_hash": movie.path_hash,
@@ -512,7 +506,7 @@ pub(crate) async fn run_video_gateway_bench(
                     && bytes_len > 0
                     && response.content_length == Some(bytes_len)
                     && response.content_range.is_some();
-                output.emit(&gateway_range_event(
+                output.emit(&format_gateway_range_event(
                     movie,
                     offset,
                     request_len,
@@ -530,7 +524,7 @@ pub(crate) async fn run_video_gateway_bench(
                 offset = offset.saturating_add(bytes_len);
             }
             Err(error) => {
-                output.emit(&gateway_range_error_event(
+                output.emit(&format_gateway_range_error_event(
                     movie,
                     offset,
                     request_len,
@@ -548,7 +542,7 @@ pub(crate) async fn run_video_gateway_bench(
 
     let elapsed = started.elapsed();
     let stats = server.stats();
-    output.emit(&gateway_summary_event(
+    output.emit(&format_gateway_summary_event(
         movie,
         requests,
         total_bytes,
@@ -572,7 +566,7 @@ pub(crate) async fn video_bench_loopback_get(
             .get(url)
             .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
             .send() => response.map_err(|err| {
-                format!("gateway_request_failed: {}", crate::pcs::error_chain_message(&err))
+                format!("gateway_request_failed: {}", error_chain_label(&err))
             })?,
     };
     let status_code = response.status().as_u16();
@@ -593,12 +587,8 @@ pub(crate) async fn video_bench_loopback_get(
         let Some(chunk) = chunk else {
             break;
         };
-        let chunk = chunk.map_err(|err| {
-            format!(
-                "gateway_body_failed: {}",
-                crate::pcs::error_chain_message(&err)
-            )
-        })?;
+        let chunk =
+            chunk.map_err(|err| format!("gateway_body_failed: {}", error_chain_label(&err)))?;
         body_len = body_len
             .checked_add(chunk.len())
             .ok_or_else(|| "gateway_body_too_large".to_string())?;
@@ -611,7 +601,7 @@ pub(crate) async fn video_bench_loopback_get(
     })
 }
 
-pub(crate) fn gateway_range_event(
+pub(crate) fn format_gateway_range_event(
     movie: &VideoBenchMovie,
     offset: u64,
     request_len: u64,
@@ -633,11 +623,11 @@ pub(crate) fn gateway_range_event(
         "duration_ms": elapsed.as_millis(),
         "throughput_mib_s": rounded_throughput_mib_s(bytes_len, elapsed),
         "ok": ok,
-        "error": error,
+        "error": error.map(|error| sanitize_video_bench_error(movie, error)),
     })
 }
 
-pub(crate) fn gateway_range_error_event(
+pub(crate) fn format_gateway_range_error_event(
     movie: &VideoBenchMovie,
     offset: u64,
     request_len: u64,
@@ -656,11 +646,11 @@ pub(crate) fn gateway_range_error_event(
         "duration_ms": elapsed.as_millis(),
         "throughput_mib_s": 0.0,
         "ok": false,
-        "error": error,
+        "error": sanitize_video_bench_error(movie, error),
     })
 }
 
-pub(crate) fn gateway_summary_event(
+pub(crate) fn format_gateway_summary_event(
     movie: &VideoBenchMovie,
     requests: u64,
     total_bytes: u64,
@@ -668,7 +658,10 @@ pub(crate) fn gateway_summary_event(
     stats: &crate::preview::VideoProxyStats,
     stop_reason: &str,
 ) -> serde_json::Value {
-    let last_error = stats.last_error.as_ref().map(|err| format!("{err:?}"));
+    let last_error = stats
+        .last_error
+        .as_ref()
+        .map(|err| sanitize_video_bench_error(movie, format!("{err:?}").as_str()));
     serde_json::json!({
         "type": "gateway_summary",
         "path_hash": movie.path_hash,
@@ -698,6 +691,19 @@ pub(crate) fn throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
 
 pub(crate) fn rounded_throughput_mib_s(bytes: u64, elapsed: Duration) -> f64 {
     (throughput_mib_s(bytes, elapsed) * 1_000.0).round() / 1_000.0
+}
+
+pub(crate) fn sanitize_video_bench_error(movie: &VideoBenchMovie, error: &str) -> String {
+    let mut sanitized = error.to_string();
+    for value in [
+        movie.entry.path.as_str(),
+        movie.entry.server_filename.as_str(),
+    ] {
+        if !value.is_empty() {
+            sanitized = sanitized.replace(value, "<redacted-path>");
+        }
+    }
+    crate::preview::sanitize_player_log_line(&sanitized)
 }
 
 pub(crate) fn redacted_path_hash(path: &str) -> String {
