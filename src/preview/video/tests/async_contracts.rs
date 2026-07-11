@@ -10,9 +10,11 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 struct BlockingUpstream {
+    started: Notify,
     cancelled: AtomicBool,
 }
 
@@ -23,6 +25,7 @@ impl VideoUpstream for BlockingUpstream {
         cancel: &'a CancellationToken,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, VideoError>> + Send + 'a>> {
         Box::pin(async move {
+            self.started.notify_one();
             cancel.cancelled().await;
             self.cancelled.store(true, Ordering::Release);
             Err(VideoError::Cancelled)
@@ -44,6 +47,7 @@ async fn issue_get(local_url: &str) -> std::io::Result<Vec<u8>> {
 async fn cancelling_video_session_stops_blocked_upstream_and_loopback(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let upstream = Arc::new(BlockingUpstream {
+        started: Notify::new(),
         cancelled: AtomicBool::new(false),
     });
     let cancel = CancellationToken::new();
@@ -62,7 +66,7 @@ async fn cancelling_video_session_stops_blocked_upstream_and_loopback(
     .await?;
     let url = server.local_url().to_string();
     let request = tokio::spawn(async move { issue_get(&url).await });
-    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_millis(500), upstream.started.notified()).await?;
 
     cancel.cancel();
     tokio::time::timeout(Duration::from_millis(500), server.shutdown()).await??;

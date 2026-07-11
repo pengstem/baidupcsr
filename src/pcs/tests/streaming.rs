@@ -26,7 +26,12 @@ async fn download_url_range_cancels_while_response_body_is_stalled(
         let (mut socket, _) = listener.accept().await?;
         let mut request = vec![0; 4096];
         let read = socket.read(&mut request).await?;
-        assert!(String::from_utf8_lossy(&request[..read]).contains("Range: bytes=0-7"));
+        let request = String::from_utf8_lossy(&request[..read]);
+        let range = request.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("range").then(|| value.trim())
+        });
+        assert_eq!(range, Some("bytes=0-7"));
         socket
             .write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 8\r\nContent-Range: bytes 0-7/8\r\nConnection: close\r\n\r\nab")
             .await?;
