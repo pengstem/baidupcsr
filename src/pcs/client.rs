@@ -27,13 +27,13 @@ impl PcsClient {
         if let Some(proxy) = options.proxy.as_ref().filter(|value| !value.is_empty()) {
             let proxy = reqwest::Proxy::all(proxy).map_err(|source| PcsError::Network {
                 operation: "client_init".to_string(),
-                message: reqwest_error_label(&source),
+                message: source.to_string(),
             })?;
             builder = builder.proxy(proxy);
         }
         let client = builder.build().map_err(|source| PcsError::Network {
             operation: "client_init".to_string(),
-            message: reqwest_error_label(&source),
+            message: source.to_string(),
         })?;
 
         Ok(Self {
@@ -230,7 +230,7 @@ pub(crate) async fn send_request(
         _ = cancel.cancelled() => Err(cancelled(operation)),
         response = builder.send() => response.map_err(|source| PcsError::Network {
             operation: operation.to_string(),
-            message: reqwest_error_label(&source),
+            message: source.to_string(),
         }),
     }
 }
@@ -248,7 +248,7 @@ pub(crate) async fn response_text(
         _ = cancel.cancelled() => Err(cancelled(operation)),
         text = response.text() => text.map_err(|source| PcsError::Network {
             operation: operation.to_string(),
-            message: reqwest_error_label(&source),
+            message: source.to_string(),
         }),
     }
 }
@@ -259,13 +259,4 @@ pub(crate) fn cancelled(operation: &str) -> PcsError {
     }
 }
 
-pub(crate) fn reqwest_error_label(source: &reqwest::Error) -> String {
-    let mut message = source.to_string();
-    let mut next = std::error::Error::source(source);
-    while let Some(cause) = next {
-        message.push_str(": ");
-        message.push_str(&cause.to_string());
-        next = cause.source();
-    }
-    message
-}
+

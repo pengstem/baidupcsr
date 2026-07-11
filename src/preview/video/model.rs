@@ -1,17 +1,26 @@
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[allow(
     dead_code,
     reason = "legacy validation errors remain part of the test contract"
 )]
 pub enum VideoPreviewError {
+    #[error("invalid video token format")]
     InvalidVideoTokenFormat,
+    #[error("invalid cache budget")]
     InvalidCacheBudget,
+    #[error("invalid range")]
     InvalidRange,
+    #[error("invalid video token")]
     InvalidVideoToken,
+    #[error("inactive video session")]
     InactiveVideoSession,
+    #[error("video chunk too large")]
     VideoChunkTooLarge,
+    #[error("loopback server I/O error")]
     LoopbackServerIo,
+    #[error("malformed HTTP request")]
     MalformedHttpRequest,
+    #[error("unsupported HTTP method")]
     UnsupportedHttpMethod,
 }
 

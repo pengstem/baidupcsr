@@ -224,173 +224,74 @@ impl BrowserRuntime {
         let cache_store = crate::app::DirectoryCacheStore::new(crate::config::discover_cache_dir());
         let preload_planner = crate::app::PagedPreloadPlanner::new(18, 1, 4, 4);
         let config_path = crate::config::discover_config_file(None);
-        let config = match crate::config::load_config(&config_path) {
-            Ok(config) => config,
-            Err(err) => {
-                return Self {
-                    client: None,
-                    account_uid: 0,
-                    account_bduss: None,
-                    config_path,
-                    cache: crate::app::DirectoryCache::new(),
-                    cache_store,
-                    loaded_at: HashMap::new(),
-                    cache_sources: HashMap::new(),
-                    selection_memory: HashMap::new(),
-                    preload_planner,
-                    preview_manager: crate::preview::PreviewManager::new(
-                        PREVIEW_MEMORY_LIMIT_BYTES,
-                    ),
-                    preview_epoch: Arc::new(AtomicU64::new(0)),
-                    preview_cancellation: None,
-                    video_config: ui_config.video_preview,
-                    video_epoch: Arc::new(AtomicU64::new(0)),
-                    active_video: None,
-                    download_dir: PathBuf::from("."),
-                    task_manager: crate::app::TaskManager::new(),
-                    task_cancellations: HashMap::new(),
-                    pending_remote_operation: None,
-                    tx,
-                    rx,
-                    preview_tx,
-                    preview_rx,
-                    task_tx,
-                    task_rx,
-                    root,
-                    tasks,
-                    directory_cancellation: None,
-                    inflight: 0,
-                    initial_path: "/".to_string(),
-                    current_path: "/".to_string(),
-                    startup_notice: Some(format!("config_error: {err}")),
-                    shutdown_complete: false,
-                };
+
+        let mut client: Option<crate::pcs::PcsClient> = None;
+        let mut account_uid: u64 = 0;
+        let mut account_bduss: Option<String> = None;
+        let mut download_dir = PathBuf::from(".");
+        let mut initial_path = "/".to_string();
+        let mut startup_notice: Option<String> = None;
+
+        match crate::config::load_config(&config_path) {
+            Ok(loaded) => {
+                if let Some(user) = loaded.active_user() {
+                    initial_path = if user.workdir.is_empty() {
+                        "/".to_string()
+                    } else {
+                        user.workdir.clone()
+                    };
+                    download_dir = download_dir_for_config(&loaded);
+                    account_uid = user.uid;
+                    account_bduss = bduss_from_user(user);
+                    match build_pcs_client(&loaded, user) {
+                        Ok(c) => client = Some(c),
+                        Err(_) => startup_notice = Some("auth_error".to_string()),
+                    }
+                } else {
+                    download_dir = download_dir_for_config(&loaded);
+                    startup_notice = Some("active_user: missing".to_string());
+                }
             }
-        };
+            Err(err) => {
+                startup_notice = Some(format!("config_error: {err}"));
+            }
+        }
 
-        let Some(user) = config.active_user() else {
-            return Self {
-                client: None,
-                account_uid: 0,
-                account_bduss: None,
-                config_path,
-                cache: crate::app::DirectoryCache::new(),
-                cache_store,
-                loaded_at: HashMap::new(),
-                cache_sources: HashMap::new(),
-                selection_memory: HashMap::new(),
-                preload_planner,
-                preview_manager: crate::preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
-                preview_epoch: Arc::new(AtomicU64::new(0)),
-                preview_cancellation: None,
-                video_config: ui_config.video_preview,
-                video_epoch: Arc::new(AtomicU64::new(0)),
-                active_video: None,
-                download_dir: download_dir_for_config(&config),
-                task_manager: crate::app::TaskManager::new(),
-                task_cancellations: HashMap::new(),
-                pending_remote_operation: None,
-                tx,
-                rx,
-                preview_tx,
-                preview_rx,
-                task_tx,
-                task_rx,
-                root,
-                tasks,
-                directory_cancellation: None,
-                inflight: 0,
-                initial_path: "/".to_string(),
-                current_path: "/".to_string(),
-                startup_notice: Some("active_user: missing".to_string()),
-                shutdown_complete: false,
-            };
-        };
-
-        let initial_path = if user.workdir.is_empty() {
-            "/".to_string()
-        } else {
-            user.workdir.clone()
-        };
-
-        let client =
-            build_pcs_client(&config, user).map_err(|message| format!("auth_error: {message}"));
-        let account_bduss = bduss_from_user(user);
-        let download_dir = download_dir_for_config(&config);
-
-        match client {
-            Ok(client) => Self {
-                client: Some(client),
-                account_uid: user.uid,
-                account_bduss,
-                config_path,
-                cache: crate::app::DirectoryCache::new(),
-                cache_store,
-                loaded_at: HashMap::new(),
-                cache_sources: HashMap::new(),
-                selection_memory: HashMap::new(),
-                preload_planner,
-                preview_manager: crate::preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
-                preview_epoch: Arc::new(AtomicU64::new(0)),
-                preview_cancellation: None,
-                video_config: ui_config.video_preview,
-                video_epoch: Arc::new(AtomicU64::new(0)),
-                active_video: None,
-                download_dir,
-                task_manager: crate::app::TaskManager::new(),
-                task_cancellations: HashMap::new(),
-                pending_remote_operation: None,
-                tx,
-                rx,
-                preview_tx,
-                preview_rx,
-                task_tx,
-                task_rx,
-                root,
-                tasks,
-                directory_cancellation: None,
-                inflight: 0,
-                current_path: initial_path.clone(),
-                initial_path,
-                startup_notice: None,
-                shutdown_complete: false,
-            },
-            Err(message) => Self {
-                client: None,
-                account_uid: user.uid,
-                account_bduss,
-                config_path,
-                cache: crate::app::DirectoryCache::new(),
-                cache_store,
-                loaded_at: HashMap::new(),
-                cache_sources: HashMap::new(),
-                selection_memory: HashMap::new(),
-                preload_planner,
-                preview_manager: crate::preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
-                preview_epoch: Arc::new(AtomicU64::new(0)),
-                preview_cancellation: None,
-                video_config: ui_config.video_preview,
-                video_epoch: Arc::new(AtomicU64::new(0)),
-                active_video: None,
-                download_dir,
-                task_manager: crate::app::TaskManager::new(),
-                task_cancellations: HashMap::new(),
-                pending_remote_operation: None,
-                tx,
-                rx,
-                preview_tx,
-                preview_rx,
-                task_tx,
-                task_rx,
-                root,
-                tasks,
-                directory_cancellation: None,
-                inflight: 0,
-                current_path: initial_path.clone(),
-                initial_path,
-                startup_notice: Some(message),
-                shutdown_complete: false,
-            },
+        Self {
+            client,
+            account_uid,
+            account_bduss,
+            config_path,
+            cache: crate::app::DirectoryCache::new(),
+            cache_store,
+            loaded_at: HashMap::new(),
+            cache_sources: HashMap::new(),
+            selection_memory: HashMap::new(),
+            preload_planner,
+            preview_manager: crate::preview::PreviewManager::new(PREVIEW_MEMORY_LIMIT_BYTES),
+            preview_epoch: Arc::new(AtomicU64::new(0)),
+            preview_cancellation: None,
+            video_config: ui_config.video_preview,
+            video_epoch: Arc::new(AtomicU64::new(0)),
+            active_video: None,
+            download_dir,
+            task_manager: crate::app::TaskManager::new(),
+            task_cancellations: HashMap::new(),
+            pending_remote_operation: None,
+            tx,
+            rx,
+            preview_tx,
+            preview_rx,
+            task_tx,
+            task_rx,
+            root,
+            tasks,
+            directory_cancellation: None,
+            inflight: 0,
+            current_path: initial_path.clone(),
+            initial_path,
+            startup_notice,
+            shutdown_complete: false,
         }
     }
 

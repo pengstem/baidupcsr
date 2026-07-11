@@ -323,7 +323,7 @@ pub(crate) async fn read_bounded_response(
         };
         let chunk = chunk.map_err(|source| PcsError::Network {
             operation: "download".to_string(),
-            message: reqwest_error_label(&source),
+            message: source.to_string(),
         })?;
         if bytes.len().saturating_add(chunk.len()) > capacity {
             return Err(download_protocol_error(format!(
@@ -396,9 +396,7 @@ fn download_protocol_error(message: impl Into<String>) -> PcsError {
 }
 
 pub(crate) fn now_unix_seconds() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
-        })
+    UNIX_EPOCH
+        .elapsed()
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }

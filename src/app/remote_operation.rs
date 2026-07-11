@@ -171,17 +171,9 @@ fn normalize_remote_path(path: &str) -> Result<String, String> {
 }
 
 fn related_dirs_for_paths<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let dirs: BTreeSet<String> = paths.into_iter().map(remote_parent_path).collect();
+    let dirs: BTreeSet<String> = paths
+        .into_iter()
+        .map(|p| crate::tui::TuiApp::parent_path(p).unwrap_or_else(|| "/".to_string()))
+        .collect();
     dirs.into_iter().collect()
-}
-
-fn remote_parent_path(path: &str) -> String {
-    let path = path.trim_end_matches('/');
-    if path.is_empty() || path == "/" {
-        return "/".to_string();
-    }
-    match path.rfind('/') {
-        Some(0) | None => "/".to_string(),
-        Some(index) => path[..index].to_string(),
-    }
 }

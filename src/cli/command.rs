@@ -245,25 +245,17 @@ pub(crate) fn parse_byte_size_arg(value: &str) -> Result<u64, String> {
     if trimmed.is_empty() {
         return Err("byte size must not be empty".to_string());
     }
-    let digit_count = trimmed.bytes().take_while(u8::is_ascii_digit).count();
-    if digit_count == 0 {
-        return Err(format!("invalid byte size {value}"));
-    }
-    let number = trimmed[..digit_count]
-        .parse::<u64>()
-        .map_err(|_| format!("invalid byte size {value}"))?;
-    let suffix = trimmed[digit_count..].to_ascii_lowercase();
-    let multiplier = match suffix.as_str() {
-        "" | "b" => 1,
-        "k" | "kb" | "kib" => 1024,
-        "m" | "mb" | "mib" => 1024 * 1024,
-        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
-        _ => return Err(format!("invalid byte size suffix {suffix}")),
-    };
-    number
-        .checked_mul(multiplier)
-        .filter(|size| *size > 0)
-        .ok_or_else(|| format!("invalid byte size {value}"))
+    trimmed
+        .parse::<bytesize::ByteSize>()
+        .map(|size| size.as_u64())
+        .map_err(|_| format!("invalid byte size {value}"))
+        .and_then(|size| {
+            if size == 0 {
+                Err(format!("invalid byte size {value}"))
+            } else {
+                Ok(size)
+            }
+        })
 }
 
 pub(crate) fn parse_video_bench_positions(value: &str) -> Result<Vec<VideoBenchPosition>, String> {

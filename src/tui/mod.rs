@@ -44,7 +44,6 @@ const PAGE_STEP: usize = 10;
 const HALF_PAGE_STEP: usize = 5;
 const MOUSE_WHEEL_STEP: usize = 3;
 const DOUBLE_CLICK_TICKS: u64 = 5;
-const MARQUEE_EDGE_PAUSE_TICKS: u64 = 8;
 const HEADER_BRAND: &str = "baidupcsr";
 const HEADER_GAP: &str = "  ";
 const BREADCRUMB_SEPARATOR: &str = " > ";

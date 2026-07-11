@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fmt, fs, io,
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -124,28 +124,12 @@ pub struct DirectoryCacheStore {
     root: PathBuf,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum DirectoryCacheStoreError {
-    Io(io::Error),
-    Json(serde_json::Error),
-}
-
-impl fmt::Display for DirectoryCacheStoreError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(err) => write!(f, "directory cache io error: {err}"),
-            Self::Json(err) => write!(f, "directory cache json error: {err}"),
-        }
-    }
-}
-
-impl std::error::Error for DirectoryCacheStoreError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(err) => Some(err),
-            Self::Json(err) => Some(err),
-        }
-    }
+    #[error("directory cache io error: {0}")]
+    Io(#[source] io::Error),
+    #[error("directory cache json error: {0}")]
+    Json(#[source] serde_json::Error),
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -213,12 +197,10 @@ impl DirectoryCacheStore {
 }
 
 fn stable_path_hash(path: &str) -> u64 {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in path.as_bytes() {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

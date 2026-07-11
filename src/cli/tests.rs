@@ -326,7 +326,7 @@ fn video_bench_position_offsets_are_clamped_to_valid_ranges() {
 #[test]
 fn video_bench_parsers_accept_size_suffixes_and_positions() -> Result<(), String> {
     assert_eq!(parse_byte_size_arg("4MiB")?, 4 * 1024 * 1024);
-    assert_eq!(parse_byte_size_arg("2g")?, 2 * 1024 * 1024 * 1024);
+    assert_eq!(parse_byte_size_arg("2GiB")?, 2 * 1024 * 1024 * 1024);
 
     assert_eq!(
         parse_video_bench_positions("start,p10,90,end")?,

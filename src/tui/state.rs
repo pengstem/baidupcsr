@@ -1502,7 +1502,7 @@ impl TuiApp {
         self.confirm_lines = vec![format!(
             "Quit with {} {} still running?",
             self.background_tasks,
-            pluralize(self.background_tasks, "task", "tasks")
+            if self.background_tasks == 1 { "task" } else { "tasks" }
         )];
     }
 
@@ -1547,7 +1547,7 @@ impl TuiApp {
             DirectoryRequestState::Idle if self.background_tasks > 0 => Some(format!(
                 "{} {}",
                 self.background_tasks,
-                pluralize(self.background_tasks, "task", "tasks")
+                if self.background_tasks == 1 { "task" } else { "tasks" }
             )),
             DirectoryRequestState::Idle => None,
         }
