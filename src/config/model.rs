@@ -43,59 +43,28 @@ pub enum ConfigError {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[allow(
-    dead_code,
-    reason = "deserialized fields preserve BaiduPCS-Go config compatibility"
-)]
 pub struct PcsConfig {
     pub baidu_active_uid: u64,
     pub baidu_user_list: Vec<BaiduUser>,
     pub appid: i64,
-    pub cache_size: i64,
-    pub max_parallel: i64,
-    pub max_upload_parallel: i64,
-    pub max_download_load: i64,
-    pub max_upload_load: i64,
-    pub max_download_rate: i64,
-    pub max_upload_rate: i64,
     pub user_agent: String,
     pub pcs_ua: String,
     pub pcs_addr: String,
     pub pan_ua: String,
     pub savedir: String,
     pub enable_https: bool,
-    pub fix_pcs_addr: bool,
-    pub force_login_username: String,
     pub proxy: String,
-    pub proxy_hostnames: String,
-    pub local_addrs: String,
-    pub no_check: bool,
-    pub ignore_illegal: bool,
-    pub u_policy: String,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[allow(
-    dead_code,
-    reason = "deserialized fields preserve BaiduPCS-Go account compatibility"
-)]
 pub struct BaiduUser {
     pub uid: u64,
-    pub name: String,
-    pub sex: String,
-    pub age: f64,
     pub bduss: String,
-    pub ptoken: String,
     pub stoken: String,
     pub baiduid: String,
-    pub sboxtkn: String,
     pub cookies: String,
     pub accesstoken: String,
     pub workdir: String,
-    #[serde(flatten)]
-    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,12 +75,14 @@ pub struct AuthPresence {
     pub access_token: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "snake_case")]
 pub struct UiConfig {
     pub video_preview: VideoPreviewConfig,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(default, rename_all = "snake_case")]
 pub struct VideoPreviewConfig {
     pub enabled: bool,
     pub chunk_size_bytes: u64,
@@ -120,8 +91,10 @@ pub struct VideoPreviewConfig {
     pub player_profile: VideoPlayerProfile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
 pub enum VideoPlayerProfile {
+    #[default]
     User,
     Isolated,
 }
@@ -150,15 +123,13 @@ impl VideoPlayerProfile {
     }
 }
 
-impl Default for UiConfig {
+impl Default for VideoPreviewConfig {
     fn default() -> Self {
         Self {
-            video_preview: VideoPreviewConfig {
-                enabled: true,
-                chunk_size_bytes: 4 * 1024 * 1024,
-                max_chunks: 32,
-                player_profile: VideoPlayerProfile::User,
-            },
+            enabled: true,
+            chunk_size_bytes: 4 * 1024 * 1024,
+            max_chunks: 32,
+            player_profile: VideoPlayerProfile::User,
         }
     }
 }

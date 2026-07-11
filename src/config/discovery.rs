@@ -174,33 +174,6 @@ pub(crate) fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, Confi
     Ok(config)
 }
 
-pub(crate) fn parse_value<T>(
-    path: &Path,
-    value: &str,
-    message: &'static str,
-) -> Result<T, ConfigError>
-where
-    T: std::str::FromStr,
-{
-    value
-        .parse::<T>()
-        .map_err(|_| invalid_ui_config(path, message))
-}
-
-pub(crate) fn parse_video_player_profile(
-    path: &Path,
-    value: &str,
-) -> Result<VideoPlayerProfile, ConfigError> {
-    match value {
-        "user" => Ok(VideoPlayerProfile::User),
-        "isolated" => Ok(VideoPlayerProfile::Isolated),
-        _ => Err(invalid_ui_config(
-            path,
-            "expected video player profile user or isolated",
-        )),
-    }
-}
-
 pub(crate) fn invalid_ui_config(path: &Path, message: &str) -> ConfigError {
     ConfigError::InvalidUiConfig {
         path: path.to_path_buf(),

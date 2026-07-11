@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 #[cfg(test)]
 mod tests;
 use std::env;
