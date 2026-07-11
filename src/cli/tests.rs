@@ -449,6 +449,7 @@ fn video_bench_remote_parent_is_extracted() {
 
 #[test]
 fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), String> {
+    const BENCHMARK_BYTES: usize = 1_294_529;
     let movie = video_bench_test_movie();
     let options = VideoBenchCliOptions::default();
     let resolved = VideoBenchResolvedOptions {
@@ -458,15 +459,15 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
         memory_limit_bytes: 2 * 1024 * 1024,
     };
     let fetch = VideoBenchRangeFetch {
-        bytes_len: 1024 * 1024,
+        bytes_len: BENCHMARK_BYTES,
         candidate_index: 1,
         refresh_count: 0,
     };
     let response = VideoBenchHttpResponse {
         status_code: 206,
-        body_len: 1024 * 1024,
-        content_length: Some(1024 * 1024),
-        content_range: Some("bytes 0-1048575/1048576".to_string()),
+        body_len: BENCHMARK_BYTES,
+        content_length: Some(BENCHMARK_BYTES as u64),
+        content_range: Some("bytes 0-1294528/1294529".to_string()),
     };
     let stats = crate::preview::VideoProxyStats {
         cache_hits: 3,
@@ -478,7 +479,7 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
         ..crate::preview::VideoProxyStats::default()
     };
     let escaped_error = "bad quote \" slash \\ line\ncontrol \u{0001}";
-    let elapsed = Duration::from_millis(500);
+    let elapsed = Duration::from_secs(1);
     let lines = [
         format_video_bench_start(&options, &resolved, &movie, 42),
         format_video_bench_end(&options),
@@ -487,7 +488,7 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
             VideoBenchPosition::Start,
             0,
             0,
-            1024 * 1024,
+            BENCHMARK_BYTES as u64,
             &fetch,
             elapsed,
         ),
@@ -500,9 +501,17 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
             elapsed,
             escaped_error,
         ),
-        format_gateway_range_event(&movie, 0, 1024 * 1024, &response, elapsed, true, None),
+        format_gateway_range_event(
+            &movie,
+            0,
+            BENCHMARK_BYTES as u64,
+            &response,
+            elapsed,
+            true,
+            None,
+        ),
         format_gateway_range_error_event(&movie, 0, 1024, elapsed, escaped_error),
-        format_gateway_summary_event(&movie, 1, 1024 * 1024, elapsed, &stats, "eof"),
+        format_gateway_summary_event(&movie, 1, BENCHMARK_BYTES as u64, elapsed, &stats, "eof"),
     ];
 
     for line in &lines {
@@ -527,11 +536,16 @@ fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), St
     let error_event: serde_json::Value =
         serde_json::from_str(&lines[3]).map_err(|error| error.to_string())?;
     assert_eq!(error_event["error"], escaped_error);
-    assert!(lines[2].contains("\"throughput_mib_s\":2.000"));
-    assert!(lines[3].contains("\"throughput_mib_s\":0.000"));
-    assert!(lines[4].contains("\"throughput_mib_s\":2.000"));
-    assert!(lines[5].contains("\"throughput_mib_s\":0.000"));
-    assert!(lines[6].contains("\"throughput_mib_s\":2.000"));
+    let throughput_values = lines
+        .iter()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    assert_eq!(throughput_values[2]["throughput_mib_s"], 1.235);
+    assert_eq!(throughput_values[3]["throughput_mib_s"], 0.0);
+    assert_eq!(throughput_values[4]["throughput_mib_s"], 1.235);
+    assert_eq!(throughput_values[5]["throughput_mib_s"], 0.0);
+    assert_eq!(throughput_values[6]["throughput_mib_s"], 1.235);
     Ok(())
 }
 
