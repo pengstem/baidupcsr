@@ -196,7 +196,7 @@ async fn download_cancel_preserves_partial_file_and_reports_written_bytes(
         bytes_written,
     } = outcome
     else {
-        panic!("cancelled download must return DownloadOutcome::Cancelled");
+        return Err("cancelled download must return DownloadOutcome::Cancelled".into());
     };
     assert_eq!(bytes_written, 4);
     assert_eq!(
@@ -204,10 +204,11 @@ async fn download_cancel_preserves_partial_file_and_reports_written_bytes(
         format!("{}.part", target.to_string_lossy())
     );
     assert_eq!(tokio::fs::read(&partial_path).await?, vec![1; 4]);
-    assert_eq!(
-        progress_rx.recv().await.expect("progress event").bytes_done,
-        4
-    );
+    let progress = progress_rx
+        .recv()
+        .await
+        .ok_or_else(|| std::io::Error::other("missing progress event"))?;
+    assert_eq!(progress.bytes_done, 4);
     assert!(!target.exists());
     tokio::fs::remove_file(partial_path).await?;
     Ok(())
@@ -242,7 +243,8 @@ async fn completed_download_is_atomically_published_at_target(
     while let Some(progress) = progress_rx.recv().await {
         last = Some(progress);
     }
-    assert_eq!(last.expect("final progress").bytes_done, 8);
+    let last = last.ok_or_else(|| std::io::Error::other("missing final progress"))?;
+    assert_eq!(last.bytes_done, 8);
     tokio::fs::remove_file(target).await?;
     Ok(())
 }

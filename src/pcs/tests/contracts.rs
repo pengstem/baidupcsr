@@ -202,7 +202,8 @@ fn parse_file_operation_response_accepts_errno_zero_and_rejects_remote_error() -
         "delete",
         r#"{"error_code":31070,"error_msg":"file delete failed"}"#,
     )
-    .expect_err("remote delete error should fail");
+    .err()
+    .ok_or_else(|| "remote delete error should fail".to_string())?;
     assert_eq!(
         err,
         PcsError::Remote {

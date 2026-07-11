@@ -67,8 +67,8 @@ fn text_has_style(
 
         for x in buffer.area.left()..buffer.area.right() {
             let cell = &buffer[(x, y)];
-            let fg_matches = expected_fg.map_or(true, |fg| cell.fg == fg);
-            let bg_matches = expected_bg.map_or(true, |bg| cell.bg == bg);
+            let fg_matches = expected_fg.is_none_or(|fg| cell.fg == fg);
+            let bg_matches = expected_bg.is_none_or(|bg| cell.bg == bg);
             if fg_matches && bg_matches {
                 return true;
             }

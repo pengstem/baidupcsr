@@ -25,18 +25,17 @@ fn file(fs_id: i64, path: &str) -> FileEntry {
 }
 
 #[tokio::test]
-async fn full_app_event_channel_does_not_block_local_ui_state_updates() {
+async fn full_app_event_channel_does_not_block_local_ui_state_updates(
+) -> Result<(), Box<dyn std::error::Error>> {
     let (events, _receiver) = mpsc::channel(256);
     for generation in 0..256 {
-        events
-            .try_send(AppEvent::DirectoryLoaded {
-                generation,
-                path: "/blocked".to_string(),
-                result: Err(PcsError::Cancelled {
-                    operation: "list".to_string(),
-                }),
-            })
-            .expect("channel should accept exactly its declared capacity");
+        events.try_send(AppEvent::DirectoryLoaded {
+            generation,
+            path: "/blocked".to_string(),
+            result: Err(PcsError::Cancelled {
+                operation: "list".to_string(),
+            }),
+        })?;
     }
     assert!(events
         .try_send(AppEvent::DirectoryLoaded {
@@ -52,6 +51,7 @@ async fn full_app_event_channel_does_not_block_local_ui_state_updates() {
     app.handle_key_event(KeyEvent::Char('j'));
     assert_eq!(app.selected_index(), Some(1));
     assert!(started.elapsed() < Duration::from_millis(20));
+    Ok(())
 }
 
 #[tokio::test]
