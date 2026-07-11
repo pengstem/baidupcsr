@@ -1,4 +1,6 @@
 use std::ffi::OsString;
+use std::fmt;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -13,16 +15,66 @@ use crate::pcs::FileEntry;
 
 use super::{
     active_player_log_line, bduss_from_user, breadcrumb_preferred_selection, build_pcs_client,
-    delete_plan_for_selection, download_target_path, format_video_bench_start,
-    is_local_open_size_allowed, is_video_entry, json_string, local_open_command_candidates,
-    local_open_target_path, pan_user_agent_for_config, parse_byte_size_arg, parse_command,
-    parse_http_request_path, parse_remote_command, parse_video_bench_positions,
+    delete_plan_for_selection, download_target_path, error_chain_label,
+    format_gateway_range_error_event, format_gateway_range_event, format_gateway_summary_event,
+    format_source_error_event, format_source_range_event, format_video_bench_end,
+    format_video_bench_start, is_local_open_size_allowed, is_video_entry,
+    local_open_command_candidates, local_open_target_path, pan_user_agent_for_config,
+    parse_byte_size_arg, parse_command, parse_remote_command, parse_video_bench_positions,
     persist_workdir_if_active, preview_key_for_entry, proxy_from_config_or_env, redacted_path_hash,
     remote_parent_path_for_bench, rename_plan_for_selected, run_remote_search_task,
     task_panel_item, video_bench_offset, CommandAction, ParsedRemoteCommand, PcsVideoUpstream,
-    RemoteSearchMode, TransferTaskEvent, VideoBenchCase, VideoBenchCliOptions, VideoBenchMovie,
-    VideoBenchPosition, VideoBenchResolvedOptions, LOCAL_OPEN_MAX_BYTES,
+    RemoteSearchMode, TransferTaskEvent, VideoBenchCase, VideoBenchCliOptions,
+    VideoBenchHttpResponse, VideoBenchMovie, VideoBenchOutput, VideoBenchPosition,
+    VideoBenchRangeFetch, VideoBenchResolvedOptions, LOCAL_OPEN_MAX_BYTES,
 };
+
+#[derive(Clone)]
+struct SharedTestWriter {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    fail_flush: bool,
+}
+
+impl Write for SharedTestWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.bytes
+            .lock()
+            .map_err(|_| io::Error::other("test writer lock poisoned"))?
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.fail_flush {
+            Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "synthetic flush failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ChainedTestError {
+    message: &'static str,
+    source: Option<Box<ChainedTestError>>,
+}
+
+impl fmt::Display for ChainedTestError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl std::error::Error for ChainedTestError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|source| source as &(dyn std::error::Error + 'static))
+    }
+}
 
 fn config_fixture(name: &str) -> Result<crate::config::PcsConfig, String> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -357,30 +409,22 @@ fn byte_size_parser_rejects_values_that_overflow_u64() {
     assert!(parse_byte_size_arg("18446744073709551615g").is_err());
 }
 
-#[test]
-fn video_bench_redaction_helpers_do_not_emit_raw_path() {
-    let path = "/电影/斯巴达300勇士.mkv";
-    let hash = redacted_path_hash(path);
-
-    assert!(hash.starts_with("fnv1a64:"));
-    assert!(!hash.contains("斯巴达"));
-    assert_eq!(
-        json_string("quote\" slash\\ line\n"),
-        "\"quote\\\" slash\\\\ line\\n\""
-    );
+fn video_bench_test_movie() -> VideoBenchMovie {
+    let remote_path = "/电影/斯巴达300勇士.mkv";
+    let mut entry = file(9, 1024 * 1024);
+    entry.path = remote_path.to_string();
+    entry.server_filename = "斯巴达300勇士.mkv".to_string();
+    VideoBenchMovie {
+        entry,
+        size_bytes: 1024 * 1024,
+        path_hash: redacted_path_hash(remote_path),
+        extension: "mkv".to_string(),
+    }
 }
 
 #[test]
 fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
-    let mut entry = file(9, 1024);
-    entry.path = "/电影/斯巴达300勇士.mkv".to_string();
-    entry.server_filename = "斯巴达300勇士.mkv".to_string();
-    let movie = VideoBenchMovie {
-        entry,
-        size_bytes: 1024,
-        path_hash: redacted_path_hash("/电影/斯巴达300勇士.mkv"),
-        extension: "mkv".to_string(),
-    };
+    let movie = video_bench_test_movie();
     let resolved = VideoBenchResolvedOptions {
         chunk_size_bytes: 1024,
         max_chunks: 2,
@@ -398,14 +442,212 @@ fn video_bench_start_event_uses_hashes_instead_of_raw_identifiers() {
 }
 
 #[test]
-fn video_bench_remote_parent_and_loopback_path_are_extracted() -> Result<(), String> {
+fn video_bench_remote_parent_is_extracted() {
     assert_eq!(remote_parent_path_for_bench("/电影/clip.mkv"), "/电影");
     assert_eq!(remote_parent_path_for_bench("/clip.mkv"), "/");
-    assert_eq!(
-        parse_http_request_path("http://127.0.0.1:1234/preview/video/token")?,
-        "/preview/video/token"
-    );
+}
+
+#[test]
+fn video_bench_formatters_emit_valid_single_line_json_objects() -> Result<(), String> {
+    let movie = video_bench_test_movie();
+    let options = VideoBenchCliOptions::default();
+    let resolved = VideoBenchResolvedOptions {
+        chunk_size_bytes: 1024 * 1024,
+        max_chunks: 2,
+        prefetch_chunks: 1,
+        memory_limit_bytes: 2 * 1024 * 1024,
+    };
+    let fetch = VideoBenchRangeFetch {
+        bytes_len: 1024 * 1024,
+        candidate_index: 1,
+        refresh_count: 0,
+    };
+    let response = VideoBenchHttpResponse {
+        status_code: 206,
+        body_len: 1024 * 1024,
+        content_length: Some(1024 * 1024),
+        content_range: Some("bytes 0-1048575/1048576".to_string()),
+    };
+    let stats = crate::preview::VideoProxyStats {
+        cache_hits: 3,
+        upstream_fetches: 2,
+        prefetch_fetches: 1,
+        used_bytes: 1024 * 1024,
+        window_start: Some(0),
+        window_end_inclusive: Some(1024 * 1024 - 1),
+        ..crate::preview::VideoProxyStats::default()
+    };
+    let escaped_error = "bad quote \" slash \\ line\ncontrol \u{0001}";
+    let elapsed = Duration::from_millis(500);
+    let lines = [
+        format_video_bench_start(&options, &resolved, &movie, 42),
+        format_video_bench_end(&options),
+        format_source_range_event(
+            &movie,
+            VideoBenchPosition::Start,
+            0,
+            0,
+            1024 * 1024,
+            &fetch,
+            elapsed,
+        ),
+        format_source_error_event(
+            &movie,
+            VideoBenchPosition::Tail,
+            1,
+            0,
+            1024,
+            elapsed,
+            escaped_error,
+        ),
+        format_gateway_range_event(&movie, 0, 1024 * 1024, &response, elapsed, true, None),
+        format_gateway_range_error_event(&movie, 0, 1024, elapsed, escaped_error),
+        format_gateway_summary_event(&movie, 1, 1024 * 1024, elapsed, &stats, "eof"),
+    ];
+
+    for line in &lines {
+        if line
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+        {
+            return Err(format!("event contains a literal line break: {line:?}"));
+        }
+        let value: serde_json::Value = serde_json::from_str(line)
+            .map_err(|error| format!("event is not valid JSON: {error}: {line:?}"))?;
+        if !value.is_object() {
+            return Err(format!("event must be a JSON object: {line:?}"));
+        }
+        if let Some(throughput) = value.get("throughput_mib_s") {
+            if !throughput.is_number() {
+                return Err(format!("throughput must be numeric: {line:?}"));
+            }
+        }
+    }
+
+    let error_event: serde_json::Value =
+        serde_json::from_str(&lines[3]).map_err(|error| error.to_string())?;
+    assert_eq!(error_event["error"], escaped_error);
+    assert!(lines[2].contains("\"throughput_mib_s\":2.000"));
+    assert!(lines[3].contains("\"throughput_mib_s\":0.000"));
+    assert!(lines[4].contains("\"throughput_mib_s\":2.000"));
+    assert!(lines[5].contains("\"throughput_mib_s\":0.000"));
+    assert!(lines[6].contains("\"throughput_mib_s\":2.000"));
     Ok(())
+}
+
+#[test]
+fn video_bench_redacted_events_do_not_leak_sensitive_inputs() {
+    let raw_path = "/电影/斯巴达300勇士.mkv";
+    let raw_token = "SECRET_TOKEN_123";
+    let raw_url = "https://d.pcs.baidu.com/file/private?token=SECRET_TOKEN_123";
+    let movie = video_bench_test_movie();
+    let mut options = VideoBenchCliOptions::default();
+    options.remote_path = raw_path.to_string();
+    options.redact = true;
+    let resolved = VideoBenchResolvedOptions {
+        chunk_size_bytes: 1024,
+        max_chunks: 2,
+        prefetch_chunks: 1,
+        memory_limit_bytes: 2048,
+    };
+    let sensitive_error = format!("fetch failed for {raw_path} via {raw_url} token={raw_token}");
+    let stats = crate::preview::VideoProxyStats {
+        last_error: Some(crate::preview::VideoError::Upstream(
+            sensitive_error.clone(),
+        )),
+        ..crate::preview::VideoProxyStats::default()
+    };
+    let events = [
+        format_video_bench_start(&options, &resolved, &movie, 42),
+        format_source_error_event(
+            &movie,
+            VideoBenchPosition::Start,
+            0,
+            0,
+            1024,
+            Duration::from_millis(1),
+            sensitive_error.as_str(),
+        ),
+        format_gateway_range_error_event(
+            &movie,
+            0,
+            1024,
+            Duration::from_millis(1),
+            sensitive_error.as_str(),
+        ),
+        format_gateway_summary_event(&movie, 0, 0, Duration::from_millis(1), &stats, "error"),
+    ]
+    .join("\n");
+
+    assert!(!events.contains(raw_path));
+    assert!(!events.contains(raw_token));
+    assert!(!events.contains(raw_url));
+}
+
+#[test]
+fn video_bench_output_emits_one_ndjson_object_per_line() -> Result<(), String> {
+    let bytes = Arc::new(Mutex::new(Vec::new()));
+    let writer = SharedTestWriter {
+        bytes: Arc::clone(&bytes),
+        fail_flush: false,
+    };
+    let mut output = VideoBenchOutput {
+        writer: Box::new(writer),
+    };
+
+    output.emit(&serde_json::json!({ "type": "first" }))?;
+    output.emit(&serde_json::json!({ "type": "second" }))?;
+    output.flush()?;
+
+    let written = String::from_utf8(
+        bytes
+            .lock()
+            .map_err(|_| "test writer lock poisoned".to_string())?
+            .clone(),
+    )
+    .map_err(|error| error.to_string())?;
+    let lines = written.lines().collect::<Vec<_>>();
+    assert!(written.ends_with('\n'));
+    assert_eq!(lines.len(), 2);
+    let first: serde_json::Value =
+        serde_json::from_str(lines[0]).map_err(|error| error.to_string())?;
+    let second: serde_json::Value =
+        serde_json::from_str(lines[1]).map_err(|error| error.to_string())?;
+    assert_eq!(first["type"], "first");
+    assert_eq!(second["type"], "second");
+    Ok(())
+}
+
+#[test]
+fn video_bench_output_propagates_flush_errors() {
+    let mut output = VideoBenchOutput {
+        writer: Box::new(SharedTestWriter {
+            bytes: Arc::new(Mutex::new(Vec::new())),
+            fail_flush: true,
+        }),
+    };
+
+    assert!(output.flush().is_err());
+}
+
+#[test]
+fn error_chain_label_includes_every_cause() {
+    let error = ChainedTestError {
+        message: "outer request failed",
+        source: Some(Box::new(ChainedTestError {
+            message: "transport failed",
+            source: Some(Box::new(ChainedTestError {
+                message: "socket reset",
+                source: None,
+            })),
+        })),
+    };
+
+    let label = error_chain_label(&error);
+
+    assert!(label.contains("outer request failed"));
+    assert!(label.contains("transport failed"));
+    assert!(label.contains("socket reset"));
 }
 
 #[tokio::test]
