@@ -1,6 +1,7 @@
 use super::*;
 
 pub(crate) enum CommandAction {
+    Help,
     Doctor { config_dir: Option<PathBuf> },
     VideoBench(VideoBenchCliOptions),
     TuiShell,
@@ -91,6 +92,7 @@ impl Default for VideoBenchCliOptions {
 pub(crate) fn parse_command(args: &[String]) -> CommandAction {
     match args {
         [] => CommandAction::TuiShell,
+        [flag] if matches!(flag.as_str(), "--help" | "-h") => CommandAction::Help,
         [cmd] if cmd == "tui" => CommandAction::TuiShell,
         [cmd] if cmd == "doctor" => CommandAction::Doctor { config_dir: None },
         [cmd, flag] if cmd == "doctor" && flag == "--redact" => {

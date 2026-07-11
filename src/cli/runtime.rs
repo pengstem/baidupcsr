@@ -1,5 +1,7 @@
 use super::*;
 
+const USAGE: &str = "usage: baidupcsr-cli [tui|doctor [--redact]|video-bench --path REMOTE_PATH [--case source|gateway|all] [--duration SECONDS] [--output PATH] [--redact]]";
+
 pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     let args: Vec<String> = args
         .into_iter()
@@ -7,6 +9,10 @@ pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
     match parse_command(&args) {
+        CommandAction::Help => {
+            println!("{USAGE}");
+            ExitCode::SUCCESS
+        }
         CommandAction::Doctor { config_dir } => {
             print_doctor(config_dir);
             ExitCode::SUCCESS
@@ -38,9 +44,7 @@ pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             }
         }
         CommandAction::UsageError => {
-            eprintln!(
-                "usage: baidupcsr-cli [tui|doctor [--redact]|video-bench --path REMOTE_PATH [--case source|gateway|all] [--duration SECONDS] [--output PATH] [--redact]]"
-            );
+            eprintln!("{USAGE}");
             ExitCode::from(2)
         }
     }
