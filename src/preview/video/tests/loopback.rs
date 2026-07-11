@@ -169,7 +169,13 @@ async fn loopback_server_serves_open_ended_far_seek_as_bounded_chunk(
     let response = raw_http(server.local_url(), "GET", Some("bytes=900000-")).await?;
     assert!(header(&response).contains("Content-Range: bytes 900000-900063/1000000"));
     assert_eq!(body(&response).len(), 64);
-    assert_eq!(upstream.ranges(), vec![VideoRange::new(900_000, 900_063)?]);
+    assert_eq!(
+        upstream.ranges(),
+        vec![VideoRange {
+            start: 900_000,
+            end_inclusive: 900_063,
+        }]
+    );
     server.shutdown().await?;
     Ok(())
 }
@@ -182,7 +188,13 @@ async fn loopback_server_serves_suffix_range_from_file_tail(
     let response = raw_http(server.local_url(), "GET", Some("bytes=-32")).await?;
     assert!(header(&response).contains("Content-Range: bytes 968-999/1000"));
     assert_eq!(body(&response).len(), 32);
-    assert_eq!(upstream.ranges(), vec![VideoRange::new(968, 999)?]);
+    assert_eq!(
+        upstream.ranges(),
+        vec![VideoRange {
+            start: 968,
+            end_inclusive: 999,
+        }]
+    );
     server.shutdown().await?;
     Ok(())
 }

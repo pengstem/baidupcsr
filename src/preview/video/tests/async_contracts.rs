@@ -47,10 +47,14 @@ async fn cancelling_video_session_stops_blocked_upstream_and_loopback(
         cancelled: AtomicBool::new(false),
     });
     let cancel = CancellationToken::new();
+    let token = VideoToken::new("session_cancel_123456")
+        .map_err(|error| format!("invalid fixture token: {error:?}"))?;
+    let budget = VideoCacheBudget::new(64, 2)
+        .map_err(|error| format!("invalid fixture budget: {error:?}"))?;
     let server = VideoLoopbackServer::spawn_with_prefetch(
         4096,
-        VideoToken::new("session_cancel_123456")?,
-        VideoCacheBudget::new(64, 2)?,
+        token,
+        budget,
         0,
         upstream.clone(),
         cancel.clone(),

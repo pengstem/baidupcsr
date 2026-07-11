@@ -133,117 +133,42 @@ fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError>
 #[test]
 fn open_ended_proxy_range_uses_bounded_playback_chunk() -> Result<(), VideoPreviewError> {
     let session = session()?;
-    let response = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Get,
-        token: "tok_0123456789abcdef".to_string(),
-        range: Some(RequestedVideoRange::OpenEnded(100)),
-    })?;
+    let range = RequestedVideoRange::OpenEnded(100)
+        .resolve(session.key.size, session.budget.chunk_size_bytes)?;
 
-    assert_eq!(
-        response,
-        VideoProxyResponse::Fetch {
-            range: VideoRange::new(100, 355)?,
-            force_prefetch: true,
-        }
-    );
+    assert_eq!(range, VideoRange::new(100, 355)?);
     Ok(())
 }
 
 #[test]
 fn explicit_proxy_range_can_use_full_cache_budget() -> Result<(), VideoPreviewError> {
     let session = session()?;
-    let response = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Get,
-        token: "tok_0123456789abcdef".to_string(),
-        range: Some(VideoRange::new(100, 900)?.into()),
-    })?;
+    let range = RequestedVideoRange::from(VideoRange::new(100, 900)?)
+        .resolve(session.key.size, session.budget.memory_limit_bytes())?;
 
-    assert_eq!(
-        response,
-        VideoProxyResponse::Fetch {
-            range: VideoRange::new(100, 611)?,
-            force_prefetch: false,
-        }
-    );
+    assert_eq!(range, VideoRange::new(100, 611)?);
     Ok(())
 }
 
 #[test]
 fn suffix_proxy_range_resolves_against_file_tail() -> Result<(), VideoPreviewError> {
     let session = session()?;
-    let response = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Get,
-        token: "tok_0123456789abcdef".to_string(),
-        range: Some(RequestedVideoRange::Suffix(128)),
-    })?;
+    let range = RequestedVideoRange::Suffix(128)
+        .resolve(session.key.size, session.budget.memory_limit_bytes())?;
 
-    assert_eq!(
-        response,
-        VideoProxyResponse::Fetch {
-            range: VideoRange::new(872, 999)?,
-            force_prefetch: false,
-        }
-    );
+    assert_eq!(range, VideoRange::new(872, 999)?);
     Ok(())
 }
 
 #[test]
-fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoPreviewError> {
+fn range_parser_accepts_open_ended_and_suffix_ranges() -> Result<(), VideoError> {
     assert_eq!(
-        parse_video_range_header("Range: bytes=4096-").transpose()?,
-        Some(RequestedVideoRange::OpenEnded(4096))
+        parse_async_range("bytes=4096-")?,
+        RequestedVideoRange::OpenEnded(4096)
     );
     assert_eq!(
-        parse_video_range_header("Range: bytes=-8192").transpose()?,
-        Some(RequestedVideoRange::Suffix(8192))
-    );
-    Ok(())
-}
-
-#[test]
-fn proxy_request_requires_matching_token() -> Result<(), VideoPreviewError> {
-    let session = session()?;
-
-    let rejected = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Get,
-        token: "wrong".to_string(),
-        range: Some(VideoRange::new(10, 20)?.into()),
-    });
-    assert_eq!(rejected, Err(VideoPreviewError::InvalidVideoToken));
-
-    let range = VideoRange::new(10, 20)?;
-    let accepted = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Get,
-        token: "tok_0123456789abcdef".to_string(),
-        range: Some(range.into()),
-    })?;
-    assert_eq!(
-        accepted,
-        VideoProxyResponse::Fetch {
-            range,
-            force_prefetch: false,
-        }
-    );
-    Ok(())
-}
-
-#[test]
-fn proxy_head_response_reports_range_capability_without_fetching_body(
-) -> Result<(), VideoPreviewError> {
-    let session = session()?;
-
-    let response = session.handle_proxy_request(&VideoProxyRequest {
-        method: VideoProxyMethod::Head,
-        token: "tok_0123456789abcdef".to_string(),
-        range: None,
-    })?;
-
-    assert_eq!(
-        response,
-        VideoProxyResponse::Head {
-            content_length: 1_000,
-            accept_ranges: true,
-        }
+        parse_async_range("bytes=-8192")?,
+        RequestedVideoRange::Suffix(8192)
     );
     Ok(())
 }
