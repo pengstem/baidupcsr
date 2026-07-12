@@ -308,6 +308,12 @@ pub struct TuiApp {
     pub(crate) preload_lines: Vec<String>,
     pub(crate) command_input: String,
     pub(crate) filter_input: String,
+    /// Indices matching `filter_input`, kept stable between filter/list changes.
+    ///
+    /// Rendering asks for the visible indices several times per frame.  Keeping
+    /// this derived list on the app avoids repeatedly allocating and lowercasing
+    /// every filename on the hot render path.
+    filtered_indices_cache: Vec<usize>,
     pub(crate) search_input: String,
     pub(crate) rename_input: String,
     pub(crate) sort_mode: SortMode,
@@ -345,6 +351,7 @@ impl TuiApp {
             preload_lines: Vec::new(),
             command_input: String::new(),
             filter_input: String::new(),
+            filtered_indices_cache: Vec::new(),
             search_input: String::new(),
             rename_input: String::new(),
             sort_mode: SortMode::default(),
@@ -479,6 +486,7 @@ impl TuiApp {
         self.selected_index = None;
         self.scroll_offset = 0;
         self.filter_input.clear();
+        self.rebuild_filtered_indices();
         self.search_input.clear();
         self.selected_paths.clear();
         self.last_file_click = None;
@@ -955,17 +963,20 @@ impl TuiApp {
     }
 
     pub(crate) fn move_to_bottom(&mut self) {
-        let indices = self.filtered_indices();
-        let Some(index) = indices.last().copied() else {
-            return;
+        let (index, count) = {
+            let indices = self.filtered_indices();
+            let Some(index) = indices.last().copied() else {
+                return;
+            };
+            (index, indices.len())
         };
         self.select_index(Some(index));
-        self.scroll_offset = indices.len().saturating_sub(1);
+        self.scroll_offset = count.saturating_sub(1);
     }
 
     pub(crate) fn move_visible_by(&mut self, delta: isize) {
         let indices = self.filtered_indices();
-        let Some(position) = self.selected_visible_position(&indices) else {
+        let Some(position) = self.selected_visible_position(indices) else {
             return;
         };
         let last = indices.len().saturating_sub(1);
@@ -988,8 +999,11 @@ impl TuiApp {
     pub(crate) fn scroll_files_to_offset(&mut self, offset: usize, rows: usize) -> bool {
         let old_offset = self.scroll_offset;
         let old_selection = self.selected_index;
-        let indices = self.filtered_indices();
-        if indices.is_empty() {
+        let (entry_count, selected_position) = {
+            let indices = self.filtered_indices();
+            (indices.len(), self.selected_visible_position(indices))
+        };
+        if entry_count == 0 {
             self.scroll_offset = 0;
             self.select_index(None);
             return old_offset != self.scroll_offset || old_selection != self.selected_index;
@@ -998,18 +1012,19 @@ impl TuiApp {
             return false;
         }
 
-        let rows = rows.min(indices.len());
-        let start = offset.min(indices.len().saturating_sub(rows));
+        let rows = rows.min(entry_count);
+        let start = offset.min(entry_count.saturating_sub(rows));
         let end = start.saturating_add(rows);
-        self.scroll_offset = start;
 
-        let target_position = match self.selected_visible_position(&indices) {
+        let target_position = match selected_position {
             Some(position) if position >= start && position < end => position,
             Some(position) if position < start => start,
             Some(_) => end.saturating_sub(1),
             None => start,
         };
-        self.select_index(indices.get(target_position).copied());
+        let target_index = self.filtered_indices().get(target_position).copied();
+        self.scroll_offset = start;
+        self.select_index(target_index);
 
         old_offset != self.scroll_offset || old_selection != self.selected_index
     }
@@ -1165,6 +1180,7 @@ impl TuiApp {
             KeyAction::Filter => {
                 self.mode = AppMode::Filter;
                 self.filter_input.clear();
+                self.rebuild_filtered_indices();
                 self.sync_selection_to_filter();
             }
             KeyAction::Search => {
@@ -1242,11 +1258,13 @@ impl TuiApp {
             KeyEvent::Esc => {
                 self.mode = AppMode::Normal;
                 self.filter_input.clear();
+                self.rebuild_filtered_indices();
                 self.sync_selection_to_filter();
                 None
             }
             KeyEvent::Backspace => {
                 self.filter_input.pop();
+                self.rebuild_filtered_indices();
                 self.sync_selection_to_filter();
                 None
             }
@@ -1256,6 +1274,7 @@ impl TuiApp {
             }
             KeyEvent::Char(ch) => {
                 self.filter_input.push(ch);
+                self.rebuild_filtered_indices();
                 self.sync_selection_to_filter();
                 None
             }
@@ -1440,6 +1459,7 @@ impl TuiApp {
     ) {
         sort_entries(&mut entries, self.sort_mode);
         self.entries = entries;
+        self.rebuild_filtered_indices();
         self.last_file_click = None;
         let selected_index = preferred_selection_path
             .and_then(|path| self.entries.iter().position(|entry| entry.path == path))
@@ -1451,6 +1471,7 @@ impl TuiApp {
     pub(crate) fn sort_entries_preserving_selection(&mut self) {
         let selected_path = self.selected_entry().map(|entry| entry.path.clone());
         sort_entries(&mut self.entries, self.sort_mode);
+        self.rebuild_filtered_indices();
         self.select_index(
             selected_path
                 .as_deref()
@@ -1458,22 +1479,27 @@ impl TuiApp {
         );
     }
 
-    pub(crate) fn filtered_indices(&self) -> Vec<usize> {
+    pub(crate) fn filtered_indices(&self) -> &[usize] {
+        &self.filtered_indices_cache
+    }
+
+    fn rebuild_filtered_indices(&mut self) {
         let needle = self.filter_input.trim().to_lowercase();
-        if needle.is_empty() {
-            return (0..self.entries.len()).collect();
-        }
-        self.entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                entry
-                    .server_filename
-                    .to_lowercase()
-                    .contains(needle.as_str())
-                    .then_some(index)
-            })
-            .collect()
+        self.filtered_indices_cache = if needle.is_empty() {
+            (0..self.entries.len()).collect()
+        } else {
+            self.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, entry)| {
+                    entry
+                        .server_filename
+                        .to_lowercase()
+                        .contains(needle.as_str())
+                        .then_some(index)
+                })
+                .collect()
+        };
     }
 
     pub(crate) fn selected_visible_position(&self, indices: &[usize]) -> Option<usize> {
@@ -1488,7 +1514,7 @@ impl TuiApp {
             self.scroll_offset = 0;
             return;
         }
-        if let Some(position) = self.selected_visible_position(&indices) {
+        if let Some(position) = self.selected_visible_position(indices) {
             self.scroll_offset = position.saturating_sub(1);
             return;
         }
@@ -1522,7 +1548,7 @@ impl TuiApp {
         if indices.is_empty() {
             return "0/0".to_string();
         }
-        let position = self.selected_visible_position(&indices).unwrap_or(0);
+        let position = self.selected_visible_position(indices).unwrap_or(0);
         format!("{}/{}", position.saturating_add(1), indices.len())
     }
 
