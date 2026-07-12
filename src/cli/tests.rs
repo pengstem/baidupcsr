@@ -1224,6 +1224,88 @@ async fn async_dlink_range_fetch_tries_later_candidates_after_network_failure(
     Ok(())
 }
 
+#[tokio::test]
+async fn async_dlink_range_fetch_promotes_successful_candidate_for_following_ranges(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let located_body = serde_json::to_vec(&serde_json::json!({
+        "errno": 0,
+        "urls": [
+            { "url": format!("http://{address}/bad"), "encrypt": 0 },
+            { "url": format!("http://{address}/good"), "encrypt": 0 }
+        ]
+    }))?;
+    let server = tokio::spawn(async move {
+        let mut request_lines = Vec::new();
+        while request_lines.len() < 5 {
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_millis(250), listener.accept()).await
+            else {
+                break;
+            };
+            let request = read_test_http_request(&mut socket).await?;
+            let first_line = request.lines().next().unwrap_or_default().to_string();
+            request_lines.push(first_line.clone());
+            if first_line.contains("method=locatedownload") {
+                write_test_http_response(&mut socket, "200 OK", &located_body).await?;
+            } else if first_line.contains(" /bad ") {
+                write_test_http_response(
+                    &mut socket,
+                    "502 Bad Gateway",
+                    br#"{"errno":-1,"error_msg":"fixture failure"}"#,
+                )
+                .await?;
+            } else if first_line.contains(" /good ") {
+                let second_range = request.to_ascii_lowercase().contains("range: bytes=3-5");
+                if second_range {
+                    write_test_range_response(&mut socket, "bytes 3-5/6", &[4, 5, 6]).await?;
+                } else {
+                    write_test_range_response(&mut socket, "bytes 0-2/6", &[1, 2, 3]).await?;
+                }
+            } else {
+                write_test_http_response(&mut socket, "404 Not Found", br#"{"errno":-1}"#).await?;
+            }
+        }
+        Ok::<_, std::io::Error>(request_lines)
+    });
+    let client = test_pcs_client(address)?;
+    let upstream = PcsVideoUpstream::new(client, "/video.mp4".to_string(), 42, "bduss".to_string());
+    let cancel = CancellationToken::new();
+    let first = crate::app::RangeFetcher::fetch_range(
+        &upstream,
+        "/video.mp4",
+        crate::pcs::ByteRange::new(0, 2)?,
+        &cancel,
+    )
+    .await?;
+    let second = crate::app::RangeFetcher::fetch_range(
+        &upstream,
+        "/video.mp4",
+        crate::pcs::ByteRange::new(3, 5)?,
+        &cancel,
+    )
+    .await?;
+    let server_result = tokio::time::timeout(Duration::from_secs(1), server).await?;
+    let requests = server_result??;
+
+    assert_eq!(first, vec![1, 2, 3]);
+    assert_eq!(second, vec![4, 5, 6]);
+    assert_eq!(requests.len(), 4);
+    assert!(requests[0].contains("method=locatedownload"));
+    assert!(requests[1].contains(" /bad "));
+    assert!(requests[2].contains(" /good "));
+    assert!(requests[3].contains(" /good "));
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|line| line.contains(" /bad "))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
 #[test]
 fn preview_key_uses_account_file_mtime_and_nonnegative_size() {
     let key = preview_key_for_entry(42, &file(7, -1));
