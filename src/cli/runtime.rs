@@ -668,7 +668,7 @@ impl BrowserRuntime {
     pub(crate) fn prefetch_directory_path(&mut self, app: &mut crate::tui::TuiApp, path: String) {
         self.hydrate_directory_cache_from_disk(path.as_str());
         let source = self.cache_source_for_path(path.as_str());
-        let status = self.cache.snapshot(path.as_str()).status;
+        let status = self.cache.status(path.as_str());
         if status == crate::app::DirectoryStatus::Refreshing {
             return;
         }
@@ -1637,7 +1637,7 @@ impl BrowserRuntime {
     }
 
     pub(crate) fn hydrate_directory_cache_from_disk(&mut self, path: &str) {
-        if self.cache.snapshot(path).status != crate::app::DirectoryStatus::Empty {
+        if self.cache.status(path) != crate::app::DirectoryStatus::Empty {
             return;
         }
         let Ok(Some(snapshot)) = self.cache_store.read_snapshot(self.account_uid, path) else {

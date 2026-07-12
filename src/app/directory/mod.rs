@@ -72,6 +72,12 @@ impl DirectoryCache {
         }
     }
 
+    pub fn status(&self, path: &str) -> DirectoryStatus {
+        self.entries
+            .get(path)
+            .map_or(DirectoryStatus::Empty, |entry| entry.status)
+    }
+
     pub fn begin_refresh(&mut self, path: &str) -> RefreshGeneration {
         let entry = self
             .entries
