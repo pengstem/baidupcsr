@@ -84,3 +84,90 @@ fn local_open_task_tracks_temp_file_target_and_size() -> Result<(), TaskError> {
     assert_eq!(task.progress.bytes_total, Some(4096));
     Ok(())
 }
+
+#[test]
+fn task_manager_recent_snapshots_returns_latest_ids_first() -> Result<(), TaskError> {
+    let mut manager = TaskManager::new();
+    let ids = (0..5)
+        .map(|index| manager.enqueue_remote_operation(format!("operation-{index}")))
+        .collect::<Vec<_>>();
+
+    let recent = manager.recent_snapshots(3);
+    assert_eq!(
+        recent.iter().map(|task| task.id).collect::<Vec<_>>(),
+        vec![ids[4], ids[3], ids[2]]
+    );
+    assert!(manager.recent_snapshots(0).is_empty());
+    Ok(())
+}
+
+#[test]
+fn task_manager_bounds_terminal_history_and_keeps_recent_order() -> Result<(), TaskError> {
+    let mut manager = TaskManager::new();
+    let mut ids = Vec::new();
+    for index in 0..256 {
+        let id = manager.enqueue_download(format!("/tmp/task-{index}"), 1);
+        manager.start(id)?;
+        manager.complete(id)?;
+        ids.push(id);
+    }
+
+    let snapshots = manager.snapshots();
+    assert!(
+        snapshots.len() < ids.len(),
+        "terminal task history must stay bounded"
+    );
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(
+        manager
+            .recent_snapshots(3)
+            .iter()
+            .map(|task| task.id)
+            .collect::<Vec<_>>(),
+        vec![ids[255], ids[254], ids[253]]
+    );
+    Ok(())
+}
+
+#[test]
+fn task_manager_never_evicts_active_tasks_when_trimming_history() -> Result<(), TaskError> {
+    let mut manager = TaskManager::new();
+    let running = manager.enqueue_download("/tmp/running", 1);
+    manager.start(running)?;
+    let queued = manager.enqueue_remote_operation("queued");
+
+    for index in 0..256 {
+        let id = manager.enqueue_download(format!("/tmp/completed-{index}"), 1);
+        manager.start(id)?;
+        manager.complete(id)?;
+    }
+
+    let snapshots = manager.snapshots();
+    assert!(snapshots.iter().any(|task| task.id == running));
+    assert!(snapshots.iter().any(|task| task.id == queued));
+    assert_eq!(manager.active_count(), 2);
+    Ok(())
+}
+
+#[test]
+fn task_manager_active_count_tracks_each_state_transition() -> Result<(), TaskError> {
+    let mut manager = TaskManager::new();
+    let queued = manager.enqueue_remote_operation("queued");
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.latest_active_id(), Some(queued));
+
+    let running = manager.enqueue_download("/tmp/running", 1);
+    manager.start(running)?;
+    assert_eq!(manager.active_count(), 2);
+    assert_eq!(manager.latest_active_id(), Some(running));
+    manager.request_cancel(running)?;
+    assert_eq!(manager.active_count(), 2);
+    manager.cancelled(running)?;
+    assert_eq!(manager.active_count(), 1);
+    assert_eq!(manager.latest_active_id(), Some(queued));
+
+    manager.fail(queued)?;
+    assert_eq!(manager.active_count(), 0);
+    assert_eq!(manager.latest_active_id(), None);
+    Ok(())
+}
