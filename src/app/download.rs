@@ -2,6 +2,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use futures_util::stream::{FuturesOrdered, StreamExt};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -11,6 +12,7 @@ use crate::pcs::{ByteRange, PcsError};
 use super::{TaskError, TransferProgress};
 
 const DEFAULT_CHUNK_SIZE: u64 = 1024 * 1024;
+const MAX_IN_FLIGHT_RANGES: usize = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DownloadSpec {
@@ -128,54 +130,92 @@ pub async fn download_to_path<F: RangeFetcher>(
                 bytes_written: offset,
             });
         }
-        let end = offset
-            .saturating_add(spec.chunk_size)
-            .min(spec.size)
-            .saturating_sub(1);
-        let chunk = match fetcher
-            .fetch_range(&spec.remote_path, ByteRange::new(offset, end)?, &cancel)
-            .await
-        {
-            Ok(chunk) => chunk,
-            Err(PcsError::Cancelled { .. }) => {
+
+        // Keep at most a small, fixed number of ranges in flight. FuturesOrdered
+        // lets the network complete out of order while yielding chunks in file
+        // order, so the .part file always contains one continuous prefix.
+        let mut pending = FuturesOrdered::new();
+        let mut request_offset = offset;
+        while request_offset < spec.size && pending.len() < MAX_IN_FLIGHT_RANGES {
+            if cancel.is_cancelled() {
+                drop(pending);
                 file.flush().await?;
                 return Ok(DownloadOutcome::Cancelled {
                     partial_path,
                     bytes_written: offset,
                 });
             }
-            Err(error) => return Err(TaskError::Pcs(error)),
-        };
-        let requested_len = end.saturating_sub(offset).saturating_add(1);
-        let actual_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
-        if actual_len != requested_len {
-            return Err(TaskError::Pcs(PcsError::Network {
-                operation: "download".to_string(),
-                message: format!(
-                    "range fetch returned {actual_len} bytes for a {requested_len}-byte request"
-                ),
-            }));
+            let end = request_offset
+                .saturating_add(spec.chunk_size)
+                .min(spec.size)
+                .saturating_sub(1);
+            pending.push_back(fetcher.fetch_range(
+                &spec.remote_path,
+                ByteRange::new(request_offset, end)?,
+                &cancel,
+            ));
+            request_offset =
+                request_offset.saturating_add(end.saturating_sub(request_offset).saturating_add(1));
         }
-        file.write_all(&chunk).await?;
-        offset = offset.saturating_add(requested_len);
-        let update = TransferProgress {
-            bytes_done: offset,
-            bytes_total: Some(spec.size),
-            speed_bytes_per_sec: 0,
-        };
-        tokio::select! {
+
+        while let Some(result) = tokio::select! {
             biased;
-            _ = progress.send(update) => {}
+            result = pending.next() => result,
             _ = cancel.cancelled() => {
-                let _ = progress.try_send(update);
+                drop(pending);
+                file.flush().await?;
+                return Ok(DownloadOutcome::Cancelled {
+                    partial_path,
+                    bytes_written: offset,
+                });
             }
-        }
-        if cancel.is_cancelled() {
-            file.flush().await?;
-            return Ok(DownloadOutcome::Cancelled {
-                partial_path,
-                bytes_written: offset,
-            });
+        } {
+            let chunk = match result {
+                Ok(chunk) => chunk,
+                Err(PcsError::Cancelled { .. }) => {
+                    file.flush().await?;
+                    return Ok(DownloadOutcome::Cancelled {
+                        partial_path,
+                        bytes_written: offset,
+                    });
+                }
+                Err(error) => return Err(TaskError::Pcs(error)),
+            };
+            let end = offset
+                .saturating_add(spec.chunk_size)
+                .min(spec.size)
+                .saturating_sub(1);
+            let requested_len = end.saturating_sub(offset).saturating_add(1);
+            let actual_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+            if actual_len != requested_len {
+                return Err(TaskError::Pcs(PcsError::Network {
+                    operation: "download".to_string(),
+                    message: format!(
+                        "range fetch returned {actual_len} bytes for a {requested_len}-byte request"
+                    ),
+                }));
+            }
+            file.write_all(&chunk).await?;
+            offset = offset.saturating_add(requested_len);
+            let update = TransferProgress {
+                bytes_done: offset,
+                bytes_total: Some(spec.size),
+                speed_bytes_per_sec: 0,
+            };
+            tokio::select! {
+                biased;
+                _ = progress.send(update) => {}
+                _ = cancel.cancelled() => {
+                    let _ = progress.try_send(update);
+                }
+            }
+            if cancel.is_cancelled() {
+                file.flush().await?;
+                return Ok(DownloadOutcome::Cancelled {
+                    partial_path,
+                    bytes_written: offset,
+                });
+            }
         }
     }
     file.flush().await?;
