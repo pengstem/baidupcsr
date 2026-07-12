@@ -1123,19 +1123,7 @@ impl BrowserRuntime {
     }
 
     pub(crate) fn cancel_latest_task(&mut self, app: &mut crate::tui::TuiApp) {
-        let Some(id) = self
-            .task_manager
-            .snapshots()
-            .into_iter()
-            .rev()
-            .find(|task| {
-                matches!(
-                    task.state,
-                    crate::app::TaskState::Queued | crate::app::TaskState::Running
-                )
-            })
-            .map(|task| task.id)
-        else {
+        let Some(id) = self.task_manager.latest_cancellable_id() else {
             app.set_notice("task_cancel: no active transfer task");
             return;
         };
@@ -1628,13 +1616,7 @@ impl BrowserRuntime {
     }
 
     pub(crate) fn refresh_task_panel(&self, app: &mut crate::tui::TuiApp) {
-        let snapshots: Vec<_> = self
-            .task_manager
-            .snapshots()
-            .into_iter()
-            .rev()
-            .take(3)
-            .collect();
+        let snapshots = self.task_manager.recent_snapshots(3);
         let items = snapshots.iter().map(task_panel_item).collect();
         app.set_task_items(items);
         app.set_background_tasks(self.inflight + self.task_manager.active_count());
