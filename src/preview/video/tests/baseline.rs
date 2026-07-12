@@ -115,6 +115,35 @@ fn interval_buffer_serves_overlapping_subranges() -> Result<(), VideoPreviewErro
 }
 
 #[test]
+fn interval_buffer_hit_and_miss_preserve_contents_and_statistics() -> Result<(), VideoPreviewError>
+{
+    let budget = VideoCacheBudget::new(16, 2)?;
+    let mut buffer = VideoIntervalBuffer::new(budget);
+    buffer.put(VideoRange::new(100, 107)?, b"abcdefgh".to_vec())?;
+
+    assert_eq!(buffer.used_bytes, 8);
+    assert_eq!(buffer.tick, 1);
+    assert_eq!(buffer.intervals.len(), 1);
+    assert_eq!(buffer.intervals[0].last_used, 1);
+
+    assert_eq!(
+        buffer.get(VideoRange::new(102, 105)?).as_deref(),
+        Some(&b"cdef"[..])
+    );
+    assert_eq!(buffer.used_bytes, 8);
+    assert_eq!(buffer.tick, 2);
+    assert_eq!(buffer.intervals.len(), 1);
+    assert_eq!(buffer.intervals[0].last_used, 2);
+
+    assert_eq!(buffer.get(VideoRange::new(108, 109)?), None);
+    assert_eq!(buffer.used_bytes, 8);
+    assert_eq!(buffer.tick, 2);
+    assert_eq!(buffer.intervals.len(), 1);
+    assert_eq!(buffer.intervals[0].last_used, 2);
+    Ok(())
+}
+
+#[test]
 fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError> {
     let budget = VideoCacheBudget::new(8, 2)?;
     let mut buffer = VideoIntervalBuffer::new(budget);
