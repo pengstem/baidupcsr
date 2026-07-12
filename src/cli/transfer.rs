@@ -116,11 +116,11 @@ impl PcsVideoUpstream {
         urls: &[String],
         range: crate::pcs::ByteRange,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Result<Vec<u8>, crate::pcs::PcsError> {
+    ) -> Result<(usize, Vec<u8>), crate::pcs::PcsError> {
         let mut last_error = None;
-        for url in urls {
+        for (index, url) in urls.iter().enumerate() {
             match self.client.download_url_range(url, range, cancel).await {
-                Ok(bytes) => return Ok(bytes),
+                Ok(bytes) => return Ok((index, bytes)),
                 Err(error @ crate::pcs::PcsError::Cancelled { .. }) => return Err(error),
                 Err(error) => last_error = Some(error),
             }
@@ -131,6 +131,24 @@ impl PcsVideoUpstream {
         }))
     }
 
+    pub(crate) async fn promote_successful_url(&self, urls: &[String], index: usize) {
+        let Some(url) = urls.get(index) else {
+            return;
+        };
+        let mut cached = self.urls.lock().await;
+        let Some(cached_urls) = cached.as_mut() else {
+            return;
+        };
+        if cached_urls.as_slice() != urls {
+            return;
+        }
+        if index != 0 {
+            let url = url.clone();
+            cached_urls.remove(index);
+            cached_urls.insert(0, url);
+        }
+    }
+
     pub(crate) async fn fetch_pcs_range(
         &self,
         range: crate::pcs::ByteRange,
@@ -138,12 +156,23 @@ impl PcsVideoUpstream {
     ) -> Result<Vec<u8>, crate::pcs::PcsError> {
         let urls = self.located_urls(cancel).await?;
         match self.download_from_candidates(&urls, range, cancel).await {
-            Ok(bytes) => Ok(bytes),
+            Ok((index, bytes)) => {
+                self.promote_successful_url(&urls, index).await;
+                Ok(bytes)
+            }
             Err(error @ crate::pcs::PcsError::Cancelled { .. }) => Err(error),
             Err(_) => {
                 let refreshed = self.refresh_urls_if_stale(&urls, cancel).await?;
-                self.download_from_candidates(&refreshed, range, cancel)
+                match self
+                    .download_from_candidates(&refreshed, range, cancel)
                     .await
+                {
+                    Ok((index, bytes)) => {
+                        self.promote_successful_url(&refreshed, index).await;
+                        Ok(bytes)
+                    }
+                    Err(error) => Err(error),
+                }
             }
         }
     }

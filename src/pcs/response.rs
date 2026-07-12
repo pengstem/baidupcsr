@@ -178,7 +178,7 @@ pub(crate) fn select_download_urls(info: &LocateDownloadInfo, https: bool) -> Ve
 pub(crate) fn dev_uid(feature: &str) -> String {
     let mut md5 = Md5::new();
     Md5Digest::update(&mut md5, feature.as_bytes());
-    format!("{:X}|0", Md5Digest::finalize(md5))
+    format!("{}|0", hex::encode_upper(Md5Digest::finalize(md5)))
 }
 
 pub(crate) fn locatedownload_sign_with(
@@ -189,7 +189,7 @@ pub(crate) fn locatedownload_sign_with(
 ) -> LocateDownloadSign {
     let mut bduss_sha1 = Sha1::new();
     Sha1Digest::update(&mut bduss_sha1, bduss.as_bytes());
-    let bduss_sha1_hex = format!("{:x}", Sha1Digest::finalize(bduss_sha1));
+    let bduss_sha1_hex = hex::encode(Sha1Digest::finalize(bduss_sha1));
 
     let mut rand_sha1 = Sha1::new();
     Sha1Digest::update(&mut rand_sha1, bduss_sha1_hex.as_bytes());
@@ -200,7 +200,7 @@ pub(crate) fn locatedownload_sign_with(
 
     LocateDownloadSign {
         time,
-        rand: format!("{:x}", Sha1Digest::finalize(rand_sha1)),
+        rand: hex::encode(Sha1Digest::finalize(rand_sha1)),
         devuid: devuid.to_string(),
     }
 }

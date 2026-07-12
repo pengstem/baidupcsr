@@ -15,20 +15,21 @@ name = "baidupcsr-cli"
 path = "src/main.rs"
 
 [dependencies]
-bytes = "1.11"
+bytes = "1.12"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
-md-5 = "0.10"
-ratatui = "0.30.0"
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "webpki-roots", "stream"] }
+hex = "0.4"
+md-5 = "0.11"
+ratatui = "0.30.2"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha1 = "0.10"
-thiserror = "1.0"
+sha1 = "0.11"
+thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros"] }
-tokio = { version = "1.48", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "process", "signal", "io-util"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "fs", "process", "signal", "io-util"] }
 tokio-util = "0.7"
-toml = "0.9"
+toml = "1.1"
 unicode-width = "0.2"
 url = "2.5"
 
