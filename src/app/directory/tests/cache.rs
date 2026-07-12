@@ -59,3 +59,23 @@ fn refresh_error_preserves_cached_entries_and_marks_error() {
     assert_eq!(view.entries.len(), 1);
     assert_eq!(view.entries[0].path, "/docs/a.txt");
 }
+
+#[test]
+fn directory_status_tracks_lifecycle_for_known_and_unknown_paths() {
+    let mut cache = DirectoryCache::new();
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Empty);
+
+    cache.replace_with_fresh_entries("/docs", vec![file(1, "/docs/a.txt", 10, 100)]);
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Fresh);
+
+    let generation = cache.begin_refresh("/docs");
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Refreshing);
+    assert!(cache.finish_refresh("/docs", generation, Vec::new()));
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Fresh);
+
+    let generation = cache.begin_refresh("/docs");
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Refreshing);
+    assert!(cache.finish_refresh_error("/docs", generation));
+    assert_eq!(cache.status("/docs"), DirectoryStatus::Error);
+    assert_eq!(cache.status("/missing"), DirectoryStatus::Empty);
+}
