@@ -215,12 +215,9 @@ impl TaskManager {
     }
 
     pub fn snapshot(&self, id: TaskId) -> Option<TaskSnapshot> {
-        self.tasks.get(&id).map(|task| TaskSnapshot {
-            id,
-            kind: task.kind.clone(),
-            state: task.state,
-            progress: task.progress,
-        })
+        self.tasks
+            .get(&id)
+            .map(|task| Self::snapshot_from_record(id, task))
     }
 
     pub fn active_count(&self) -> usize {
