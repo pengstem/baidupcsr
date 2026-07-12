@@ -161,35 +161,8 @@ pub(crate) fn load_ui_config(path: &Path) -> Result<UiConfig, ConfigError> {
 }
 
 pub(crate) fn parse_ui_config(path: &Path, data: &str) -> Result<UiConfig, ConfigError> {
-    let mut config = UiConfig::default();
-    for line in data.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(invalid_ui_config(path, "expected key = value"));
-        };
-        let key = key.trim();
-        let value = value.trim().trim_matches('"');
-        match key {
-            "video_preview_enabled" => {
-                config.video_preview.enabled = parse_value(path, value, "expected boolean value")?;
-            }
-            "video_chunk_size_bytes" => {
-                config.video_preview.chunk_size_bytes =
-                    parse_value(path, value, "expected unsigned integer")?;
-            }
-            "video_max_chunks" => {
-                config.video_preview.max_chunks =
-                    parse_value(path, value, "expected unsigned integer")?;
-            }
-            "video_player_profile" => {
-                config.video_preview.player_profile = parse_video_player_profile(path, value)?;
-            }
-            _ => {}
-        }
-    }
+    let config = toml::from_str::<UiConfig>(data)
+        .map_err(|source| invalid_ui_config(path, &source.to_string()))?;
 
     if config.video_preview.chunk_size_bytes == 0 || config.video_preview.max_chunks == 0 {
         return Err(invalid_ui_config(

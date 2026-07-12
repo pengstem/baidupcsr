@@ -116,6 +116,7 @@ pub struct VideoPreviewConfig {
     pub enabled: bool,
     pub chunk_size_bytes: u64,
     pub max_chunks: usize,
+    #[serde(rename = "profile", alias = "player_profile")]
     pub player_profile: VideoPlayerProfile,
 }
 
