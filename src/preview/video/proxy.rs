@@ -1,5 +1,7 @@
 use super::*;
 
+use bytes::Bytes;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VideoProxyMethod {
     Head,
@@ -562,12 +564,12 @@ pub(crate) async fn cached_fetch(
     stats_tx: &watch::Sender<VideoProxyStats>,
     upstream: &Arc<dyn VideoUpstream>,
     cancel: &CancellationToken,
-) -> Result<(Vec<u8>, bool), VideoError> {
+) -> Result<(Bytes, bool), VideoError> {
     loop {
         let wait =
             {
                 let mut state = state.lock().await;
-                if let Some(bytes) = state.cache.get(range) {
+                if let Some(bytes) = state.cache.get_bytes(range) {
                     state.stats.cache_hits = state.stats.cache_hits.saturating_add(1);
                     state.stats.last_error = None;
                     update_stats(&mut state);
@@ -598,7 +600,7 @@ pub(crate) async fn cached_fetch(
     let fetched = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(VideoError::Cancelled),
-        fetched = upstream.fetch(range, cancel) => fetched,
+        fetched = upstream.fetch(range, cancel) => fetched.map(Bytes::from),
     };
     match fetched {
         Ok(bytes) => {
@@ -629,7 +631,7 @@ pub(crate) async fn fetch_prefetch(
     let fetched = tokio::select! {
         biased;
         _ = cancel.cancelled() => Err(VideoError::Cancelled),
-        fetched = upstream.fetch(range, cancel) => fetched,
+        fetched = upstream.fetch(range, cancel) => fetched.map(Bytes::from),
     };
     drop(permit);
     match fetched {
@@ -640,7 +642,7 @@ pub(crate) async fn fetch_prefetch(
 
 pub(crate) async fn store_fetched_range(
     range: VideoRange,
-    bytes: Vec<u8>,
+    bytes: Bytes,
     prefetch: bool,
     state: &Arc<TokioMutex<AsyncVideoState>>,
     stats_tx: &watch::Sender<VideoProxyStats>,
@@ -649,7 +651,7 @@ pub(crate) async fn store_fetched_range(
     let notify = state.inflight.remove(&range);
     let stored = state
         .cache
-        .put(range, bytes)
+        .put_bytes(range, bytes)
         .map_err(|error| VideoError::Upstream(format!("{error:?}")));
     state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
     if prefetch {

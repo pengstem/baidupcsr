@@ -1,3 +1,5 @@
+use bytes::Bytes;
+
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[allow(
     dead_code,
@@ -207,7 +209,7 @@ impl From<VideoRange> for RequestedVideoRange {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CachedInterval {
     pub(crate) range: VideoRange,
-    pub(crate) bytes: Vec<u8>,
+    pub(crate) bytes: Bytes,
     pub(crate) last_used: u64,
 }
 
@@ -229,10 +231,19 @@ impl VideoIntervalBuffer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn put(
         &mut self,
         range: VideoRange,
         bytes: Vec<u8>,
+    ) -> Result<(), VideoPreviewError> {
+        self.put_bytes(range, Bytes::from(bytes))
+    }
+
+    pub(crate) fn put_bytes(
+        &mut self,
+        range: VideoRange,
+        bytes: Bytes,
     ) -> Result<(), VideoPreviewError> {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len != range.len() || len > self.budget.memory_limit_bytes() {
@@ -251,7 +262,12 @@ impl VideoIntervalBuffer {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn get(&mut self, range: VideoRange) -> Option<Vec<u8>> {
+        self.get_bytes(range).map(|bytes| bytes.to_vec())
+    }
+
+    pub(crate) fn get_bytes(&mut self, range: VideoRange) -> Option<Bytes> {
         let index = self
             .intervals
             .iter()
@@ -264,7 +280,7 @@ impl VideoIntervalBuffer {
         .ok()?;
         let len = usize::try_from(range.len()).ok()?;
         let end = offset.checked_add(len)?;
-        let bytes = self.intervals[index].bytes.get(offset..end)?.to_vec();
+        let bytes = self.intervals[index].bytes.slice(offset..end);
         self.intervals[index].last_used = self.next_tick();
         Some(bytes)
     }
