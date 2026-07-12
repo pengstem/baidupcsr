@@ -144,6 +144,25 @@ fn interval_buffer_hit_and_miss_preserve_contents_and_statistics() -> Result<(),
 }
 
 #[test]
+fn interval_buffer_returns_zero_copy_cached_subrange() -> Result<(), VideoPreviewError> {
+    let budget = VideoCacheBudget::new(16, 2)?;
+    let mut buffer = VideoIntervalBuffer::new(budget);
+    buffer.put(VideoRange::new(100, 107)?, b"abcdefgh".to_vec())?;
+
+    let backing_ptr = buffer.intervals[0].bytes[2..].as_ptr();
+    let returned = buffer
+        .get_bytes(VideoRange::new(102, 105)?)
+        .ok_or(VideoPreviewError::InvalidRange)?;
+
+    assert_eq!(returned.as_ref(), b"cdef");
+    assert_eq!(returned.as_ptr(), backing_ptr);
+    assert_eq!(buffer.used_bytes, 8);
+    assert_eq!(buffer.tick, 2);
+    assert_eq!(buffer.intervals[0].last_used, 2);
+    Ok(())
+}
+
+#[test]
 fn interval_buffer_evicts_until_within_budget() -> Result<(), VideoPreviewError> {
     let budget = VideoCacheBudget::new(8, 2)?;
     let mut buffer = VideoIntervalBuffer::new(budget);
