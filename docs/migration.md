@@ -6,10 +6,10 @@ login state.
 ## Quick Start
 
 1. Keep your existing BaiduPCS-Go login and `pcs_config.json`.
-2. Run `cargo run -p baidupcsr-cli -- doctor --redact`.
+2. Run `cargo run -- doctor --redact`.
 3. Check `config: loaded`, `active_uid`, credential presence, `cache_dir`,
    `ui_config_path`, `video_preview`, `mpv`, and `config_permission`.
-4. Run `cargo run -p baidupcsr-cli -- tui`.
+4. Run `cargo run -- tui`.
 
 If the config is not found, set:
 

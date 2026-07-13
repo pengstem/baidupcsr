@@ -1,5 +1,9 @@
 # Rust + Ratatui 重写计划
 
+> 历史计划：下文描述的 workspace 架构已在提交 `9e11e41` 中合并为单一
+> package。保留这些阶段命令和 crate 路径作为历史上下文，但它们不是当前
+> 可执行的构建命令。
+
 ## 背景
 
 这个仓库当前是新骨架，`docs/plan/` 为空，实际参考实现放在 `reference/`。`reference/` 是 Go 版 BaiduPCS-Go，README 标记当前版本线到 v4.0.1，核心能力集中在：

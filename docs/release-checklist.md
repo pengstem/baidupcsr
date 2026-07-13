@@ -8,21 +8,20 @@ Run before tagging or handing a binary to users:
 
 ```bash
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo build --release -p baidupcsr-cli
+cargo test --all-targets
+cargo clippy --all-targets --all-features -- -D warnings
+cargo build --release
 git diff --check
 ```
 
-The workspace release profile uses thin LTO, one codegen unit, and line-table
-debug info.
+The release profile uses LTO, one codegen unit, and stripped binaries.
 
 ## Doctor Gate
 
 Run:
 
 ```bash
-cargo run -p baidupcsr-cli -- doctor --redact
+cargo run -- doctor --redact
 ```
 
 Verify the output includes:
@@ -60,7 +59,7 @@ platforms.
 
 Required checks:
 
-- `cargo test -p baidupcsr-core --test stage10_preload_performance`
+- `cargo test --lib paged_preload_records_bounded_work_for_large_directories`
 - real TUI rapid `j/k` movement in a populated directory;
 - warm start with a populated cache directory;
 - refresh while moving selection;
@@ -100,7 +99,7 @@ smoke needs the older no-config/no-scripts guarantee.
 Build:
 
 ```bash
-cargo build --release -p baidupcsr-cli
+cargo build --release
 ```
 
 Installable local artifacts:
@@ -114,7 +113,7 @@ they are only considered verified after:
 
 ```bash
 rustup target add x86_64-unknown-linux-musl
-cargo build --release --target x86_64-unknown-linux-musl -p baidupcsr-cli
+cargo build --release --target x86_64-unknown-linux-musl
 ```
 
 Record the result in `docs/validation/` before claiming static packaging
