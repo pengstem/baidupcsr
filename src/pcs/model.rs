@@ -64,12 +64,12 @@ impl PcsAuth {
             return None;
         }
 
-        let mut parts = vec![format!("BDUSS={bduss}")];
+        let mut parts = vec![cookie::Cookie::new("BDUSS", bduss).to_string()];
         if let Some(stoken) = stoken.filter(|value| !value.is_empty()) {
-            parts.push(format!("STOKEN={stoken}"));
+            parts.push(cookie::Cookie::new("STOKEN", stoken).to_string());
         }
         if let Some(baiduid) = baiduid.filter(|value| !value.is_empty()) {
-            parts.push(format!("BAIDUID={baiduid}"));
+            parts.push(cookie::Cookie::new("BAIDUID", baiduid).to_string());
         }
 
         Some(Self {

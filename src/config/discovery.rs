@@ -201,12 +201,8 @@ pub(crate) fn invalid_config(path: &Path, message: &str) -> ConfigError {
 }
 
 pub(crate) fn cookie_has_key(cookies: &str, key: &str) -> bool {
-    cookies.split(';').any(|item| {
-        let item = item.trim();
-        item.strip_prefix(key)
-            .and_then(|rest| rest.strip_prefix('='))
-            .is_some_and(|value| !value.is_empty())
-    })
+    cookie::Cookie::split_parse(cookies)
+        .any(|result| result.is_ok_and(|cookie| cookie.name() == key && !cookie.value().is_empty()))
 }
 
 pub(crate) fn current_target_os() -> TargetOs {

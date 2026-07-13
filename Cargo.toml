@@ -17,9 +17,11 @@ path = "src/main.rs"
 [dependencies]
 atomic-write-file = "0.3"
 bytes = "1.12"
+cookie = "0.18"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures-util = "0.3"
 getrandom = "0.3"
+headers = "0.4"
 httparse = "1.10"
 imagesize = "0.15"
 hex = "0.4"
@@ -29,6 +31,7 @@ ratatui = "0.30.2"
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "stream", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+shell-words = "1.1"
 sha1 = "0.11"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "macros"] }

@@ -4,11 +4,11 @@ pub(crate) fn parse_remote_command(
     input: &str,
     app: &crate::tui::TuiApp,
 ) -> Result<ParsedRemoteCommand, String> {
-    let mut parts = input.split_whitespace();
-    let Some(command) = parts.next() else {
+    let words = shell_words::split(input).map_err(|_| "invalid command quoting".to_string())?;
+    let Some(command) = words.first().map(String::as_str) else {
         return Err("empty command".to_string());
     };
-    let args: Vec<&str> = parts.collect();
+    let args: Vec<&str> = words[1..].iter().map(String::as_str).collect();
 
     match command {
         "mkdir" => {
@@ -427,13 +427,11 @@ pub(crate) fn bduss_from_user(user: &crate::config::BaiduUser) -> Option<String>
 }
 
 pub(crate) fn cookie_value<'a>(cookies: &'a str, key: &str) -> Option<&'a str> {
-    cookies.split(';').find_map(|item| {
-        let (name, value) = item.trim().split_once('=')?;
-        if name == key && !value.is_empty() {
-            Some(value)
-        } else {
-            None
-        }
+    cookie::Cookie::split_parse(cookies).find_map(|result| {
+        let cookie = result.ok()?;
+        let name = cookie.name_raw()?;
+        let value = cookie.value_raw()?;
+        (name == key && !value.is_empty()).then_some(value)
     })
 }
 

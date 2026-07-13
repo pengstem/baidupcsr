@@ -891,6 +891,20 @@ fn remote_command_rename_targets_selected_entry_parent() -> Result<(), String> {
 }
 
 #[test]
+fn remote_command_parser_preserves_quoted_arguments() -> Result<(), String> {
+    let mut app = crate::tui::TuiApp::new("/docs");
+    app.set_entries(vec![file(1, 12)]);
+
+    let plan = expect_operation(parse_remote_command("rename 'renamed file.md'", &app)?)?;
+
+    assert_eq!(
+        plan.dry_run_lines()[0],
+        "rename /docs/notes.md -> /docs/renamed file.md"
+    );
+    Ok(())
+}
+
+#[test]
 fn remote_command_rename_accepts_explicit_from_to() -> Result<(), String> {
     let app = crate::tui::TuiApp::new("/docs");
 

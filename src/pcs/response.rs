@@ -1,5 +1,8 @@
 use super::*;
 
+use headers::HeaderMapExt;
+use url::Url;
+
 impl FileOperation {
     pub(crate) const fn method_name(self) -> &'static str {
         match self {
@@ -262,10 +265,13 @@ pub(crate) const fn scheme(https: bool) -> &'static str {
 }
 
 pub(crate) fn normalize_scheme(raw: &str, https: bool) -> String {
-    match raw.split_once("://") {
-        Some((_, rest)) => format!("{}://{}", scheme(https), rest),
-        None => raw.to_string(),
+    let Ok(mut url) = Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if url.set_scheme(scheme(https)).is_err() {
+        return raw.to_string();
     }
+    url.into()
 }
 
 pub(crate) async fn read_bounded_response(
@@ -285,12 +291,15 @@ pub(crate) async fn read_bounded_response(
 
     validate_content_range(response.headers(), range)?;
     let requested_len = range.read_limit_bytes();
-    if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH) {
-        let content_length = content_length
-            .to_str()
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or_else(|| download_protocol_error("invalid Content-Length header"))?;
+    if response
+        .headers()
+        .contains_key(reqwest::header::CONTENT_LENGTH)
+    {
+        let content_length = response
+            .headers()
+            .typed_get::<headers::ContentLength>()
+            .ok_or_else(|| download_protocol_error("invalid Content-Length header"))?
+            .0;
         if content_length != requested_len {
             return Err(download_protocol_error(format!(
                 "Content-Length {content_length} does not match requested range length {requested_len}"
@@ -335,29 +344,12 @@ fn validate_content_range(
     headers: &reqwest::header::HeaderMap,
     requested: ByteRange,
 ) -> Result<(), PcsError> {
-    let value = headers
-        .get(reqwest::header::CONTENT_RANGE)
-        .and_then(|value| value.to_str().ok())
+    let parsed = headers
+        .typed_get::<headers::ContentRange>()
         .ok_or_else(|| download_protocol_error("missing or invalid Content-Range header"))?;
-    let (unit, value) = value
-        .split_once(char::is_whitespace)
-        .ok_or_else(|| download_protocol_error("invalid Content-Range header"))?;
-    if !unit.eq_ignore_ascii_case("bytes") {
-        return Err(download_protocol_error("Content-Range unit must be bytes"));
-    }
-    let (bounds, total) = value
-        .trim()
-        .split_once('/')
-        .ok_or_else(|| download_protocol_error("invalid Content-Range header"))?;
-    let (start, end) = bounds
-        .split_once('-')
-        .ok_or_else(|| download_protocol_error("invalid Content-Range bounds"))?;
-    let start = start
-        .parse::<u64>()
-        .map_err(|_| download_protocol_error("invalid Content-Range start"))?;
-    let end = end
-        .parse::<u64>()
-        .map_err(|_| download_protocol_error("invalid Content-Range end"))?;
+    let (start, end) = parsed
+        .bytes_range()
+        .ok_or_else(|| download_protocol_error("Content-Range must contain byte bounds"))?;
     if start != requested.start() || end != requested.end_inclusive() {
         return Err(download_protocol_error(format!(
             "Content-Range {start}-{end} does not match requested range {}-{}",
@@ -365,10 +357,7 @@ fn validate_content_range(
             requested.end_inclusive()
         )));
     }
-    if total != "*" {
-        let total = total
-            .parse::<u64>()
-            .map_err(|_| download_protocol_error("invalid Content-Range total"))?;
+    if let Some(total) = parsed.bytes_len() {
         if total <= end {
             return Err(download_protocol_error(
                 "Content-Range total must be greater than its end offset",
