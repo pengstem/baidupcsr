@@ -5,7 +5,7 @@ mod tests;
 
 use futures_util::StreamExt;
 use md5::{Digest as Md5Digest, Md5};
-use reqwest::header::{CONTENT_TYPE, COOKIE, RANGE, USER_AGENT};
+use reqwest::header::{COOKIE, RANGE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest as Sha1Digest, Sha1};
 use tokio_util::sync::CancellationToken;

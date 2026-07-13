@@ -8,6 +8,8 @@ use bytes::Bytes;
 pub enum VideoPreviewError {
     #[error("invalid video token format")]
     InvalidVideoTokenFormat,
+    #[error("secure randomness is unavailable")]
+    SecureRandomnessUnavailable,
     #[error("invalid cache budget")]
     InvalidCacheBudget,
     #[error("invalid range")]

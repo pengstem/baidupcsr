@@ -121,16 +121,6 @@ pub(crate) fn copy_move_param_json(pairs: &[FileOperationPair]) -> Result<String
     })
 }
 
-pub(crate) fn multipart_param_body(param: &str) -> (String, String) {
-    const BOUNDARY: &str = "baidupcsr-stage9-boundary";
-    (
-        format!("multipart/form-data; boundary={BOUNDARY}"),
-        format!(
-            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"param\"\r\n\r\n{param}\r\n--{BOUNDARY}--\r\n"
-        ),
-    )
-}
-
 pub(crate) fn parse_locatedownload(data: &str) -> Result<LocateDownloadInfo, PcsError> {
     let response =
         serde_json::from_str::<LocateDownloadResponse>(data).map_err(|source| PcsError::Parse {

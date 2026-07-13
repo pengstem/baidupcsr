@@ -204,8 +204,8 @@ impl PcsClient {
             .header(USER_AGENT, self.options.user_agent.as_str())
             .header(COOKIE, self.auth.cookie_header.as_str());
         if let Some(param) = param {
-            let (content_type, body) = multipart_param_body(param);
-            builder = builder.header(CONTENT_TYPE, content_type).body(body);
+            let form = reqwest::multipart::Form::new().text("param", param.to_owned());
+            builder = builder.multipart(form);
         }
         let response = send_request(builder, operation, cancel).await?;
         let status = response.status();

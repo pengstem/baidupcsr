@@ -1,5 +1,3 @@
-use std::collections::{HashMap, VecDeque};
-
 mod manager;
 mod video;
 

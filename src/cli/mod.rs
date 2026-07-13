@@ -5,8 +5,8 @@ mod tests;
 use std::env;
 use std::ffi::OsString;
 use std::fmt::Write as _;
-use std::fs::{self, File, OpenOptions};
-use std::io::{BufWriter, Read, Write};
+use std::fs::{self, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{

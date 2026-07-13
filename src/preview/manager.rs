@@ -1,4 +1,6 @@
-use super::*;
+use std::collections::HashMap;
+
+use lru::LruCache;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct PreviewKey {
@@ -283,8 +285,7 @@ impl PreviewRequest {
 pub struct PreviewManager {
     pub(crate) memory_limit_bytes: u64,
     pub(crate) used_bytes: u64,
-    pub(crate) cache: HashMap<PreviewKey, PreviewText>,
-    pub(crate) lru: VecDeque<PreviewKey>,
+    pub(crate) cache: LruCache<PreviewKey, PreviewText>,
     pub(crate) generations: HashMap<PreviewKey, u64>,
 }
 
@@ -293,8 +294,7 @@ impl PreviewManager {
         Self {
             memory_limit_bytes,
             used_bytes: 0,
-            cache: HashMap::new(),
-            lru: VecDeque::new(),
+            cache: LruCache::unbounded(),
             generations: HashMap::new(),
         }
     }
@@ -333,7 +333,7 @@ impl PreviewManager {
         Some(status)
     }
 
-    pub fn get(&self, key: &PreviewKey) -> Option<&PreviewText> {
+    pub fn get(&mut self, key: &PreviewKey) -> Option<&PreviewText> {
         self.cache.get(key)
     }
 
@@ -348,25 +348,20 @@ impl PreviewManager {
     }
 
     pub(crate) fn insert(&mut self, key: PreviewKey, text: PreviewText) {
-        if let Some(old) = self.cache.remove(&key) {
+        let bytes = text.status.fetched_bytes;
+        if let Some(old) = self.cache.put(key, text) {
             self.used_bytes = self.used_bytes.saturating_sub(old.status.fetched_bytes);
         }
-        self.lru.retain(|item| item != &key);
-
-        self.used_bytes = self.used_bytes.saturating_add(text.status.fetched_bytes);
-        self.cache.insert(key, text);
-        self.lru.push_back(key);
+        self.used_bytes = self.used_bytes.saturating_add(bytes);
         self.evict_until_within_budget();
     }
 
     pub(crate) fn evict_until_within_budget(&mut self) {
         while self.used_bytes > self.memory_limit_bytes {
-            let Some(key) = self.lru.pop_front() else {
+            let Some((_key, old)) = self.cache.pop_lru() else {
                 break;
             };
-            if let Some(old) = self.cache.remove(&key) {
-                self.used_bytes = self.used_bytes.saturating_sub(old.status.fetched_bytes);
-            }
+            self.used_bytes = self.used_bytes.saturating_sub(old.status.fetched_bytes);
         }
     }
 }

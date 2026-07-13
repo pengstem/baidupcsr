@@ -57,6 +57,25 @@ fn lru_evicts_oldest_preview_when_budget_is_exceeded() {
 }
 
 #[test]
+fn lru_cache_hit_refreshes_recency_before_eviction() {
+    let mut manager = PreviewManager::new(8);
+
+    let first = manager.start_request(key(1, 4, 1));
+    manager.finish_text_request(first, b"1234");
+    let second = manager.start_request(key(2, 4, 1));
+    manager.finish_text_request(second, b"abcd");
+
+    assert!(manager.get(&key(1, 4, 1)).is_some());
+
+    let third = manager.start_request(key(3, 4, 1));
+    manager.finish_text_request(third, b"efgh");
+
+    assert!(manager.get(&key(1, 4, 1)).is_some());
+    assert!(manager.get(&key(2, 4, 1)).is_none());
+    assert!(manager.get(&key(3, 4, 1)).is_some());
+}
+
+#[test]
 fn stale_preview_request_cannot_overwrite_newer_request() {
     let mut manager = PreviewManager::new(1024);
     let old = manager.start_request(key(1, 3, 1));

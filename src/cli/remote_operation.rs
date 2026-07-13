@@ -302,17 +302,8 @@ pub(crate) fn generate_video_token(
     epoch: u64,
 ) -> Result<crate::preview::VideoToken, crate::preview::VideoPreviewError> {
     let mut bytes = [0_u8; 16];
-    if File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .is_err()
-    {
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0_u128, |duration| duration.as_nanos())
-            .to_le_bytes();
-        bytes[..8].copy_from_slice(&epoch.to_le_bytes());
-        bytes[8..].copy_from_slice(&nanos[..8]);
-    }
+    getrandom::fill(&mut bytes)
+        .map_err(|_| crate::preview::VideoPreviewError::SecureRandomnessUnavailable)?;
     let mut token = String::from("tok_");
     for byte in bytes {
         let _ = write!(&mut token, "{byte:02x}");
