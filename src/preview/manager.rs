@@ -180,87 +180,42 @@ pub struct ImagePreviewMetadata {
 }
 
 pub fn parse_image_metadata(bytes: &[u8]) -> ImagePreviewMetadata {
-    if let Some((width, height)) = parse_png_dimensions(bytes) {
+    let format = match imagesize::image_type(bytes).ok() {
+        Some(imagesize::ImageType::Png) => ImagePreviewFormat::Png,
+        Some(imagesize::ImageType::Jpeg) => ImagePreviewFormat::Jpeg,
+        _ => ImagePreviewFormat::Unknown,
+    };
+    if format == ImagePreviewFormat::Unknown {
         return ImagePreviewMetadata {
-            format: ImagePreviewFormat::Png,
-            width: Some(width),
-            height: Some(height),
+            format,
+            width: None,
+            height: None,
         };
     }
-    if let Some((width, height)) = parse_jpeg_dimensions(bytes) {
+
+    let Ok(size) = imagesize::blob_size(bytes) else {
         return ImagePreviewMetadata {
-            format: ImagePreviewFormat::Jpeg,
-            width: Some(width),
-            height: Some(height),
+            format: ImagePreviewFormat::Unknown,
+            width: None,
+            height: None,
         };
-    }
+    };
+    let (Some(width), Some(height)) = (
+        u32::try_from(size.width).ok(),
+        u32::try_from(size.height).ok(),
+    ) else {
+        return ImagePreviewMetadata {
+            format: ImagePreviewFormat::Unknown,
+            width: None,
+            height: None,
+        };
+    };
 
     ImagePreviewMetadata {
-        format: ImagePreviewFormat::Unknown,
-        width: None,
-        height: None,
+        format,
+        width: Some(width),
+        height: Some(height),
     }
-}
-
-pub(crate) fn parse_png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < 24 || &bytes[..8] != PNG_SIGNATURE || &bytes[12..16] != b"IHDR" {
-        return None;
-    }
-    let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-    let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-    Some((width, height))
-}
-
-pub(crate) fn parse_jpeg_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 4
-        || bytes.first().copied() != Some(0xff)
-        || bytes.get(1).copied() != Some(0xd8)
-    {
-        return None;
-    }
-
-    let mut cursor = 2;
-    while cursor + 8 < bytes.len() {
-        if bytes.get(cursor).copied() != Some(0xff) {
-            cursor += 1;
-            continue;
-        }
-        let marker = bytes.get(cursor + 1).copied()?;
-        cursor += 2;
-        if marker == 0xd8 || marker == 0xd9 {
-            continue;
-        }
-        let length = u16::from_be_bytes(bytes.get(cursor..cursor + 2)?.try_into().ok()?);
-        let length = usize::from(length);
-        if length < 2 || cursor + length > bytes.len() {
-            return None;
-        }
-        if matches!(
-            marker,
-            0xc0 | 0xc1
-                | 0xc2
-                | 0xc3
-                | 0xc5
-                | 0xc6
-                | 0xc7
-                | 0xc9
-                | 0xca
-                | 0xcb
-                | 0xcd
-                | 0xce
-                | 0xcf
-        ) {
-            if length < 7 {
-                return None;
-            }
-            let height = u16::from_be_bytes(bytes.get(cursor + 3..cursor + 5)?.try_into().ok()?);
-            let width = u16::from_be_bytes(bytes.get(cursor + 5..cursor + 7)?.try_into().ok()?);
-            return Some((u32::from(width), u32::from(height)));
-        }
-        cursor += length;
-    }
-    None
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

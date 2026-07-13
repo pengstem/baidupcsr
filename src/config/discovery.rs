@@ -1,5 +1,8 @@
 use super::*;
 
+use atomic_write_file::AtomicWriteFile;
+use std::io::Write;
+
 pub fn discover_config_file(config_dir_override: Option<PathBuf>) -> PathBuf {
     let input = discovery_input_from_env(config_dir_override);
     discover_config_file_from_input(&input)
@@ -106,7 +109,16 @@ pub fn save_active_user_workdir(path: &Path, workdir: &str) -> Result<(), Config
             source,
         })?;
     serialized.push('\n');
-    fs::write(path, serialized).map_err(|source| ConfigError::Write {
+    let mut file = AtomicWriteFile::open(path).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    file.write_all(serialized.as_bytes())
+        .map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    file.commit().map_err(|source| ConfigError::Write {
         path: path.to_path_buf(),
         source,
     })

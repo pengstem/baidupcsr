@@ -711,27 +711,32 @@ pub(crate) async fn read_async_request(
             break;
         }
     }
-    let text = std::str::from_utf8(&data).map_err(|_| VideoError::MalformedRequest)?;
-    let mut lines = text.split("\r\n");
-    let request_line = lines.next().ok_or(VideoError::MalformedRequest)?;
-    let mut parts = request_line.split_whitespace();
-    let method = match parts.next() {
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut request = httparse::Request::new(&mut headers);
+    request
+        .parse(&data)
+        .map_err(|_| VideoError::MalformedRequest)?
+        .is_complete()
+        .then_some(())
+        .ok_or(VideoError::MalformedRequest)?;
+
+    let method = match request.method {
         Some("HEAD") => VideoProxyMethod::Head,
         Some("GET") => VideoProxyMethod::Get,
         _ => return Err(VideoError::UnsupportedMethod),
     };
-    let path = parts.next().ok_or(VideoError::MalformedRequest)?;
+    let path = request.path.ok_or(VideoError::MalformedRequest)?;
     let token = path
         .strip_prefix(VIDEO_PREVIEW_PATH)
         .ok_or(VideoError::InvalidToken)?
         .to_string();
     let mut range = None;
-    for line in lines {
-        let Some((name, value)) = line.split_once(':') else {
-            continue;
-        };
-        if name.eq_ignore_ascii_case("range") {
-            range = Some(parse_async_range(value.trim())?);
+    for header in request.headers {
+        if header.name.eq_ignore_ascii_case("range") {
+            let value = std::str::from_utf8(header.value)
+                .map_err(|_| VideoError::MalformedRequest)?
+                .trim();
+            range = Some(parse_async_range(value)?);
         }
     }
     Ok(VideoProxyRequest {

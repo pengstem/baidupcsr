@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
 };
 
@@ -8,6 +9,7 @@ use std::{
 mod tests;
 
 use crate::pcs::FileEntry;
+use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -169,9 +171,10 @@ impl DirectoryCacheStore {
         };
         let data = serde_json::to_vec(&snapshot).map_err(DirectoryCacheStoreError::Json)?;
         let target = self.snapshot_path(account_uid, path);
-        let temporary = target.with_extension("json.tmp");
-        fs::write(&temporary, data).map_err(DirectoryCacheStoreError::Io)?;
-        fs::rename(&temporary, target).map_err(DirectoryCacheStoreError::Io)
+        let mut file = AtomicWriteFile::open(&target).map_err(DirectoryCacheStoreError::Io)?;
+        file.write_all(&data)
+            .map_err(DirectoryCacheStoreError::Io)?;
+        file.commit().map_err(DirectoryCacheStoreError::Io)
     }
 
     pub fn read_snapshot(
