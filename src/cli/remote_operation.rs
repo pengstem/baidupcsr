@@ -1,5 +1,7 @@
 use super::*;
 
+use std::fmt::Write as _;
+
 pub(crate) fn parse_remote_command(
     input: &str,
     app: &crate::tui::TuiApp,
@@ -300,10 +302,10 @@ pub(crate) const fn task_state_label(state: crate::app::TaskState) -> &'static s
 
 pub(crate) fn generate_video_token(
     epoch: u64,
-) -> Result<crate::preview::VideoToken, crate::preview::VideoPreviewError> {
+) -> Result<crate::preview::VideoToken, crate::preview::VideoError> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes)
-        .map_err(|_| crate::preview::VideoPreviewError::SecureRandomnessUnavailable)?;
+        .map_err(|_| crate::preview::VideoError::SecureRandomnessUnavailable)?;
     let mut token = String::from("tok_");
     for byte in bytes {
         let _ = write!(&mut token, "{byte:02x}");
@@ -442,10 +444,6 @@ pub(crate) fn pcs_error_label(err: &crate::pcs::PcsError) -> String {
         crate::pcs::PcsError::Network { message, .. } => format!("network: {message}"),
         crate::pcs::PcsError::Remote { code, .. } => format!("remote_code={code}"),
     }
-}
-
-pub(crate) fn error_chain_label(error: &dyn std::error::Error) -> String {
-    crate::pcs::error_chain_message(error)
 }
 
 pub(crate) fn io_error_label(err: &std::io::Error) -> String {

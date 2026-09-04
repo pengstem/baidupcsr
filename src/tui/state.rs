@@ -370,11 +370,6 @@ impl TuiApp {
         }
     }
 
-    #[allow(dead_code, reason = "retained for state-level test construction")]
-    pub fn set_entries(&mut self, entries: Vec<FileEntry>) {
-        self.set_entries_with_selection(entries, None);
-    }
-
     pub fn begin_directory_refresh(
         &mut self,
         path: &str,
@@ -469,11 +464,6 @@ impl TuiApp {
 
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
-    }
-
-    #[allow(dead_code, reason = "retained for state-level assertions")]
-    pub fn sort_mode_label(&self) -> String {
-        self.sort_mode.label()
     }
 
     pub fn begin_search_results(&mut self, root_path: &str, keyword: &str) {

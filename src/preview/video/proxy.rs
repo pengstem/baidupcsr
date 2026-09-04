@@ -15,7 +15,7 @@ pub(crate) struct VideoProxyRequest {
     pub(crate) range: Option<RequestedVideoRange>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct VideoProxyStats {
     pub used_bytes: u64,
     pub cache_hits: u64,
@@ -50,11 +50,6 @@ impl PlayerLogRing {
             self.lines.pop_front();
         }
         self.lines.push_back(sanitize_player_log_line(line));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn lines(&self) -> Vec<&str> {
-        self.lines.iter().map(String::as_str).collect()
     }
 
     pub fn last_line(&self) -> Option<&str> {
@@ -101,7 +96,7 @@ pub(crate) fn is_sensitive_log_key(key: &str) -> bool {
 
 #[derive(Clone, Debug)]
 pub(crate) struct VideoPreviewSession {
-    pub(crate) key: PreviewKey,
+    pub(crate) content_length: u64,
     pub(crate) token: VideoToken,
     pub(crate) port: u16,
     pub(crate) budget: VideoCacheBudget,
@@ -109,13 +104,13 @@ pub(crate) struct VideoPreviewSession {
 
 impl VideoPreviewSession {
     pub(crate) const fn new(
-        key: PreviewKey,
+        content_length: u64,
         token: VideoToken,
         port: u16,
         budget: VideoCacheBudget,
     ) -> Self {
         Self {
-            key,
+            content_length,
             token,
             port,
             budget,
@@ -132,42 +127,21 @@ impl VideoPreviewSession {
         )
     }
 
-    pub(crate) fn mpv_args_with_profile(
-        &self,
-        profile: crate::config::VideoPlayerProfile,
-    ) -> Vec<String> {
-        let mut args = match profile {
-            crate::config::VideoPlayerProfile::User => vec![
-                "--no-terminal".to_string(),
-                "--cache-on-disk=no".to_string(),
-                "--cache=yes".to_string(),
-                "--cache-pause=no".to_string(),
-                "--demuxer-readahead-secs=20".to_string(),
-            ],
-            crate::config::VideoPlayerProfile::Isolated => vec![
-                "--no-config".to_string(),
-                "--load-scripts=no".to_string(),
-                "--osc=no".to_string(),
-                "--no-terminal".to_string(),
-                "--cache-on-disk=no".to_string(),
-                "--cache=yes".to_string(),
-            ],
-        };
-        args.extend([
+    pub(crate) fn mpv_args(&self) -> Vec<String> {
+        vec![
+            "--no-terminal".to_string(),
+            "--cache-on-disk=no".to_string(),
+            "--cache=yes".to_string(),
+            "--cache-pause=no".to_string(),
+            "--demuxer-readahead-secs=20".to_string(),
             format!("--demuxer-max-bytes={}", self.budget.memory_limit_bytes()),
             "--demuxer-max-back-bytes=0".to_string(),
             "--force-window=immediate".to_string(),
-        ]);
-        if profile == crate::config::VideoPlayerProfile::Isolated {
-            args.extend(["--ao=null".to_string(), "--mute=yes".to_string()]);
-        }
-        args.extend([
             "--idle=yes".to_string(),
             "--msg-level=all=warn".to_string(),
             "--no-ytdl".to_string(),
             self.player_url(),
-        ]);
-        args
+        ]
     }
 
     pub(crate) fn default_range(&self) -> VideoRange {
@@ -175,7 +149,7 @@ impl VideoPreviewSession {
             .budget
             .chunk_size_bytes
             .saturating_sub(1)
-            .min(self.key.size.saturating_sub(1));
+            .min(self.content_length.saturating_sub(1));
         VideoRange {
             start: 0,
             end_inclusive: end,
@@ -208,8 +182,6 @@ pub(crate) struct AsyncVideoState {
 }
 
 pub struct VideoLoopbackServer {
-    #[allow(dead_code, reason = "exposed to loopback integration tests")]
-    pub(crate) local_url: String,
     pub(crate) session: VideoPreviewSession,
     pub(crate) cancel: CancellationToken,
     pub(crate) stats: watch::Receiver<VideoProxyStats>,
@@ -229,14 +201,7 @@ impl VideoLoopbackServer {
             .await
             .map_err(io_video_error)?;
         let port = listener.local_addr().map_err(io_video_error)?.port();
-        let key = PreviewKey {
-            account_uid: 0,
-            fs_id: 0,
-            mtime: 0,
-            size: content_length,
-        };
-        let session = VideoPreviewSession::new(key, token, port, budget);
-        let local_url = session.player_url();
+        let session = VideoPreviewSession::new(content_length, token, port, budget);
         let state = Arc::new(TokioMutex::new(AsyncVideoState {
             cache: VideoIntervalBuffer::new(budget),
             inflight: HashMap::new(),
@@ -261,7 +226,6 @@ impl VideoLoopbackServer {
             .await
         });
         Ok(Self {
-            local_url,
             session,
             cancel,
             stats: stats_rx,
@@ -269,24 +233,8 @@ impl VideoLoopbackServer {
         })
     }
 
-    #[allow(dead_code, reason = "exposed to loopback integration tests")]
-    pub fn local_url(&self) -> &str {
-        &self.local_url
-    }
-
     pub const fn port(&self) -> u16 {
         self.session.port
-    }
-
-    pub fn stats(&self) -> VideoProxyStats {
-        self.stats.borrow().clone()
-    }
-
-    pub fn mpv_args_with_profile(
-        &self,
-        profile: crate::config::VideoPlayerProfile,
-    ) -> Result<Vec<String>, VideoError> {
-        Ok(self.session.mpv_args_with_profile(profile))
     }
 
     pub async fn shutdown(mut self) -> Result<(), VideoError> {
@@ -438,7 +386,7 @@ pub(crate) async fn handle_async_connection(
     if request.method == VideoProxyMethod::Head {
         let response = format!(
             "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\n\r\n",
-            session.key.size
+            session.content_length
         );
         stream
             .write_all(response.as_bytes())
@@ -458,9 +406,7 @@ pub(crate) async fn handle_async_connection(
         Some(RequestedVideoRange::Explicit(_)) => session.budget.memory_limit_bytes(),
         _ => session.budget.chunk_size_bytes,
     };
-    let range = requested
-        .resolve(session.key.size, max_len)
-        .map_err(|_| VideoError::InvalidRange)?;
+    let range = requested.resolve(session.content_length, max_len)?;
     let window_before = state.lock().await.cache.window();
     let (bytes, cache_hit) = match cached_fetch(range, &state, &stats_tx, &upstream, &cancel).await
     {
@@ -473,7 +419,7 @@ pub(crate) async fn handle_async_connection(
     };
     let response = format!(
         "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nAccept-Ranges: bytes\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n",
-        bytes.len(), range.start, range.end_inclusive, session.key.size
+        bytes.len(), range.start, range.end_inclusive, session.content_length
     );
     stream
         .write_all(response.as_bytes())
@@ -500,13 +446,13 @@ pub(crate) async fn handle_async_connection(
                 .chunk_size_bytes
                 .saturating_mul(u64::try_from(index.saturating_sub(1)).unwrap_or(u64::MAX)),
         );
-        if start >= session.key.size {
+        if start >= session.content_length {
             break;
         }
         let end = start
             .saturating_add(session.budget.chunk_size_bytes)
             .saturating_sub(1)
-            .min(session.key.size.saturating_sub(1));
+            .min(session.content_length.saturating_sub(1));
         ranges.push(VideoRange {
             start,
             end_inclusive: end,
@@ -649,10 +595,7 @@ pub(crate) async fn store_fetched_range(
 ) -> Result<(), VideoError> {
     let mut state = state.lock().await;
     let notify = state.inflight.remove(&range);
-    let stored = state
-        .cache
-        .put_bytes(range, bytes)
-        .map_err(|error| VideoError::Upstream(format!("{error:?}")));
+    let stored = state.cache.put_bytes(range, bytes);
     state.stats.upstream_fetches = state.stats.upstream_fetches.saturating_add(1);
     if prefetch {
         state.stats.prefetch_fetches = state.stats.prefetch_fetches.saturating_add(1);
@@ -753,16 +696,14 @@ pub(crate) fn parse_async_range(value: &str) -> Result<RequestedVideoRange, Vide
     let (start, end) = value.split_once('-').ok_or(VideoError::InvalidRange)?;
     if start.is_empty() {
         let bytes = end.parse::<u64>().map_err(|_| VideoError::InvalidRange)?;
-        return RequestedVideoRange::suffix(bytes).map_err(|_| VideoError::InvalidRange);
+        return RequestedVideoRange::suffix(bytes);
     }
     let start = start.parse::<u64>().map_err(|_| VideoError::InvalidRange)?;
     if end.is_empty() {
         return Ok(RequestedVideoRange::OpenEnded(start));
     }
     let end = end.parse::<u64>().map_err(|_| VideoError::InvalidRange)?;
-    VideoRange::new(start, end)
-        .map(RequestedVideoRange::Explicit)
-        .map_err(|_| VideoError::InvalidRange)
+    VideoRange::new(start, end).map(RequestedVideoRange::Explicit)
 }
 
 pub(crate) async fn write_http_error(

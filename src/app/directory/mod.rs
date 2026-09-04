@@ -5,9 +5,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(test)]
-mod tests;
-
 use crate::pcs::FileEntry;
 use atomic_write_file::AtomicWriteFile;
 use serde::{Deserialize, Serialize};

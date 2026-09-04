@@ -1,39 +1,17 @@
 use bytes::Bytes;
 
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[allow(
-    dead_code,
-    reason = "legacy validation errors remain part of the test contract"
-)]
-pub enum VideoPreviewError {
-    #[error("invalid video token format")]
-    InvalidVideoTokenFormat,
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize, thiserror::Error)]
+pub enum VideoError {
+    #[error("invalid video token")]
+    InvalidToken,
     #[error("secure randomness is unavailable")]
     SecureRandomnessUnavailable,
     #[error("invalid cache budget")]
     InvalidCacheBudget,
-    #[error("invalid range")]
-    InvalidRange,
-    #[error("invalid video token")]
-    InvalidVideoToken,
-    #[error("inactive video session")]
-    InactiveVideoSession,
-    #[error("video chunk too large")]
-    VideoChunkTooLarge,
-    #[error("loopback server I/O error")]
-    LoopbackServerIo,
-    #[error("malformed HTTP request")]
-    MalformedHttpRequest,
-    #[error("unsupported HTTP method")]
-    UnsupportedHttpMethod,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum VideoError {
-    #[error("invalid video token")]
-    InvalidToken,
     #[error("invalid video range")]
     InvalidRange,
+    #[error("video chunk too large")]
+    VideoChunkTooLarge,
     #[error("video session is inactive")]
     Cancelled,
     #[error("video upstream failed: {0}")]
@@ -52,13 +30,13 @@ pub struct VideoToken {
 }
 
 impl VideoToken {
-    pub fn new(token: impl Into<String>) -> Result<Self, VideoPreviewError> {
+    pub fn new(token: impl Into<String>) -> Result<Self, VideoError> {
         let token = token.into();
         let is_url_safe = token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
         if token.len() < 16 || !is_url_safe {
-            return Err(VideoPreviewError::InvalidVideoTokenFormat);
+            return Err(VideoError::InvalidToken);
         }
 
         Ok(Self { token })
@@ -80,9 +58,9 @@ pub struct VideoCacheBudget {
 }
 
 impl VideoCacheBudget {
-    pub const fn new(chunk_size_bytes: u64, max_chunks: usize) -> Result<Self, VideoPreviewError> {
+    pub const fn new(chunk_size_bytes: u64, max_chunks: usize) -> Result<Self, VideoError> {
         if chunk_size_bytes == 0 || max_chunks == 0 {
-            return Err(VideoPreviewError::InvalidCacheBudget);
+            return Err(VideoError::InvalidCacheBudget);
         }
 
         Ok(Self {
@@ -104,9 +82,9 @@ pub struct VideoRange {
 }
 
 impl VideoRange {
-    pub const fn new(start: u64, end_inclusive: u64) -> Result<Self, VideoPreviewError> {
+    pub const fn new(start: u64, end_inclusive: u64) -> Result<Self, VideoError> {
         if start > end_inclusive {
-            return Err(VideoPreviewError::InvalidRange);
+            return Err(VideoError::InvalidRange);
         }
         Ok(Self {
             start,
@@ -132,9 +110,9 @@ impl VideoRange {
         self.start <= other.start && self.end_inclusive >= other.end_inclusive
     }
 
-    pub(crate) fn clamp_to_file(self, file_size: u64) -> Result<Self, VideoPreviewError> {
+    pub(crate) fn clamp_to_file(self, file_size: u64) -> Result<Self, VideoError> {
         if file_size == 0 || self.start >= file_size {
-            return Err(VideoPreviewError::InvalidRange);
+            return Err(VideoError::InvalidRange);
         }
 
         Ok(Self {
@@ -143,9 +121,9 @@ impl VideoRange {
         })
     }
 
-    pub(crate) fn clamp_len(self, max_len: u64) -> Result<Self, VideoPreviewError> {
+    pub(crate) fn clamp_len(self, max_len: u64) -> Result<Self, VideoError> {
         if max_len == 0 {
-            return Err(VideoPreviewError::InvalidCacheBudget);
+            return Err(VideoError::InvalidCacheBudget);
         }
 
         Ok(Self {
@@ -165,23 +143,19 @@ pub(crate) enum RequestedVideoRange {
 }
 
 impl RequestedVideoRange {
-    pub(crate) const fn suffix(bytes: u64) -> Result<Self, VideoPreviewError> {
+    pub(crate) const fn suffix(bytes: u64) -> Result<Self, VideoError> {
         if bytes == 0 {
-            return Err(VideoPreviewError::InvalidRange);
+            return Err(VideoError::InvalidRange);
         }
         Ok(Self::Suffix(bytes))
     }
 
-    pub(crate) fn resolve(
-        self,
-        file_size: u64,
-        max_len: u64,
-    ) -> Result<VideoRange, VideoPreviewError> {
+    pub(crate) fn resolve(self, file_size: u64, max_len: u64) -> Result<VideoRange, VideoError> {
         match self {
             Self::Explicit(range) => range.clamp_to_file(file_size)?.clamp_len(max_len),
             Self::OpenEnded(start) => {
                 if file_size == 0 || start >= file_size || max_len == 0 {
-                    return Err(VideoPreviewError::InvalidRange);
+                    return Err(VideoError::InvalidRange);
                 }
                 VideoRange::new(
                     start,
@@ -193,7 +167,7 @@ impl RequestedVideoRange {
             }
             Self::Suffix(bytes) => {
                 if file_size == 0 || max_len == 0 || bytes == 0 {
-                    return Err(VideoPreviewError::InvalidRange);
+                    return Err(VideoError::InvalidRange);
                 }
                 let len = bytes.min(file_size).min(max_len);
                 VideoRange::new(file_size.saturating_sub(len), file_size.saturating_sub(1))
@@ -233,23 +207,10 @@ impl VideoIntervalBuffer {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn put(
-        &mut self,
-        range: VideoRange,
-        bytes: Vec<u8>,
-    ) -> Result<(), VideoPreviewError> {
-        self.put_bytes(range, Bytes::from(bytes))
-    }
-
-    pub(crate) fn put_bytes(
-        &mut self,
-        range: VideoRange,
-        bytes: Bytes,
-    ) -> Result<(), VideoPreviewError> {
+    pub(crate) fn put_bytes(&mut self, range: VideoRange, bytes: Bytes) -> Result<(), VideoError> {
         let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
         if len != range.len() || len > self.budget.memory_limit_bytes() {
-            return Err(VideoPreviewError::VideoChunkTooLarge);
+            return Err(VideoError::VideoChunkTooLarge);
         }
 
         self.remove_exact(range);
@@ -262,11 +223,6 @@ impl VideoIntervalBuffer {
         });
         self.evict_until_within_budget();
         Ok(())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get(&mut self, range: VideoRange) -> Option<Vec<u8>> {
-        self.get_bytes(range).map(|bytes| bytes.to_vec())
     }
 
     pub(crate) fn get_bytes(&mut self, range: VideoRange) -> Option<Bytes> {

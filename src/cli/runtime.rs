@@ -1,6 +1,6 @@
 use super::*;
 
-const USAGE: &str = "usage: baidupcsr-cli [tui|doctor [--redact]|video-bench --path REMOTE_PATH [--case source|gateway|all] [--duration SECONDS] [--output PATH] [--redact]]";
+const USAGE: &str = "usage: baidupcsr-cli [tui|doctor [--redact]]";
 
 pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
     let args: Vec<String> = args
@@ -17,10 +17,10 @@ pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             print_doctor(config_dir);
             ExitCode::SUCCESS
         }
-        CommandAction::VideoBench(options) => match run_video_bench(&options).await {
+        CommandAction::VideoHelper => match run_video_helper().await {
             Ok(()) => ExitCode::SUCCESS,
             Err(err) => {
-                eprintln!("video_bench_error: {err}");
+                eprintln!("video_helper_error: {err}");
                 ExitCode::from(1)
             }
         },
@@ -120,9 +120,17 @@ pub(crate) enum PreviewFetchKind {
 pub(crate) struct ActiveVideoPreview {
     pub(crate) key: crate::preview::PreviewKey,
     pub(crate) title: String,
-    pub(crate) server: crate::preview::VideoLoopbackServer,
+    pub(crate) server: VideoHelperClient,
     pub(crate) player: tokio::process::Child,
+    pub(crate) player_process_group: Option<u32>,
     pub(crate) player_log: Arc<Mutex<crate::preview::PlayerLogRing>>,
+}
+
+impl ActiveVideoPreview {
+    fn stop(mut self) -> VideoHelperClient {
+        stop_video_player(&mut self.player, self.player_process_group);
+        self.server
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -837,15 +845,10 @@ impl BrowserRuntime {
         };
 
         if plan.kind == crate::preview::PreviewKind::Video {
-            let reason = if self.video_config.enabled {
-                "press p for strict loopback video preview"
-            } else {
-                "video preview disabled by sidecar kill switch"
-            };
             app.finish_preview_metadata(
                 entry.server_filename.as_str(),
                 crate::preview::PreviewKind::Video,
-                reason,
+                "press p for loopback video preview",
                 crate::preview::PreviewStatus {
                     kind: crate::preview::PreviewKind::Video,
                     ..budget
@@ -1362,38 +1365,14 @@ impl BrowserRuntime {
             ));
             return;
         }
-        if !self.video_config.enabled {
-            app.finish_preview_metadata(
+        if !program_available(MPV_PROGRAM) {
+            app.finish_preview_error(
                 entry.server_filename.as_str(),
-                crate::preview::PreviewKind::Video,
-                "video preview disabled by sidecar kill switch",
-                crate::preview::PreviewStatus {
-                    kind: crate::preview::PreviewKind::Video,
-                    fetched_bytes: 0,
-                    memory_limit_bytes: self.video_config.memory_limit_bytes(),
-                },
+                format!("video_player_missing: {MPV_PROGRAM} not found on PATH"),
             );
             return;
         }
 
-        let Some(client) = self.client.clone() else {
-            app.finish_preview_error(entry.server_filename.as_str(), "client unavailable");
-            return;
-        };
-        let Some(account_bduss) = self.account_bduss.clone() else {
-            app.finish_preview_error(
-                entry.server_filename.as_str(),
-                "video_auth_error: missing BDUSS",
-            );
-            return;
-        };
-        if self.account_uid == 0 {
-            app.finish_preview_error(
-                entry.server_filename.as_str(),
-                "video_auth_error: missing uid",
-            );
-            return;
-        }
         let budget = match crate::preview::VideoCacheBudget::new(
             self.video_config.chunk_size_bytes,
             self.video_config.max_chunks,
@@ -1425,25 +1404,14 @@ impl BrowserRuntime {
         let key = preview_key_for_entry(self.account_uid, &entry);
         let path = entry.path.clone();
         let title = entry.server_filename.clone();
-        let account_uid = self.account_uid;
-        let upstream = Arc::new(PcsVideoUpstream::new(
-            client,
-            path,
-            account_uid,
-            account_bduss,
-        ));
-        let cancel = self.root.child_token();
         let server = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                crate::preview::VideoLoopbackServer::spawn_with_prefetch(
-                    nonnegative_size(entry.size),
-                    token,
-                    budget,
-                    default_video_prefetch_chunks(self.video_config.max_chunks),
-                    upstream,
-                    cancel,
-                ),
-            )
+            tokio::runtime::Handle::current().block_on(spawn_video_helper(
+                path,
+                nonnegative_size(entry.size),
+                token,
+                budget,
+                default_video_prefetch_chunks(self.video_config.max_chunks),
+            ))
         });
         let server = match server {
             Ok(server) => server,
@@ -1455,23 +1423,7 @@ impl BrowserRuntime {
                 return;
             }
         };
-        let mpv_args = match server.mpv_args_with_profile(self.video_config.player_profile) {
-            Ok(args) => args,
-            Err(err) => {
-                app.finish_preview_error(
-                    entry.server_filename.as_str(),
-                    format!("video_player_error: {err:?}"),
-                );
-                return;
-            }
-        };
-        if !program_available(MPV_PROGRAM) {
-            app.finish_preview_error(
-                entry.server_filename.as_str(),
-                format!("video_player_missing: {MPV_PROGRAM} not found on PATH"),
-            );
-            return;
-        }
+        let mpv_args = server.mpv_args();
         let mut command = tokio::process::Command::new(MPV_PROGRAM);
         command
             .args(&mpv_args)
@@ -1479,6 +1431,7 @@ impl BrowserRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        configure_video_player_process_group(&mut command);
         let child = command.spawn();
         let mut child = match child {
             Ok(child) => child,
@@ -1490,6 +1443,7 @@ impl BrowserRuntime {
                 return;
             }
         };
+        let player_process_group = child.id();
         let player_log = Arc::new(Mutex::new(crate::preview::PlayerLogRing::new(6)));
         if let Some(stderr) = child.stderr.take() {
             let player_log = Arc::clone(&player_log);
@@ -1510,6 +1464,7 @@ impl BrowserRuntime {
             title,
             server,
             player: child,
+            player_process_group,
             player_log,
         });
         self.refresh_active_video_preview(app);
@@ -1520,14 +1475,10 @@ impl BrowserRuntime {
             return;
         }
         self.stop_active_video_if_selection_changed(app);
-        let Some(active) = self.active_video.as_mut() else {
+        let Some(mut active) = self.active_video.take() else {
             return;
         };
-        let player_status = match active.player.try_wait() {
-            Ok(Some(status)) => Some(format!("player_exit={status}")),
-            Ok(None) => None,
-            Err(err) => Some(format!("player_poll_error={err}")),
-        };
+        let (keep_session, player_status) = classify_video_player_poll(active.player.try_wait());
         let playback_state = if player_status.is_some() {
             "failed"
         } else {
@@ -1548,7 +1499,6 @@ impl BrowserRuntime {
         let lines = vec![
             "video=loopback seek=true".to_string(),
             format!("playback={playback_state}"),
-            format!("mpv_profile={}", self.video_config.player_profile.as_str()),
             active_player_log_line(&active.player_log),
             format!("listen=127.0.0.1:{}", active.server.port()),
             player_line,
@@ -1576,6 +1526,15 @@ impl BrowserRuntime {
                 memory_limit_bytes: memory_limit,
             },
         );
+        if keep_session {
+            self.active_video = Some(active);
+        } else {
+            self.video_epoch.fetch_add(1, Ordering::AcqRel);
+            let server = active.stop();
+            self.tasks.spawn(async move {
+                let _ = server.shutdown().await;
+            });
+        }
     }
 
     pub(crate) fn stop_active_video_if_selection_changed(&mut self, app: &crate::tui::TuiApp) {
@@ -1587,7 +1546,13 @@ impl BrowserRuntime {
 
     pub(crate) fn stop_active_video(&mut self) {
         self.video_epoch.fetch_add(1, Ordering::AcqRel);
-        self.active_video = None;
+        let Some(active) = self.active_video.take() else {
+            return;
+        };
+        let server = active.stop();
+        self.tasks.spawn(async move {
+            let _ = server.shutdown().await;
+        });
     }
 
     pub(crate) async fn shutdown_active_video(&mut self) {
@@ -1595,10 +1560,7 @@ impl BrowserRuntime {
         let Some(active) = self.active_video.take() else {
             return;
         };
-        let ActiveVideoPreview {
-            mut player, server, ..
-        } = active;
-        let _ = player.start_kill();
+        let server = active.stop();
         let _ = server.shutdown().await;
     }
 
@@ -1668,4 +1630,41 @@ impl BrowserRuntime {
             let _ = store.write_snapshot(account_uid, path.as_str(), entries, saved_at);
         });
     }
+}
+
+pub(crate) fn classify_video_player_poll(
+    result: std::io::Result<Option<std::process::ExitStatus>>,
+) -> (bool, Option<String>) {
+    match result {
+        Ok(Some(status)) => (false, Some(format!("player_exit={status}"))),
+        Ok(None) => (true, None),
+        Err(err) => (false, Some(format!("player_poll_error={err}"))),
+    }
+}
+
+pub(crate) fn configure_video_player_process_group(command: &mut tokio::process::Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        command.as_std_mut().process_group(0);
+    }
+}
+
+pub(crate) fn stop_video_player(
+    player: &mut tokio::process::Child,
+    player_process_group: Option<u32>,
+) {
+    #[cfg(unix)]
+    if let Some(process_group) = player_process_group.and_then(|id| i32::try_from(id).ok()) {
+        use nix::{
+            sys::signal::{killpg, Signal},
+            unistd::Pid,
+        };
+
+        if killpg(Pid::from_raw(process_group), Signal::SIGTERM).is_ok() {
+            return;
+        }
+    }
+    let _ = player.start_kill();
 }

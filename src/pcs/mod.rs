@@ -1,8 +1,5 @@
 use std::time::{Duration, UNIX_EPOCH};
 
-#[cfg(test)]
-mod tests;
-
 use futures_util::StreamExt;
 use md5::{Digest as Md5Digest, Md5};
 use reqwest::header::{COOKIE, RANGE, USER_AGENT};

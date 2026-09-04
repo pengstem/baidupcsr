@@ -84,19 +84,8 @@ pub struct UiConfig {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 #[serde(default, rename_all = "snake_case")]
 pub struct VideoPreviewConfig {
-    pub enabled: bool,
     pub chunk_size_bytes: u64,
     pub max_chunks: usize,
-    #[serde(rename = "profile", alias = "player_profile")]
-    pub player_profile: VideoPlayerProfile,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum VideoPlayerProfile {
-    #[default]
-    User,
-    Isolated,
 }
 
 impl PcsConfig {
@@ -114,22 +103,11 @@ impl VideoPreviewConfig {
     }
 }
 
-impl VideoPlayerProfile {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::User => "user",
-            Self::Isolated => "isolated",
-        }
-    }
-}
-
 impl Default for VideoPreviewConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             chunk_size_bytes: 4 * 1024 * 1024,
             max_chunks: 32,
-            player_profile: VideoPlayerProfile::User,
         }
     }
 }

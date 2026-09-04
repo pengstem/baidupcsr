@@ -309,7 +309,7 @@ pub(crate) async fn read_bounded_response(
 
     let capacity = usize::try_from(requested_len)
         .map_err(|_| download_protocol_error("requested range is too large for this platform"))?;
-    let mut bytes = Vec::with_capacity(capacity.min(64 * 1024));
+    let mut bytes = Vec::with_capacity(capacity);
     let mut stream = response.bytes_stream();
     loop {
         let next = tokio::select! {

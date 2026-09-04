@@ -17,14 +17,8 @@ pub(crate) fn print_doctor(config_dir: Option<PathBuf>) {
     println!("config_permission: {config_permission}");
     match crate::config::load_ui_config_or_default(&ui_config_path) {
         Ok(config) => {
-            let state = if config.video_preview.enabled {
-                "enabled"
-            } else {
-                "disabled"
-            };
             println!(
-                "video_preview: {state} profile={} chunk={} chunks={} budget={}",
-                config.video_preview.player_profile.as_str(),
+                "video_preview: chunk={} chunks={} budget={}",
                 config.video_preview.chunk_size_bytes,
                 config.video_preview.max_chunks,
                 config.video_preview.memory_limit_bytes()

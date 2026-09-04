@@ -102,6 +102,7 @@ dependencies = [
  "imagesize",
  "lru",
  "md-5",
+ "nix 0.29.0",
  "ratatui",
  "reqwest",
  "serde",

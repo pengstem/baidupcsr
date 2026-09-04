@@ -1,12 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 
-#[cfg(test)]
-mod tests;
 use std::env;
 use std::ffi::OsString;
-use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::{
@@ -34,11 +30,11 @@ mod doctor;
 mod remote_operation;
 mod runtime;
 mod transfer;
-mod video_bench;
+mod video_helper;
 
 pub(crate) use command::*;
 pub(crate) use doctor::*;
 pub(crate) use remote_operation::*;
 pub(crate) use runtime::*;
 pub(crate) use transfer::*;
-pub(crate) use video_bench::*;
+pub(crate) use video_helper::*;

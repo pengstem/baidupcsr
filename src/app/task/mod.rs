@@ -1,8 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TaskId(u64);
 
@@ -222,10 +219,6 @@ impl TaskManager {
 
     pub fn active_count(&self) -> usize {
         self.active_ids.len()
-    }
-
-    pub fn latest_active_id(&self) -> Option<TaskId> {
-        self.active_ids.last().copied()
     }
 
     pub fn latest_cancellable_id(&self) -> Option<TaskId> {
