@@ -1,0 +1,14 @@
+---
+source: src/tui/view.rs
+expression: screen
+---
+ /我的资源/L 绿灯军团（2026）
+ 1080P版/                              │  loading…
+ Lanterns.S01E01.2026.2160p…  7.81 GiB │
+ Lanterns.S01E02.mkv          5.52 GiB │
+▍zh.ass                       50.0 KiB │
+                                       │
+                                       │
+                                       │
+ v Lanterns.S01E02.mkv          ━━━━━━━━━━━╸────────  58%
+ NORMAL  1/4  ● 1 marked  name↑                                  ? help  q quit

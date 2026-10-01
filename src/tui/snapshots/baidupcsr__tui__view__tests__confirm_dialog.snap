@@ -1,0 +1,18 @@
+---
+source: src/tui/view.rs
+expression: screen
+---
+ /我的资源/L 绿灯军团（2026）
+ 1080P版/                              │  loading…
+ Lanterns.S01E01.202╭ Delete 2 items? ─────────────────────╮
+ Lanterns.S01E02.mkv│   /a/one                             │
+ zh.ass             │   /a/two                             │
+                    │                                      │
+                    │        y delete   n cancel           │
+                    ╰──────────────────────────────────────╯
+                                       │
+                                       │
+                                       │
+                                       │
+                                       │
+ NORMAL  1/4  name↑                                              ? help  q quit

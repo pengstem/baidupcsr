@@ -1,9 +1,10 @@
-mod directory;
-mod download;
-mod remote_operation;
-mod task;
+//! Netdisk logic independent of the terminal UI.
 
-pub use directory::*;
-pub use download::*;
-pub use remote_operation::*;
-pub use task::*;
+pub mod directory;
+pub mod download;
+pub mod fetch;
+pub mod launch;
+pub mod ops;
+pub mod preview;
+pub mod remote_path;
+pub mod task;

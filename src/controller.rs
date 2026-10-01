@@ -1,0 +1,657 @@
+//! Runs the side effects the UI asks for ([`Cmd`]) and feeds results back
+//! into it as [`Event`]s from background jobs.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use bytes::Bytes;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
+use crate::app::directory::{DirectoryStore, Generation};
+use crate::app::download::{download, DownloadOutcome, DownloadSpec};
+use crate::app::fetch::{Account, RangeFetcher, RemoteFile};
+use crate::app::launch;
+use crate::app::ops::{self, Operation, SearchMode};
+use crate::app::preview::{describe_image, FileKind, TextCache, PREVIEW_FETCH_BYTES};
+use crate::app::remote_path;
+use crate::app::task::{TaskId, TaskKind, TaskState};
+use crate::config::{self, PcsConfig, UiConfig};
+use crate::pcs::{ByteRange, FileEntry, PcsClient, Quota};
+use crate::tui::app::{App, Cmd, PreviewBody, ToastLevel};
+use crate::tui::theme::Theme;
+
+/// Files up to this size can be opened with the desktop's default app.
+const OPEN_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
+const TEXT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+pub enum Event {
+    Listed {
+        path: String,
+        generation: Generation,
+        result: Result<Vec<FileEntry>, String>,
+    },
+    PreviewBytes {
+        entry: FileEntry,
+        result: Result<Bytes, String>,
+    },
+    Quota(Quota),
+    Progress {
+        id: TaskId,
+        done: u64,
+    },
+    Finished {
+        id: TaskId,
+        outcome: Outcome,
+    },
+    SearchBatch {
+        id: TaskId,
+        entries: Vec<FileEntry>,
+    },
+    Play {
+        title: String,
+        url: String,
+    },
+    Notice(ToastLevel, String),
+}
+
+pub enum Outcome {
+    Done {
+        message: String,
+        refresh: Vec<String>,
+        open: Option<PathBuf>,
+    },
+    Failed(String),
+    Cancelled,
+}
+
+struct Session {
+    client: PcsClient,
+    account: Option<Account>,
+}
+
+pub struct Controller {
+    pub app: App,
+    session: Option<Session>,
+    pcs_config_path: PathBuf,
+    store: Option<DirectoryStore>,
+    ui: UiConfig,
+    download_dir: PathBuf,
+    texts: TextCache,
+    events: UnboundedSender<Event>,
+    root: CancellationToken,
+    jobs: JoinSet<()>,
+    preview_cancel: CancellationToken,
+    task_cancels: HashMap<TaskId, CancellationToken>,
+    search_task: Option<TaskId>,
+    player: Option<tokio::process::Child>,
+}
+
+impl Controller {
+    pub fn new(events: UnboundedSender<Event>) -> Self {
+        let pcs_config_path = config::pcs_config_path(None);
+        let (ui, ui_error) = match UiConfig::load(&config::ui_config_path()) {
+            Ok(ui) => (ui, None),
+            Err(error) => (UiConfig::default(), Some(error.to_string())),
+        };
+        let pcs = PcsConfig::load(&pcs_config_path);
+        let user = pcs.as_ref().ok().and_then(PcsConfig::active_user);
+        let workdir = user.map_or("/", |user| user.workdir.as_str());
+        let mut app = App::new(workdir, Theme::new(ui.ui.icons));
+
+        let session = match (&pcs, user) {
+            (Err(error), _) => {
+                app.toast(
+                    ToastLevel::Error,
+                    format!("{error} — log in with BaiduPCS-Go first"),
+                );
+                None
+            }
+            (Ok(_), None) => {
+                app.toast(ToastLevel::Error, "no active account in BaiduPCS-Go config");
+                None
+            }
+            (Ok(pcs), Some(user)) => match pcs.client(user, ui.network.proxy.clone()) {
+                Ok(client) => Some(Session {
+                    client,
+                    account: user.account(),
+                }),
+                Err(error) => {
+                    app.toast(ToastLevel::Error, error);
+                    None
+                }
+            },
+        };
+        if let Some(error) = ui_error {
+            app.toast(ToastLevel::Error, error);
+        }
+        let account_uid = user.map_or(0, |user| user.uid);
+        let download_dir = ui.download_dir(pcs.as_ref().unwrap_or(&PcsConfig::default()));
+        let root = CancellationToken::new();
+        Self {
+            app,
+            session,
+            pcs_config_path,
+            store: Some(DirectoryStore::new(config::cache_dir(), account_uid)),
+            ui,
+            download_dir,
+            texts: TextCache::new(TEXT_CACHE_BYTES),
+            events,
+            preview_cancel: root.child_token(),
+            root,
+            jobs: JoinSet::new(),
+            task_cancels: HashMap::new(),
+            search_task: None,
+            player: None,
+        }
+    }
+
+    pub fn start(&mut self) {
+        let cwd = self.app.cwd.clone();
+        let cmd = self.app.enter_dir(&cwd);
+        self.run(vec![cmd]);
+        if let Some(session) = &self.session {
+            let client = session.client.clone();
+            self.spawn(|events, cancel| async move {
+                if let Ok(quota) = client.quota(&cancel).await {
+                    let _ = events.send(Event::Quota(quota));
+                }
+            });
+        }
+    }
+
+    pub async fn shutdown(mut self) {
+        self.root.cancel();
+        if self.session.is_some() {
+            if let Err(error) = config::save_workdir(&self.pcs_config_path, &self.app.cwd) {
+                eprintln!("could not save working directory: {error}");
+            }
+        }
+        let drained = tokio::time::timeout(Duration::from_secs(2), async {
+            while self.jobs.join_next().await.is_some() {}
+        });
+        if drained.await.is_err() {
+            self.jobs.abort_all();
+        }
+    }
+
+    fn spawn<F, Fut>(&mut self, job: F)
+    where
+        F: FnOnce(UnboundedSender<Event>, CancellationToken) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.jobs
+            .spawn(job(self.events.clone(), self.root.child_token()));
+        while self.jobs.try_join_next().is_some() {}
+    }
+
+    fn client_and_account(&mut self) -> Option<(PcsClient, Account)> {
+        match &self.session {
+            Some(Session {
+                client,
+                account: Some(account),
+            }) => Some((client.clone(), account.clone())),
+            Some(_) => {
+                self.app
+                    .toast(ToastLevel::Error, "account has no uid/BDUSS for downloads");
+                None
+            }
+            None => {
+                self.app.toast(ToastLevel::Error, "not logged in");
+                None
+            }
+        }
+    }
+
+    pub fn run(&mut self, cmds: Vec<Cmd>) {
+        for cmd in cmds {
+            match cmd {
+                Cmd::Navigate => {
+                    let cwd = self.app.cwd.clone();
+                    self.ensure_listing(&cwd, false);
+                    if let Some(parent) = remote_path::parent(&cwd) {
+                        self.ensure_listing(&parent, false);
+                    }
+                    self.update_preview();
+                }
+                Cmd::SelectionChanged => self.update_preview(),
+                Cmd::Refresh => {
+                    let cwd = self.app.cwd.clone();
+                    self.ensure_listing(&cwd, true);
+                    if let Some(dir) = self.app.selected().filter(|entry| entry.is_dir) {
+                        let dir = dir.path.clone();
+                        self.ensure_listing(&dir, true);
+                    }
+                }
+                Cmd::Open(entry) => self.open(entry),
+                Cmd::Download(entries) => {
+                    for entry in entries {
+                        let target = self
+                            .download_dir
+                            .join(remote_path::local_file_name(&entry.server_filename));
+                        self.start_download(entry, target, None);
+                    }
+                }
+                Cmd::Run(operation) => self.start_operation(operation),
+                Cmd::Search { keyword, mode } => self.start_search(keyword, mode),
+                Cmd::Cancel(id) => {
+                    if self.app.tasks.request_cancel(id) {
+                        if let Some(cancel) = self.task_cancels.get(&id) {
+                            cancel.cancel();
+                        }
+                    }
+                }
+                Cmd::Quit => {}
+            }
+        }
+    }
+
+    /// Show a listing from memory or disk, and fetch it if not fresh.
+    fn ensure_listing(&mut self, path: &str, force: bool) {
+        if !self
+            .app
+            .cache
+            .get(path)
+            .is_some_and(|listing| listing.is_loaded())
+        {
+            if let Some((entries, saved_at)) =
+                self.store.as_ref().and_then(|store| store.read(path))
+            {
+                self.app.cache.insert_stale(path, entries, saved_at);
+                self.app.listing_updated(path);
+            }
+        }
+        if !force && !self.app.cache.needs_fetch(path) {
+            return;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        let client = session.client.clone();
+        let generation = self.app.cache.begin_refresh(path);
+        let path = path.to_string();
+        self.spawn(|events, cancel| async move {
+            let result = client.list(&path, &cancel).await;
+            if !result.as_ref().is_err_and(|error| error.is_cancelled()) {
+                let result = result.map_err(|error| error.to_string());
+                let _ = events.send(Event::Listed {
+                    path,
+                    generation,
+                    result,
+                });
+            }
+        });
+    }
+
+    fn update_preview(&mut self) {
+        self.preview_cancel.cancel();
+        self.preview_cancel = self.root.child_token();
+        let Some(entry) = self.app.selected().cloned() else {
+            self.app.set_preview("", PreviewBody::Empty);
+            return;
+        };
+        if entry.is_dir {
+            self.ensure_listing(&entry.path, false);
+            self.app.set_preview(&entry.path, PreviewBody::Empty);
+            return;
+        }
+        let kind = FileKind::of(&entry);
+        let size = entry.size_bytes();
+        let body = if kind == FileKind::Video {
+            PreviewBody::Note("⏎  play in mpv      D  download".to_string())
+        } else if !(kind.is_text() || kind == FileKind::Image) {
+            PreviewBody::Note(if size <= OPEN_LIMIT_BYTES {
+                "⏎  open with the default app      D  download".to_string()
+            } else {
+                "too large to open here      D  download".to_string()
+            })
+        } else if size == 0 {
+            PreviewBody::Note("empty file".to_string())
+        } else if let Some(text) = self.texts.get(&entry).filter(|_| kind.is_text()) {
+            PreviewBody::Text(text)
+        } else {
+            match self
+                .session
+                .as_ref()
+                .map(|session| (session.client.clone(), session.account.clone()))
+            {
+                Some((client, Some(account))) => {
+                    let cancel = self.preview_cancel.clone();
+                    let job_entry = entry.clone();
+                    self.jobs.spawn({
+                        let events = self.events.clone();
+                        async move {
+                            let file = RemoteFile::new(client, account, job_entry.path.clone());
+                            let result = match ByteRange::chunk(0, PREVIEW_FETCH_BYTES, size) {
+                                Ok(range) => file.fetch(range, &cancel).await,
+                                Err(error) => Err(error),
+                            };
+                            if !result.as_ref().is_err_and(|error| error.is_cancelled()) {
+                                let _ = events.send(Event::PreviewBytes {
+                                    entry: job_entry,
+                                    result: result.map_err(|error| error.to_string()),
+                                });
+                            }
+                        }
+                    });
+                    PreviewBody::Loading
+                }
+                _ => PreviewBody::Note("preview needs a logged-in account".to_string()),
+            }
+        };
+        self.app.set_preview(&entry.path, body);
+    }
+
+    fn open(&mut self, entry: FileEntry) {
+        if FileKind::of(&entry) == FileKind::Video {
+            self.play(entry);
+            return;
+        }
+        if entry.size_bytes() > OPEN_LIMIT_BYTES {
+            self.app
+                .toast(ToastLevel::Info, "too large to open — press D to download");
+            return;
+        }
+        let uid = self
+            .session
+            .as_ref()
+            .and_then(|s| s.account.as_ref())
+            .map_or(0, |a| a.uid);
+        let target = std::env::temp_dir()
+            .join("baidupcsr-open")
+            .join(uid.to_string())
+            .join(format!(
+                "{}-{}-{}",
+                entry.fs_id,
+                entry.mtime,
+                remote_path::local_file_name(&entry.server_filename)
+            ));
+        self.start_download(entry, target.clone(), Some(target));
+    }
+
+    fn play(&mut self, entry: FileEntry) {
+        if !launch::program_available(&self.ui.player.command) {
+            self.app.toast(
+                ToastLevel::Error,
+                format!(
+                    "{} not found — install it or set [player] command",
+                    self.ui.player.command
+                ),
+            );
+            return;
+        }
+        let Some((client, account)) = self.client_and_account() else {
+            return;
+        };
+        self.app.toast(
+            ToastLevel::Info,
+            format!("opening {} in player…", entry.server_filename),
+        );
+        self.spawn(|events, cancel| async move {
+            let file = RemoteFile::new(client, account, entry.path);
+            let event = match file.working_url(&cancel).await {
+                Ok(url) => Event::Play {
+                    title: entry.server_filename,
+                    url,
+                },
+                Err(error) => Event::Notice(ToastLevel::Error, format!("cannot play: {error}")),
+            };
+            let _ = events.send(event);
+        });
+    }
+
+    /// Download `entry` to `target`; `open` the result when given.
+    fn start_download(&mut self, entry: FileEntry, target: PathBuf, open: Option<PathBuf>) {
+        let Some((client, account)) = self.client_and_account() else {
+            return;
+        };
+        let kind = if open.is_some() {
+            TaskKind::Open
+        } else {
+            TaskKind::Download
+        };
+        let size = entry.size_bytes();
+        let id = self
+            .app
+            .tasks
+            .start(kind, entry.server_filename.clone(), Some(size));
+        let cancel = self.root.child_token();
+        self.task_cancels.insert(id, cancel.clone());
+        let spec = DownloadSpec {
+            target,
+            size,
+            chunk_size: self.ui.download.chunk_size,
+            concurrency: self.ui.download.concurrency,
+            reuse_existing: open.is_some(),
+        };
+        let events = self.events.clone();
+        self.jobs.spawn(async move {
+            let file = RemoteFile::new(client, account, entry.path);
+            let progress = |done| {
+                let _ = events.send(Event::Progress { id, done });
+            };
+            let outcome = match download(&file, &spec, progress, &cancel).await {
+                Ok(DownloadOutcome::Completed) => Outcome::Done {
+                    message: if open.is_some() {
+                        format!("opened {}", entry.server_filename)
+                    } else {
+                        format!("saved {}", spec.target.display())
+                    },
+                    refresh: Vec::new(),
+                    open,
+                },
+                Ok(DownloadOutcome::Cancelled { .. }) => Outcome::Cancelled,
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
+            let _ = events.send(Event::Finished { id, outcome });
+        });
+    }
+
+    fn start_operation(&mut self, operation: Operation) {
+        let Some(session) = &self.session else {
+            self.app.toast(ToastLevel::Error, "not logged in");
+            return;
+        };
+        let client = session.client.clone();
+        let summary = operation.summary();
+        let id = self
+            .app
+            .tasks
+            .start(TaskKind::Remote, summary.clone(), None);
+        let cancel = self.root.child_token();
+        self.task_cancels.insert(id, cancel.clone());
+        let events = self.events.clone();
+        self.jobs.spawn(async move {
+            let outcome = match operation.execute(&client, &cancel).await {
+                Ok(()) => Outcome::Done {
+                    message: summary,
+                    refresh: operation.affected_dirs(),
+                    open: None,
+                },
+                Err(error) if error.is_cancelled() => Outcome::Cancelled,
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
+            let _ = events.send(Event::Finished { id, outcome });
+        });
+    }
+
+    fn start_search(&mut self, keyword: String, mode: SearchMode) {
+        if let Some(previous) = self.search_task.take() {
+            self.run(vec![Cmd::Cancel(previous)]);
+        }
+        let Some(session) = &self.session else {
+            self.app.toast(ToastLevel::Error, "not logged in");
+            return;
+        };
+        let client = session.client.clone();
+        let root = self.app.cwd.clone();
+        let id = self
+            .app
+            .tasks
+            .start(TaskKind::Search, format!("search “{keyword}”"), None);
+        self.search_task = Some(id);
+        let cancel = self.root.child_token();
+        self.task_cancels.insert(id, cancel.clone());
+        let events = self.events.clone();
+        self.jobs.spawn(async move {
+            let on_batch = |entries| {
+                let _ = events.send(Event::SearchBatch { id, entries });
+            };
+            let outcome = match ops::search(&client, &root, &keyword, mode, on_batch, &cancel).await
+            {
+                Ok(count) => Outcome::Done {
+                    message: format!("{count} match(es) for “{keyword}”"),
+                    refresh: Vec::new(),
+                    open: None,
+                },
+                Err(error) if error.is_cancelled() => Outcome::Cancelled,
+                Err(error) => Outcome::Failed(error.to_string()),
+            };
+            let _ = events.send(Event::Finished { id, outcome });
+        });
+    }
+
+    pub fn handle(&mut self, event: Event) {
+        while self.jobs.try_join_next().is_some() {}
+        match event {
+            Event::Listed {
+                path,
+                generation,
+                result,
+            } => {
+                let failed = result.as_ref().err().cloned();
+                let to_store = result.as_ref().ok().cloned();
+                if !self.app.cache.finish_refresh(&path, generation, result) {
+                    return;
+                }
+                if let (Some(entries), Some(store)) = (to_store, self.store.clone()) {
+                    let path = path.clone();
+                    self.jobs.spawn_blocking(move || {
+                        let _ = store.write(&path, entries);
+                    });
+                }
+                if let Some(error) = failed.filter(|_| path == self.app.cwd) {
+                    self.app.toast(ToastLevel::Error, error);
+                }
+                if self.app.listing_updated(&path) {
+                    self.update_preview();
+                }
+            }
+            Event::PreviewBytes { entry, result } => {
+                if self.app.selected().map(|selected| &selected.path) != Some(&entry.path) {
+                    return;
+                }
+                let body = match result {
+                    Err(error) => PreviewBody::Error(error),
+                    Ok(bytes) if FileKind::of(&entry).is_text() => {
+                        PreviewBody::Text(self.texts.insert(&entry, &bytes))
+                    }
+                    Ok(bytes) => describe_image(&bytes).map_or_else(
+                        || PreviewBody::Note("unrecognized image format".to_string()),
+                        PreviewBody::Image,
+                    ),
+                };
+                self.app.set_preview(&entry.path, body);
+            }
+            Event::Quota(quota) => self.app.quota = Some(quota),
+            Event::Progress { id, done } => self.app.tasks.progress(id, done),
+            Event::SearchBatch { id, entries } => {
+                if self.search_task == Some(id) {
+                    let before = self.app.selected().map(|entry| entry.path.clone());
+                    self.app.add_search_results(entries);
+                    if self.app.selected().map(|entry| &entry.path) != before.as_ref() {
+                        self.update_preview();
+                    }
+                }
+            }
+            Event::Finished { id, outcome } => self.finish(id, outcome),
+            Event::Play { title, url } => {
+                if let Some(mut previous) = self.player.take() {
+                    let _ = previous.start_kill();
+                }
+                let user_agent = self
+                    .session
+                    .as_ref()
+                    .map_or("netdisk", |session| session.client.pan_user_agent())
+                    .to_string();
+                match launch::spawn_player(&self.ui.player, &url, &user_agent, &title) {
+                    Ok(child) => self.player = Some(child),
+                    Err(error) => self
+                        .app
+                        .toast(ToastLevel::Error, format!("cannot start player: {error}")),
+                }
+            }
+            Event::Notice(level, text) => self.app.toast(level, text),
+        }
+    }
+
+    fn finish(&mut self, id: TaskId, outcome: Outcome) {
+        self.task_cancels.remove(&id);
+        if self.search_task == Some(id) {
+            self.search_task = None;
+            if let Some(search) = self.app.search.as_mut() {
+                search.running = false;
+            }
+        }
+        let state = match outcome {
+            Outcome::Done {
+                message,
+                refresh,
+                open,
+            } => {
+                if let Some(path) = open {
+                    if let Err(error) = launch::open_with_system(&path) {
+                        self.app
+                            .toast(ToastLevel::Error, format!("cannot open file: {error}"));
+                    }
+                }
+                self.app.toast(ToastLevel::Success, message);
+                self.refresh_dirs(&refresh);
+                TaskState::Done
+            }
+            Outcome::Failed(error) => {
+                let label = self
+                    .app
+                    .tasks
+                    .get(id)
+                    .map(|task| task.label.clone())
+                    .unwrap_or_default();
+                self.app
+                    .toast(ToastLevel::Error, format!("{label}: {error}"));
+                TaskState::Failed(error)
+            }
+            Outcome::Cancelled => {
+                let label = self
+                    .app
+                    .tasks
+                    .get(id)
+                    .map(|task| task.label.clone())
+                    .unwrap_or_default();
+                self.app
+                    .toast(ToastLevel::Info, format!("cancelled {label}"));
+                TaskState::Cancelled
+            }
+        };
+        self.app.tasks.finish(id, state);
+    }
+
+    /// Mark changed directories stale and refetch the ones on screen.
+    fn refresh_dirs(&mut self, dirs: &[String]) {
+        let visible = [
+            Some(self.app.cwd.clone()),
+            remote_path::parent(&self.app.cwd),
+            self.app
+                .selected()
+                .filter(|entry| entry.is_dir)
+                .map(|entry| entry.path.clone()),
+        ];
+        for dir in dirs {
+            self.app.cache.invalidate(dir);
+            if visible.iter().flatten().any(|shown| shown == dir) {
+                self.ensure_listing(dir, true);
+            }
+        }
+    }
+}

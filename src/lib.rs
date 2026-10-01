@@ -1,14 +1,9 @@
-use std::ffi::OsString;
-use std::process::ExitCode;
+//! baidupcsr: a terminal file manager for Baidu Netdisk.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod app;
 pub mod cli;
 pub mod config;
+pub mod controller;
 pub mod pcs;
-pub mod preview;
 pub mod tui;
-
-/// Runs the command-line application with an explicit argument iterator.
-pub async fn run(args: impl IntoIterator<Item = OsString>) -> ExitCode {
-    cli::run(args).await
-}

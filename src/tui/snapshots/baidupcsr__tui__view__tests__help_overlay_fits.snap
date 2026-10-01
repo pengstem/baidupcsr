@@ -1,0 +1,34 @@
+---
+source: src/tui/view.rs
+expression: screen
+---
+   我的资源  L 绿灯军团（2026）
+  L 绿灯军…  │  1080P版                               │  loading…
+  电影       │  Lanterns.S01E01.2026.2160p…  7.81 GiB │
+  音乐      ╭ Keys ──────────────────────────────────────────────────────────────────╮
+             │ Navigate                            Select                             │
+             │ j k ↑ ↓  move                       Space    mark                      │
+             │ h ←  ⌫   parent directory           v        visual range              │
+             │ l → ⏎    open / play                V        mark all / none           │
+             │ gg  G    top / bottom               Esc      clear marks, filter       │
+             │ ^d ^u    half page                                                     │
+             │ Tab      focus preview              Find & view                        │
+             │                                     /        filter                    │
+             │ Files                               s        search below here         │
+             │ D        download                   :        command                   │
+             │ y  x     yank / cut                 S        sort                      │
+             │ p        paste here                 R  ^r    refresh                   │
+             │ dd       delete                     T  c     tasks / cancel            │
+             │ r        rename                     q        quit                      │
+             │ a        new directory                                                 │
+             │                                                                        │
+             │                                                                        │
+             ╰────────────────────────────────────────────────────────────────────────╯
+              │                                         │
+              │                                         │
+              │                                         │
+              │                                         │
+              │                                         │
+              │                                         │
+              │                                         │
+ NORMAL  1/4  name↑                                                                  ? help  q quit
