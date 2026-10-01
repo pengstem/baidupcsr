@@ -114,8 +114,11 @@ pub async fn download_to_path<F: RangeFetcher>(
         partial_exists = false;
     }
     if offset == spec.size && partial_exists {
-        tokio::fs::remove_file(&partial_path).await?;
-        offset = 0;
+        tokio::fs::rename(&partial_path, &spec.target).await?;
+        return Ok(DownloadOutcome::Completed {
+            target: spec.target.clone(),
+            bytes_written: spec.size,
+        });
     }
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)

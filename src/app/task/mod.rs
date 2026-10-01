@@ -258,7 +258,8 @@ impl TaskManager {
     }
 
     fn mark_terminal(&mut self, id: TaskId) {
-        debug_assert!(self.active_ids.remove(&id));
+        let removed = self.active_ids.remove(&id);
+        debug_assert!(removed);
         self.terminal_history.push_back(id);
 
         while self.terminal_history.len() > MAX_TERMINAL_TASKS {
