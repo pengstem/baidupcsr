@@ -20,7 +20,7 @@ clap = { version = "4.6", features = ["derive"] }
 clap_complete = "4.6"
 cookie = "0.18"
 crossterm = { version = "0.29", features = ["event-stream"] }
-dirs = "6"
+dirs = "7"
 futures-util = "0.3"
 headers = "0.4"
 hex = "0.4"
@@ -28,14 +28,14 @@ imagesize = "0.15"
 lru = "0.18"
 md-5 = "0.11"
 ratatui = "0.30.2"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "multipart"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "multipart"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.11"
 shell-words = "1.1"
 thiserror = "2.0"
 time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
-tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-util"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process", "io-util"] }
 tokio-util = "0.7"
 toml = "1.1"
 unicode-width = "0.2"
@@ -44,7 +44,7 @@ url = "2.5"
 [dev-dependencies]
 insta = "1"
 tempfile = "3"
-tokio = { version = "1.52", features = ["test-util"] }
+tokio = { version = "1.53", features = ["test-util"] }
 
 [lints.rust]
 unsafe_code = "forbid"
