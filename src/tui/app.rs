@@ -494,15 +494,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::Parent => {
-                if self.search.is_some() {
-                    return vec![self.exit_search()];
-                }
-                match remote_path::parent(&self.cwd) {
-                    Some(parent) => vec![self.enter_dir(&parent)],
-                    None => Vec::new(),
-                }
-            }
+            Action::Parent => self.leave(),
             Action::Open => self.open_selected(),
             Action::Mark => {
                 if let Some(path) = self.selected().map(|entry| entry.path.clone()) {
@@ -638,6 +630,27 @@ impl App {
     fn cursor_by(&mut self, delta: isize) -> Vec<Cmd> {
         let moved = self.column.move_by(delta);
         self.moved(moved)
+    }
+
+    fn leave(&mut self) -> Vec<Cmd> {
+        if self.search.is_some() {
+            return vec![self.exit_search()];
+        }
+        match remote_path::parent(&self.cwd) {
+            Some(parent) => vec![self.enter_dir(&parent)],
+            None => Vec::new(),
+        }
+    }
+
+    /// Show `path` in its directory with the cursor on it.
+    fn reveal(&mut self, path: &str) -> Vec<Cmd> {
+        let Some(dir) = remote_path::parent(path) else {
+            return Vec::new();
+        };
+        let cmd = self.enter_dir(&dir);
+        self.remembered.insert(dir, path.to_string());
+        self.column.reset(self.cache.entries(&self.cwd), Some(path));
+        vec![cmd]
     }
 
     fn open_selected(&mut self) -> Vec<Cmd> {
@@ -879,11 +892,11 @@ impl App {
                     return self.moved(moved);
                 }
                 if in_parent {
-                    return self.click_side_column(self.regions.parent, position, true);
+                    return self.click_parent(position);
                 }
                 if in_preview {
                     if self.selected().is_some_and(|entry| entry.is_dir) {
-                        return self.click_side_column(self.regions.preview, position, false);
+                        return self.click_child(position);
                     }
                     if self.preview_line_count() > 0 {
                         self.focus = Focus::Preview;
@@ -891,39 +904,71 @@ impl App {
                 }
                 Vec::new()
             }
+            MouseEventKind::Down(MouseButton::Right) if in_files => {
+                let row = usize::from(position.y - self.regions.files.y);
+                let target = self.column.offset() + row;
+                if target >= self.column.len() {
+                    return Vec::new();
+                }
+                self.focus = Focus::Files;
+                let moved = self.column.move_to(target);
+                let mut cmds = self.moved(moved);
+                cmds.extend(self.open_selected());
+                cmds
+            }
             _ => Vec::new(),
         }
     }
 
-    /// Clicking a row of the parent or child column opens that entry's
-    /// directory (or the directory containing it, for files).
-    fn click_side_column(&mut self, area: Rect, position: Position, parent: bool) -> Vec<Cmd> {
-        let dir = if parent {
-            remote_path::parent(&self.cwd)
-        } else {
-            self.selected().map(|entry| entry.path.clone())
+    /// Like yazi: a row of the parent column is revealed there (the cursor
+    /// lands on it one level up); empty space just goes up.
+    fn click_parent(&mut self, position: Position) -> Vec<Cmd> {
+        let (dir, highlight) = match &self.search {
+            Some(search) => (search.root.clone(), None),
+            None => match remote_path::parent(&self.cwd) {
+                Some(parent) => (parent, Some(self.cwd.clone())),
+                None => return Vec::new(),
+            },
         };
-        let Some(dir) = dir else {
-            return Vec::new();
-        };
-        let entries = self.cache.entries(&dir);
-        let highlight = if parent {
-            entries.iter().position(|entry| entry.path == self.cwd)
-        } else {
-            None
-        };
-        let offset = side_offset(highlight, entries.len(), usize::from(area.height));
-        let row = offset + usize::from(position.y - area.y);
-        let Some(entry) = entries.get(row).cloned() else {
-            return Vec::new();
-        };
-        if entry.is_dir {
-            vec![self.enter_dir(&entry.path)]
-        } else {
-            self.remembered.insert(dir.clone(), entry.path);
-            vec![self.enter_dir(&dir)]
+        match side_row(
+            &self.cache,
+            &dir,
+            highlight.as_deref(),
+            self.regions.parent,
+            position,
+        ) {
+            Some(path) => self.reveal(&path),
+            None => self.leave(),
         }
     }
+
+    /// Like yazi: a row of the child column enters the hovered directory
+    /// with the cursor on that row; empty space just enters.
+    fn click_child(&mut self, position: Position) -> Vec<Cmd> {
+        let Some(dir) = self.selected().map(|entry| entry.path.clone()) else {
+            return Vec::new();
+        };
+        match side_row(&self.cache, &dir, None, self.regions.preview, position) {
+            Some(path) => self.reveal(&path),
+            None => vec![self.enter_dir(&dir)],
+        }
+    }
+}
+
+/// The entry under `position` in a side column listing `dir`, scrolled the
+/// way `view::side_listing` draws it.
+fn side_row(
+    cache: &DirectoryCache,
+    dir: &str,
+    highlight: Option<&str>,
+    area: Rect,
+    position: Position,
+) -> Option<String> {
+    let entries = cache.entries(dir);
+    let highlight = highlight.and_then(|path| entries.iter().position(|entry| entry.path == path));
+    let offset = side_offset(highlight, entries.len(), usize::from(area.height));
+    let row = offset + usize::from(position.y - area.y);
+    entries.get(row).map(|entry| entry.path.clone())
 }
 
 /// Scroll offset that keeps `highlight` in the middle third of a side column.
@@ -1089,5 +1134,73 @@ mod tests {
         let offset = side_offset(Some(50), 100, 10);
         assert!((offset..offset + 10).contains(&50));
         assert_eq!(side_offset(Some(99), 100, 10), 90);
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) -> Vec<Cmd> {
+        app.handle_mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// `/docs` listed under a loaded root, with a parent and child column.
+    fn three_columns() -> App {
+        let mut app = app();
+        let generation = app.cache.begin_refresh("/");
+        app.cache.finish_refresh(
+            "/",
+            generation,
+            Ok(vec![entry("/docs", true), entry("/music", true)]),
+        );
+        let generation = app.cache.begin_refresh("/docs/sub");
+        app.cache.finish_refresh(
+            "/docs/sub",
+            generation,
+            Ok(vec![
+                entry("/docs/sub/x.txt", false),
+                entry("/docs/sub/y.txt", false),
+            ]),
+        );
+        app.regions = Regions {
+            parent: Rect::new(0, 1, 10, 5),
+            files: Rect::new(11, 1, 30, 5),
+            preview: Rect::new(42, 1, 30, 5),
+            crumbs: Vec::new(),
+        };
+        app
+    }
+
+    #[test]
+    fn clicking_parent_column_reveals_like_yazi() {
+        let mut app = three_columns();
+        assert_eq!(click(&mut app, 2, 1), [Cmd::Navigate]);
+        assert_eq!(app.cwd, "/");
+        assert_eq!(app.selected().unwrap().path, "/docs");
+
+        let mut app = three_columns();
+        click(&mut app, 2, 2);
+        assert_eq!(app.cwd, "/");
+        assert_eq!(app.selected().unwrap().path, "/music");
+
+        let mut app = three_columns();
+        click(&mut app, 2, 4);
+        assert_eq!(app.cwd, "/");
+        assert_eq!(app.selected().unwrap().path, "/docs");
+    }
+
+    #[test]
+    fn clicking_child_column_enters_with_cursor_on_row() {
+        let mut app = three_columns();
+        assert_eq!(app.selected().unwrap().path, "/docs/sub");
+        assert_eq!(click(&mut app, 45, 2), [Cmd::Navigate]);
+        assert_eq!(app.cwd, "/docs/sub");
+        assert_eq!(app.selected().unwrap().path, "/docs/sub/y.txt");
+
+        let mut app = three_columns();
+        click(&mut app, 45, 4);
+        assert_eq!(app.cwd, "/docs/sub");
+        assert_eq!(app.selected().unwrap().path, "/docs/sub/x.txt");
     }
 }
