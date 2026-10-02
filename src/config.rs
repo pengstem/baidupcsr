@@ -281,7 +281,7 @@ impl UiConfig {
                 return Err(ConfigError::Read {
                     path: path.to_path_buf(),
                     source,
-                })
+                });
             }
         };
         if let Some(dir) = env::var_os(ENV_DOWNLOAD_DIR) {

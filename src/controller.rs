@@ -11,11 +11,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::directory::{DirectoryStore, Generation};
-use crate::app::download::{download, DownloadOutcome, DownloadSpec};
+use crate::app::download::{DownloadOutcome, DownloadSpec, download};
 use crate::app::fetch::{Account, RangeFetcher, RemoteFile};
 use crate::app::launch;
 use crate::app::ops::{self, Operation, SearchMode};
-use crate::app::preview::{describe_image, FileKind, TextCache, PREVIEW_FETCH_BYTES};
+use crate::app::preview::{FileKind, PREVIEW_FETCH_BYTES, TextCache, describe_image};
 use crate::app::remote_path;
 use crate::app::task::{TaskId, TaskKind, TaskState};
 use crate::config::{self, PcsConfig, UiConfig};
@@ -164,10 +164,10 @@ impl Controller {
 
     pub async fn shutdown(mut self) {
         self.root.cancel();
-        if self.session.is_some() {
-            if let Err(error) = config::save_workdir(&self.pcs_config_path, &self.app.cwd) {
-                eprintln!("could not save working directory: {error}");
-            }
+        if self.session.is_some()
+            && let Err(error) = config::save_workdir(&self.pcs_config_path, &self.app.cwd)
+        {
+            eprintln!("could not save working directory: {error}");
         }
         let drained = tokio::time::timeout(Duration::from_secs(2), async {
             while self.jobs.join_next().await.is_some() {}
@@ -237,10 +237,10 @@ impl Controller {
                 Cmd::Run(operation) => self.start_operation(operation),
                 Cmd::Search { keyword, mode } => self.start_search(keyword, mode),
                 Cmd::Cancel(id) => {
-                    if self.app.tasks.request_cancel(id) {
-                        if let Some(cancel) = self.task_cancels.get(&id) {
-                            cancel.cancel();
-                        }
+                    if self.app.tasks.request_cancel(id)
+                        && let Some(cancel) = self.task_cancels.get(&id)
+                    {
+                        cancel.cancel();
                     }
                 }
                 Cmd::Quit => {}
@@ -255,13 +255,11 @@ impl Controller {
             .cache
             .get(path)
             .is_some_and(|listing| listing.is_loaded())
-        {
-            if let Some((entries, saved_at)) =
+            && let Some((entries, saved_at)) =
                 self.store.as_ref().and_then(|store| store.read(path))
-            {
-                self.app.cache.insert_stale(path, entries, saved_at);
-                self.app.listing_updated(path);
-            }
+        {
+            self.app.cache.insert_stale(path, entries, saved_at);
+            self.app.listing_updated(path);
         }
         if !force && !self.app.cache.needs_fetch(path) {
             return;
@@ -601,11 +599,11 @@ impl Controller {
                 refresh,
                 open,
             } => {
-                if let Some(path) = open {
-                    if let Err(error) = launch::open_with_system(&path) {
-                        self.app
-                            .toast(ToastLevel::Error, format!("cannot open file: {error}"));
-                    }
+                if let Some(path) = open
+                    && let Err(error) = launch::open_with_system(&path)
+                {
+                    self.app
+                        .toast(ToastLevel::Error, format!("cannot open file: {error}"));
                 }
                 self.app.toast(ToastLevel::Success, message);
                 self.refresh_dirs(&refresh);

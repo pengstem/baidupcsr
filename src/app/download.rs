@@ -160,8 +160,8 @@ pub fn partial_path(target: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
 
@@ -196,11 +196,11 @@ mod tests {
                 requested.push(range.start);
                 requested.len()
             };
-            if let Some((after, token)) = &self.cancel_after {
-                if calls > *after {
-                    token.cancel();
-                    return Err(PcsError::Cancelled { operation: "test" });
-                }
+            if let Some((after, token)) = &self.cancel_after
+                && calls > *after
+            {
+                token.cancel();
+                return Err(PcsError::Cancelled { operation: "test" });
             }
             if self
                 .failures

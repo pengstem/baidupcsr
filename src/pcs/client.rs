@@ -9,8 +9,8 @@ use tokio_util::sync::CancellationToken;
 use url::form_urlencoded;
 
 use super::model::{
-    locate_sign, ByteRange, ErrorFields, FileEntry, FileOperation, FileOperationPair, Ignored,
-    ListResponse, LocateDownloadResponse, ParamList, PathParam, PcsError, Quota, QuotaResponse,
+    ByteRange, ErrorFields, FileEntry, FileOperation, FileOperationPair, Ignored, ListResponse,
+    LocateDownloadResponse, ParamList, PathParam, PcsError, Quota, QuotaResponse, locate_sign,
 };
 
 /// App id the official netdisk client uses for `locatedownload`.
@@ -296,10 +296,10 @@ impl PcsClient {
         let response = send(operation, request, cancel).await?;
         let status = response.status();
         let body = cancellable(operation, cancel, response.bytes()).await?;
-        if let Ok(fields) = serde_json::from_slice::<ErrorFields>(&body) {
-            if let Some(error) = fields.into_error(operation) {
-                return Err(error);
-            }
+        if let Ok(fields) = serde_json::from_slice::<ErrorFields>(&body)
+            && let Some(error) = fields.into_error(operation)
+        {
+            return Err(error);
         }
         if !status.is_success() {
             return Err(PcsError::Network {
@@ -339,11 +339,7 @@ fn is_accelerated_mirror(url: &str) -> bool {
 }
 
 const fn scheme(https: bool) -> &'static str {
-    if https {
-        "https"
-    } else {
-        "http"
-    }
+    if https { "https" } else { "http" }
 }
 
 fn unix_now() -> i64 {

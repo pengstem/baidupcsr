@@ -9,7 +9,7 @@ use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKin
 use ratatui::layout::{Position, Rect};
 
 use super::column::Column;
-use super::keymap::{action_for, Action};
+use super::keymap::{Action, action_for};
 use super::line_edit::{Edit, LineEdit};
 use super::theme::Theme;
 use crate::app::directory::{DirectoryCache, SortKey, SortMode};
@@ -313,10 +313,10 @@ impl App {
     /// Open `path` as the current directory.
     pub fn enter_dir(&mut self, path: &str) -> Cmd {
         let path = remote_path::normalize(path);
-        if let Some(selected) = self.selected().map(|entry| entry.path.clone()) {
-            if self.search.is_none() {
-                self.remembered.insert(self.cwd.clone(), selected);
-            }
+        if let Some(selected) = self.selected().map(|entry| entry.path.clone())
+            && self.search.is_none()
+        {
+            self.remembered.insert(self.cwd.clone(), selected);
         }
         if let Some(child) = remote_path::child_toward(&path, &self.cwd) {
             self.remembered.insert(path.clone(), child);
@@ -497,10 +497,10 @@ impl App {
             Action::Parent => self.leave(),
             Action::Open => self.open_selected(),
             Action::Mark => {
-                if let Some(path) = self.selected().map(|entry| entry.path.clone()) {
-                    if !self.marks.remove(&path) {
-                        self.marks.insert(path);
-                    }
+                if let Some(path) = self.selected().map(|entry| entry.path.clone())
+                    && !self.marks.remove(&path)
+                {
+                    self.marks.insert(path);
                 }
                 self.cursor_by(1)
             }
@@ -780,12 +780,11 @@ impl App {
             Overlay::None => {}
             Overlay::Help => self.overlay = Overlay::None,
             Overlay::Sort => {
-                if let KeyCode::Char(ch) = key.code {
-                    if let Some(sort_key) = SortKey::ALL.into_iter().find(|key| key.hotkey() == ch)
-                    {
-                        let sort = self.cache.sort().choose(sort_key);
-                        self.set_sort(sort);
-                    }
+                if let KeyCode::Char(ch) = key.code
+                    && let Some(sort_key) = SortKey::ALL.into_iter().find(|key| key.hotkey() == ch)
+                {
+                    let sort = self.cache.sort().choose(sort_key);
+                    self.set_sort(sort);
                 }
                 self.overlay = Overlay::None;
             }

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use time::{macros::format_description, OffsetDateTime, UtcOffset};
+use time::{OffsetDateTime, UtcOffset, macros::format_description};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 static LOCAL_OFFSET: OnceLock<UtcOffset> = OnceLock::new();

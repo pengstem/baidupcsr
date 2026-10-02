@@ -3,13 +3,13 @@
 
 use std::time::Duration;
 
+use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Focus, InputKind, Overlay, PreviewBody, Regions, ToastLevel};
@@ -976,8 +976,8 @@ fn capitalize(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     use super::*;
     use crate::app::ops::Operation;
@@ -1015,12 +1015,22 @@ mod tests {
                 entry("/我的资源/音乐", true, 0),
             ],
         );
-        load(&mut app, root, vec![
-            entry(&format!("{root}/1080P版"), true, 0),
-            entry(&format!("{root}/Lanterns.S01E01.2026.2160p.AMZN.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265.mkv"), false, 8_390_226_165),
-            entry(&format!("{root}/Lanterns.S01E02.mkv"), false, 5_927_419_042),
-            entry(&format!("{root}/zh.ass"), false, 51_234),
-        ]);
+        load(
+            &mut app,
+            root,
+            vec![
+                entry(&format!("{root}/1080P版"), true, 0),
+                entry(
+                    &format!(
+                        "{root}/Lanterns.S01E01.2026.2160p.AMZN.WEB-DL.DDP5.1.Atmos.DV.HDR.H.265.mkv"
+                    ),
+                    false,
+                    8_390_226_165,
+                ),
+                entry(&format!("{root}/Lanterns.S01E02.mkv"), false, 5_927_419_042),
+                entry(&format!("{root}/zh.ass"), false, 51_234),
+            ],
+        );
         app.enter_dir(root);
         app
     }

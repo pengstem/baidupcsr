@@ -1,7 +1,7 @@
 //! Per-file icons, matching yazi: exact directory and file names first, then
 //! the extension.
 
-use super::icon_table::{DIR, DIRS, DIR_OPEN, EXTS, FILE, FILES};
+use super::icon_table::{DIR, DIR_OPEN, DIRS, EXTS, FILE, FILES};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Icon {

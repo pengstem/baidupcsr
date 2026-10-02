@@ -340,8 +340,10 @@ mod tests {
         store.write("/a", vec![entry("x", false, 1, 1)]).unwrap();
         let (entries, _) = store.read("/a").unwrap();
         assert_eq!(names(&entries), ["x"]);
-        assert!(DirectoryStore::new(dir.path().to_path_buf(), 8)
-            .read("/a")
-            .is_none());
+        assert!(
+            DirectoryStore::new(dir.path().to_path_buf(), 8)
+                .read("/a")
+                .is_none()
+        );
     }
 }

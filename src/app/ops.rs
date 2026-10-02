@@ -233,7 +233,7 @@ pub fn parse_command(input: &str, ctx: &CommandContext<'_>) -> Result<Command, S
         }
         ("mkdir", _) => return Err("usage: mkdir <path>".to_string()),
         ("rename" | "ren", _) => {
-            return Err("usage: rename <new-name> | rename <from> <to>".to_string())
+            return Err("usage: rename <new-name> | rename <from> <to>".to_string());
         }
         ("cp" | "copy" | "mv" | "move", _) => return Err(format!("usage: {name} [paths…] <dir>")),
         _ => return Err(format!("unknown command: {name}")),
