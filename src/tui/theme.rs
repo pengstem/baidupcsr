@@ -2,8 +2,9 @@
 //! terminal's own palette, light or dark; `NO_COLOR` drops color entirely.
 
 use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::Span;
 
-use crate::app::preview::FileKind;
+use super::icons;
 use crate::config::IconSet;
 
 #[derive(Clone, Copy, Debug)]
@@ -111,38 +112,50 @@ impl Theme {
         self.fg(Color::Yellow).add_modifier(Modifier::BOLD)
     }
 
-    pub const fn kind(self, kind: FileKind) -> Style {
-        match kind {
-            FileKind::Directory => self.fg(Color::Blue).add_modifier(Modifier::BOLD),
-            FileKind::Video => self.fg(Color::Magenta),
-            FileKind::Audio => self.fg(Color::Cyan),
-            FileKind::Image => self.fg(Color::Yellow),
-            FileKind::Archive => self.fg(Color::Red),
-            FileKind::Document | FileKind::Pdf | FileKind::Ebook => self.fg(Color::Green),
-            FileKind::Code | FileKind::Subtitle => self.fg(Color::LightBlue),
-            FileKind::Text | FileKind::Font | FileKind::Other => Style::new(),
+    /// Directory names; other names use the default text color, like yazi.
+    pub const fn directory(self) -> Style {
+        self.fg(Color::Blue)
+    }
+
+    /// Rounded end caps for a filled bar in `style`'s background color, like
+    /// yazi's cursor and status pills. `None` without Nerd Font or color.
+    pub fn caps(self, style: Style) -> Option<(Span<'static>, Span<'static>)> {
+        let bg = style
+            .bg
+            .filter(|_| self.color && self.icons == IconSet::Nerd)?;
+        let cap = |glyph| Span::styled(glyph, Style::new().fg(bg));
+        Some((cap("\u{e0b6}"), cap("\u{e0b4}")))
+    }
+
+    /// `text` as a filled pill: rounded when possible, padded otherwise.
+    pub fn pill(self, text: &str, style: Style) -> Vec<Span<'static>> {
+        match self.caps(style) {
+            Some((left, right)) => vec![left, Span::styled(text.to_string(), style), right],
+            None => vec![Span::styled(format!(" {text} "), style)],
         }
     }
 
-    /// Icon plus trailing space, or nothing in ASCII mode.
-    pub const fn icon(self, kind: FileKind) -> &'static str {
+    /// Icon glyph (with trailing space) and its color for a file name; empty
+    /// in ASCII mode.
+    pub fn file_icon(self, name: &str, is_dir: bool) -> (String, Style) {
         if matches!(self.icons, IconSet::Ascii) {
-            return "";
+            return (String::new(), Style::new());
         }
-        match kind {
-            FileKind::Directory => "\u{f07b} ",
-            FileKind::Video => "\u{f1c8} ",
-            FileKind::Audio => "\u{f1c7} ",
-            FileKind::Image => "\u{f1c5} ",
-            FileKind::Text => "\u{f15c} ",
-            FileKind::Code => "\u{f1c9} ",
-            FileKind::Subtitle => "\u{f20a} ",
-            FileKind::Archive => "\u{f1c6} ",
-            FileKind::Document => "\u{f1c2} ",
-            FileKind::Pdf => "\u{f1c1} ",
-            FileKind::Ebook => "\u{f02d} ",
-            FileKind::Font => "\u{f031} ",
-            FileKind::Other => "\u{f016} ",
+        let icon = icons::icon_for(name, is_dir);
+        let style = if self.color && !icon.is_fallback() {
+            let [_, r, g, b] = icon.color.to_be_bytes();
+            Style::new().fg(Color::Rgb(r, g, b))
+        } else {
+            Style::new()
+        };
+        (format!("{} ", icon.glyph), style)
+    }
+
+    /// Cells taken by an icon column.
+    pub const fn icon_width(self) -> usize {
+        match self.icons {
+            IconSet::Nerd => 2,
+            IconSet::Ascii => 0,
         }
     }
 

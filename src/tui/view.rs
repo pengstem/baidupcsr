@@ -206,7 +206,7 @@ fn header(app: &App, area: Rect) -> (Line<'static>, Vec<(Rect, String)>) {
 }
 
 fn name_width(app: &App, column_width: usize, with_size: bool) -> usize {
-    let icon = app.theme.icon(FileKind::Other).width();
+    let icon = app.theme.icon_width();
     let size = if with_size { SIZE_WIDTH + 2 } else { 1 };
     column_width.saturating_sub(1 + icon + size)
 }
@@ -221,9 +221,9 @@ struct RowStyle {
 /// One file row: gutter, icon, name, right-aligned size.
 fn entry_row(app: &App, entry: &FileEntry, width: usize, row: RowStyle) -> Line<'static> {
     let theme = app.theme;
-    let kind = FileKind::of(entry);
+    let (icon, icon_style) = theme.file_icon(&entry.server_filename, entry.is_dir);
     let mut name = entry.server_filename.clone();
-    if entry.is_dir && theme.icon(kind).is_empty() {
+    if entry.is_dir && icon.is_empty() {
         name.push('/');
     }
     let size = if !row.size {
@@ -244,34 +244,43 @@ fn entry_row(app: &App, entry: &FileEntry, width: usize, row: RowStyle) -> Line<
     };
     let name_style = if row.marked {
         theme.marked()
+    } else if entry.is_dir {
+        theme.directory()
     } else {
-        theme.kind(kind)
+        theme.text()
     };
     let gutter = if row.marked {
         Span::styled("▍", theme.marked())
     } else {
         Span::raw(" ")
     };
-    let mut line = Line::from(vec![
+    let size = if row.size {
+        format!(" {size:>SIZE_WIDTH$}")
+    } else {
+        String::new()
+    };
+    let mut spans = vec![
         gutter,
-        Span::styled(theme.icon(kind), theme.kind(kind)),
+        Span::styled(icon, icon_style),
         Span::styled(name, name_style),
-        Span::styled(
-            if row.size {
-                format!(" {size:>SIZE_WIDTH$} ")
-            } else {
-                " ".to_string()
-            },
-            theme.dim(),
-        ),
-    ]);
-    if let Some(background) = row.background {
-        line = line.patch_style(background);
-        line.spans
-            .iter_mut()
-            .for_each(|span| span.style = span.style.patch(background));
+        Span::styled(size, theme.dim()),
+    ];
+    let Some(background) = row.background else {
+        spans.push(Span::raw(" "));
+        return Line::from(spans);
+    };
+    for span in &mut spans {
+        span.style = span.style.patch(background);
     }
-    line
+    // Rounded caps replace the gutter and the trailing space.
+    match theme.caps(background) {
+        Some((left, right)) => {
+            spans[0] = left;
+            spans.push(right);
+        }
+        None => spans.push(Span::styled(" ", background)),
+    }
+    Line::from(spans)
 }
 
 fn marquee_offset(app: &App, name: &str, width: usize) -> Option<usize> {
@@ -443,17 +452,18 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let kind = FileKind::of(entry);
+    let (icon, icon_style) = theme.file_icon(&entry.server_filename, false);
     let label_style = theme.dim();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled(theme.icon(kind), theme.kind(kind)),
+            Span::styled(icon, icon_style),
             Span::styled(
                 format::truncate(
                     &entry.server_filename,
                     usize::from(area.width).saturating_sub(2),
                 )
                 .into_owned(),
-                theme.kind(kind).bold(),
+                theme.text().bold(),
             ),
         ]),
         Line::raw(""),
@@ -638,19 +648,17 @@ fn draw_dock(frame: &mut Frame<'_>, app: &App, area: Rect) {
 fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let theme = app.theme;
     if let Some(input) = &app.input {
-        let badge = format!(" {} ", input.kind.label());
         let prompt = match input.kind {
             InputKind::Filter => " /",
             InputKind::Command => " :",
             _ => " ›",
         };
-        let prefix_width = badge.width() + prompt.width() + 1;
-        let line = Line::from(vec![
-            Span::styled(badge, theme.badge(Color::Blue)),
-            Span::styled(prompt, theme.accent()),
-            Span::raw(" "),
-            Span::raw(input.edit.text().to_string()),
-        ]);
+        let mut spans = theme.pill(input.kind.label(), theme.badge(Color::Blue));
+        spans.push(Span::styled(prompt, theme.accent()));
+        spans.push(Span::raw(" "));
+        let prefix_width: usize = spans.iter().map(Span::width).sum();
+        spans.push(Span::raw(input.edit.text().to_string()));
+        let line = Line::from(spans);
         frame.render_widget(line, area);
         let x = area.x + (prefix_width + input.edit.cursor_column()) as u16;
         frame.set_cursor_position(Position::new(x.min(area.right().saturating_sub(1)), area.y));
@@ -666,10 +674,8 @@ fn draw_status(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         ("NORMAL", Color::Cyan)
     };
-    let mut left = vec![
-        Span::styled(format!(" {mode} "), theme.badge(color)),
-        Span::raw(" "),
-    ];
+    let mut left = theme.pill(mode, theme.badge(color));
+    left.push(Span::raw(" "));
     let segment = |spans: &mut Vec<Span<'static>>, text: String, style: Style| {
         spans.push(Span::styled(text, style));
         spans.push(Span::styled("  ", theme.dim()));
