@@ -1,7 +1,7 @@
 //! Per-file icons, matching yazi: exact directory and file names first, then
 //! the extension.
 
-use super::icon_table::{DIR, DIRS, EXTS, FILE, FILES};
+use super::icon_table::{DIR, DIRS, DIR_OPEN, EXTS, FILE, FILES};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Icon {
@@ -28,9 +28,11 @@ fn find(table: &[(&str, Icon)], key: &str) -> Option<Icon> {
         .map(|index| table[index].1)
 }
 
-pub fn icon_for(name: &str, is_dir: bool) -> Icon {
+/// `open` marks a directory under the cursor or on the current path; plain
+/// folders then show an open folder, named ones keep their own icon.
+pub fn icon_for(name: &str, is_dir: bool, open: bool) -> Icon {
     if is_dir {
-        return find(DIRS, name).unwrap_or(DIR);
+        return find(DIRS, name).unwrap_or(if open { DIR_OPEN } else { DIR });
     }
     find(FILES, name)
         .or_else(|| {
@@ -54,12 +56,19 @@ mod tests {
     #[test]
     fn lookup_order() {
         assert_eq!(
-            icon_for(".gitignore", false),
+            icon_for(".gitignore", false, false),
             find(FILES, ".gitignore").unwrap()
         );
-        assert_eq!(icon_for("MOVIE.MKV", false), find(EXTS, "mkv").unwrap());
-        assert_eq!(icon_for("Videos", true), find(DIRS, "Videos").unwrap());
-        assert_eq!(icon_for("我的资源", true), DIR);
-        assert!(icon_for("no-extension", false).is_fallback());
+        assert_eq!(
+            icon_for("MOVIE.MKV", false, false),
+            find(EXTS, "mkv").unwrap()
+        );
+        assert_eq!(
+            icon_for("Videos", true, true),
+            find(DIRS, "Videos").unwrap()
+        );
+        assert_eq!(icon_for("我的资源", true, false), DIR);
+        assert_eq!(icon_for("我的资源", true, true), DIR_OPEN);
+        assert!(icon_for("no-extension", false, false).is_fallback());
     }
 }

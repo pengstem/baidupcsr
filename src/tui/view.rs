@@ -213,6 +213,8 @@ fn name_width(app: &App, column_width: usize, with_size: bool) -> usize {
 
 struct RowStyle {
     background: Option<Style>,
+    /// Directory is under the cursor or on the current path.
+    open: bool,
     size: bool,
     marked: bool,
     marquee: Option<usize>,
@@ -221,7 +223,7 @@ struct RowStyle {
 /// One file row: gutter, icon, name, right-aligned size.
 fn entry_row(app: &App, entry: &FileEntry, width: usize, row: RowStyle) -> Line<'static> {
     let theme = app.theme;
-    let (icon, icon_style) = theme.file_icon(&entry.server_filename, entry.is_dir);
+    let (icon, icon_style) = theme.file_icon(&entry.server_filename, entry.is_dir, row.open);
     let mut name = entry.server_filename.clone();
     if entry.is_dir && icon.is_empty() {
         name.push('/');
@@ -334,6 +336,7 @@ fn draw_files(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 width,
                 RowStyle {
                     background,
+                    open: is_cursor,
                     size: true,
                     marked: app.is_marked(position, &entry.path),
                     marquee,
@@ -415,6 +418,7 @@ fn side_listing(frame: &mut Frame<'_>, app: &App, area: Rect, dir: &str, highlig
                 width,
                 RowStyle {
                     background: (Some(index) == highlighted).then(|| theme.cursor_inactive()),
+                    open: Some(index) == highlighted,
                     size: width >= 32,
                     marked: app.marks.contains(&entry.path),
                     marquee: None,
@@ -452,7 +456,7 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 
     let kind = FileKind::of(entry);
-    let (icon, icon_style) = theme.file_icon(&entry.server_filename, false);
+    let (icon, icon_style) = theme.file_icon(&entry.server_filename, false, false);
     let label_style = theme.dim();
     let mut lines = vec![
         Line::from(vec![

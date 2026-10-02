@@ -136,12 +136,12 @@ impl Theme {
     }
 
     /// Icon glyph (with trailing space) and its color for a file name; empty
-    /// in ASCII mode.
-    pub fn file_icon(self, name: &str, is_dir: bool) -> (String, Style) {
+    /// in ASCII mode. `open` shows a directory as an open folder.
+    pub fn file_icon(self, name: &str, is_dir: bool, open: bool) -> (String, Style) {
         if matches!(self.icons, IconSet::Ascii) {
             return (String::new(), Style::new());
         }
-        let icon = icons::icon_for(name, is_dir);
+        let icon = icons::icon_for(name, is_dir, open);
         let style = if self.color && !icon.is_fallback() {
             let [_, r, g, b] = icon.color.to_be_bytes();
             Style::new().fg(Color::Rgb(r, g, b))

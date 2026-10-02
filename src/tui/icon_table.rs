@@ -4,6 +4,7 @@
 use super::icons::Icon;
 
 pub(super) const DIR: Icon = Icon::new("\u{e5ff}", 0x03a9f4);
+pub(super) const DIR_OPEN: Icon = Icon::new("\u{e5fe}", 0x03a9f4);
 pub(super) const FILE: Icon = Icon::new("\u{f15b}", 0xffffff);
 
 pub(super) static DIRS: &[(&str, Icon)] = &[
