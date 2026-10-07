@@ -6,7 +6,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::mpsc::UnboundedSender;
+use image::DynamicImage;
+use ratatui_image::errors::Errors;
+use ratatui_image::picker::Picker;
+use ratatui_image::thread::{ResizeRequest, ResizeResponse, ThreadProtocol};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
@@ -15,17 +19,21 @@ use crate::app::download::{DownloadOutcome, DownloadSpec, download};
 use crate::app::fetch::{Account, RangeFetcher, RemoteFile};
 use crate::app::launch;
 use crate::app::ops::{self, Operation, SearchMode};
-use crate::app::preview::{FileKind, PREVIEW_FETCH_BYTES, TextCache, describe_image};
+use crate::app::preview::{
+    FileKind, PREVIEW_FETCH_BYTES, THUMBNAIL_MAX_BYTES, TextCache, ThumbnailCache, decode_image,
+    describe_image,
+};
 use crate::app::remote_path;
 use crate::app::task::{TaskId, TaskKind, TaskState};
 use crate::config::{self, PcsConfig, UiConfig};
 use crate::pcs::{ByteRange, FileEntry, PcsClient, Quota};
-use crate::tui::app::{App, Cmd, PreviewBody, ToastLevel};
+use crate::tui::app::{App, Cmd, ImageState, PreviewBody, ToastLevel};
 use crate::tui::theme::Theme;
 
 /// Files up to this size can be opened with the desktop's default app.
 const OPEN_LIMIT_BYTES: u64 = 100 * 1024 * 1024;
 const TEXT_CACHE_BYTES: usize = 16 * 1024 * 1024;
+const THUMBNAIL_CACHE_BYTES: usize = 32 * 1024 * 1024;
 
 pub enum Event {
     Listed {
@@ -37,6 +45,13 @@ pub enum Event {
         entry: FileEntry,
         result: Result<Bytes, String>,
     },
+    Thumbnail {
+        entry: FileEntry,
+        /// Freshly downloaded bytes, to cache once they decode.
+        fetched: Option<Bytes>,
+        result: Result<DynamicImage, String>,
+    },
+    ImageEncoded(Result<ResizeResponse, Errors>),
     Quota(Quota),
     Progress {
         id: TaskId,
@@ -80,10 +95,15 @@ pub struct Controller {
     ui: UiConfig,
     download_dir: PathBuf,
     texts: TextCache,
+    thumbnails: ThumbnailCache,
+    /// How images are drawn; known once the terminal has been queried.
+    picker: Option<Picker>,
+    resize_requests: Option<UnboundedReceiver<ResizeRequest>>,
     events: UnboundedSender<Event>,
     root: CancellationToken,
     jobs: JoinSet<()>,
     preview_cancel: CancellationToken,
+    thumbnail_cancel: CancellationToken,
     task_cancels: HashMap<TaskId, CancellationToken>,
     search_task: Option<TaskId>,
     player: Option<tokio::process::Child>,
@@ -130,6 +150,8 @@ impl Controller {
         let account_uid = user.map_or(0, |user| user.uid);
         let download_dir = ui.download_dir(pcs.as_ref().unwrap_or(&PcsConfig::default()));
         let root = CancellationToken::new();
+        let (resize_tx, resize_requests) = mpsc::unbounded_channel();
+        app.preview.image = Some(ThreadProtocol::new(resize_tx, None));
         Self {
             app,
             session,
@@ -138,8 +160,12 @@ impl Controller {
             ui,
             download_dir,
             texts: TextCache::new(TEXT_CACHE_BYTES),
+            thumbnails: ThumbnailCache::new(THUMBNAIL_CACHE_BYTES),
+            picker: None,
+            resize_requests: Some(resize_requests),
             events,
             preview_cancel: root.child_token(),
+            thumbnail_cancel: root.child_token(),
             root,
             jobs: JoinSet::new(),
             task_cancels: HashMap::new(),
@@ -148,7 +174,34 @@ impl Controller {
         }
     }
 
+    pub fn set_picker(&mut self, picker: Picker) {
+        self.picker = Some(picker);
+    }
+
     pub fn start(&mut self) {
+        if let Some(mut requests) = self.resize_requests.take() {
+            // Resizing and encoding a picture can take a frame or more; only
+            // the newest request matters, older ones belong to stale images.
+            self.spawn(|events, cancel| async move {
+                loop {
+                    let mut request = tokio::select! {
+                        () = cancel.cancelled() => break,
+                        request = requests.recv() => match request {
+                            Some(request) => request,
+                            None => break,
+                        },
+                    };
+                    while let Ok(newer) = requests.try_recv() {
+                        request = newer;
+                    }
+                    if let Ok(result) =
+                        tokio::task::spawn_blocking(move || request.resize_encode()).await
+                    {
+                        let _ = events.send(Event::ImageEncoded(result));
+                    }
+                }
+            });
+        }
         let cwd = self.app.cwd.clone();
         let cmd = self.app.enter_dir(&cwd);
         self.run(vec![cmd]);
@@ -286,6 +339,9 @@ impl Controller {
     fn update_preview(&mut self) {
         self.preview_cancel.cancel();
         self.preview_cancel = self.root.child_token();
+        if self.app.selected().map(|entry| &entry.path) != Some(&self.app.preview.path) {
+            self.thumbnail_cancel.cancel();
+        }
         let Some(entry) = self.app.selected().cloned() else {
             self.app.set_preview("", PreviewBody::Empty);
             return;
@@ -340,6 +396,62 @@ impl Controller {
             }
         };
         self.app.set_preview(&entry.path, body);
+        if kind == FileKind::Image && size > 0 {
+            self.update_thumbnail(entry);
+        }
+    }
+
+    /// Fetch and decode a server-side thumbnail of the selected image, unless
+    /// one is already loading or shown.
+    fn update_thumbnail(&mut self, entry: FileEntry) {
+        if self.app.preview.image_state != ImageState::None {
+            return;
+        }
+        let (Some(session), Some(picker)) = (&self.session, &self.picker) else {
+            return;
+        };
+        let client = session.client.clone();
+        let font = picker.font_size();
+        let area = self.app.regions.preview;
+        let pixels = (u32::from(area.width) * u32::from(font.width))
+            .max(u32::from(area.height) * u32::from(font.height));
+        let side = pixels.next_multiple_of(400).clamp(400, 1600);
+        let cached = self.thumbnails.get(&entry);
+        self.thumbnail_cancel.cancel();
+        self.thumbnail_cancel = self.root.child_token();
+        let cancel = self.thumbnail_cancel.clone();
+        let events = self.events.clone();
+        self.jobs.spawn(async move {
+            let (fetched, bytes) = match cached {
+                Some(bytes) => (None, bytes),
+                None => match client
+                    .thumbnail(&entry.path, side, THUMBNAIL_MAX_BYTES, &cancel)
+                    .await
+                {
+                    Ok(bytes) => (Some(bytes.clone()), bytes),
+                    Err(error) if error.is_cancelled() => return,
+                    Err(error) => {
+                        let _ = events.send(Event::Thumbnail {
+                            entry,
+                            fetched: None,
+                            result: Err(error.to_string()),
+                        });
+                        return;
+                    }
+                },
+            };
+            let result = tokio::task::spawn_blocking(move || decode_image(&bytes))
+                .await
+                .unwrap_or_else(|error| Err(error.to_string()));
+            if !cancel.is_cancelled() {
+                let _ = events.send(Event::Thumbnail {
+                    entry,
+                    fetched,
+                    result,
+                });
+            }
+        });
+        self.app.set_preview_image(ImageState::Loading, None);
     }
 
     fn open(&mut self, entry: FileEntry) {
@@ -544,7 +656,8 @@ impl Controller {
                 let body = match result {
                     Err(error) => PreviewBody::Error(error),
                     Ok(bytes) if FileKind::of(&entry).is_text() => {
-                        PreviewBody::Text(self.texts.insert(&entry, &bytes))
+                        let text = String::from_utf8_lossy(&bytes).into();
+                        PreviewBody::Text(self.texts.insert(&entry, text))
                     }
                     Ok(bytes) => describe_image(&bytes).map_or_else(
                         || PreviewBody::Note("unrecognized image format".to_string()),
@@ -553,6 +666,36 @@ impl Controller {
                 };
                 self.app.set_preview(&entry.path, body);
             }
+            Event::Thumbnail {
+                entry,
+                fetched,
+                result,
+            } => {
+                if let (Some(bytes), true) = (fetched, result.is_ok()) {
+                    self.thumbnails.insert(&entry, bytes);
+                }
+                if self.app.selected().map(|selected| &selected.path) != Some(&entry.path) {
+                    return;
+                }
+                match (result, &self.picker) {
+                    (Ok(image), Some(picker)) => self.app.set_preview_image(
+                        ImageState::Ready,
+                        Some(picker.new_resize_protocol(image)),
+                    ),
+                    (Ok(_), None) => {}
+                    (Err(error), _) => self.app.set_preview_image(ImageState::Failed(error), None),
+                }
+            }
+            Event::ImageEncoded(result) => match result {
+                Ok(response) => {
+                    if let Some(image) = &mut self.app.preview.image {
+                        image.update_resized_protocol(response);
+                    }
+                }
+                Err(error) => self
+                    .app
+                    .set_preview_image(ImageState::Failed(error.to_string()), None),
+            },
             Event::Quota(quota) => self.app.quota = Some(quota),
             Event::Progress { id, done } => self.app.tasks.progress(id, done),
             Event::SearchBatch { id, entries } => {

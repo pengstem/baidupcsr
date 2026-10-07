@@ -6,6 +6,7 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use futures_util::StreamExt;
+use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 
 use super::view;
@@ -21,6 +22,8 @@ pub async fn run() -> io::Result<()> {
     controller.start();
 
     let mut terminal = ratatui::try_init()?;
+    // Must run before anything else reads terminal input.
+    controller.set_picker(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
     execute!(io::stdout(), EnableMouseCapture)?;
     let result = event_loop(&mut terminal, &mut controller, &mut events).await;
     let _ = execute!(io::stdout(), DisableMouseCapture);

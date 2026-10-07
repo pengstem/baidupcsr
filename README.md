@@ -6,7 +6,7 @@ A terminal file manager for Baidu Netdisk (百度网盘). It reuses the login fr
 - Miller-column browser: parent │ current │ preview
 - Streams videos straight into mpv, with seeking and no local proxy
 - Parallel, resumable downloads (`.part` files)
-- Text and image previews, recursive search, copy/move/rename/delete
+- Text previews and image thumbnails (kitty, sixel, iTerm2 or half-blocks), recursive search, copy/move/rename/delete
 
 ## Usage
 

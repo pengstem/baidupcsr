@@ -10,9 +10,10 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
+use ratatui_image::{FilterType, Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Focus, InputKind, Overlay, PreviewBody, Regions, ToastLevel};
+use super::app::{App, Focus, ImageState, InputKind, Overlay, PreviewBody, Regions, ToastLevel};
 use super::format;
 use super::keymap::HELP;
 use super::theme::{Glyph, Theme};
@@ -90,9 +91,26 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         crumbs,
     };
     app.column.set_height(usize::from(areas.files.height));
-    let app = &*app;
-    let theme = app.theme;
+    let image_area = draw_panes(frame, app, &areas, header);
+    if let (Some(area), Some(image)) = (image_area, &mut app.preview.image) {
+        frame.render_stateful_widget(
+            StatefulImage::new().resize(Resize::Fit(Some(FilterType::Triangle))),
+            area,
+            image,
+        );
+    }
+    draw_toasts(frame, app, areas.files.union(areas.preview));
+    draw_overlay(frame, app);
+}
 
+/// Draw everything below popups; returns where the preview picture goes.
+fn draw_panes(
+    frame: &mut Frame<'_>,
+    app: &App,
+    areas: &Areas,
+    header: Line<'static>,
+) -> Option<Rect> {
+    let theme = app.theme;
     frame.render_widget(header, areas.header);
     for separator in &areas.separators {
         let line = Paragraph::new(vec![Line::from("│"); usize::from(separator.height)])
@@ -103,13 +121,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         draw_parent(frame, app, areas.parent);
     }
     draw_files(frame, app, areas.files);
-    if !areas.preview.is_empty() {
-        draw_preview(frame, app, areas.preview);
-    }
+    let image_area = if areas.preview.is_empty() {
+        None
+    } else {
+        draw_preview(frame, app, areas.preview)
+    };
     draw_dock(frame, app, areas.dock);
     draw_status(frame, app, areas.status);
-    draw_toasts(frame, app, areas.files.union(areas.preview));
-    draw_overlay(frame, app);
+    image_area
 }
 
 /// Whether the long-name marquee needs frames.
@@ -440,11 +459,10 @@ fn draw_parent(frame: &mut Frame<'_>, app: &App, area: Rect) {
     side_listing(frame, app, area, &dir, highlight);
 }
 
-fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Returns where the picture of an image file goes.
+fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) -> Option<Rect> {
     let theme = app.theme;
-    let Some(entry) = app.selected() else {
-        return;
-    };
+    let entry = app.selected()?;
     let area = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(1),
@@ -452,7 +470,7 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     if entry.is_dir {
         side_listing(frame, app, area, &entry.path, None);
-        return;
+        return None;
     }
 
     let kind = FileKind::of(entry);
@@ -505,7 +523,7 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
     let rule_y = area.y + header_height;
     if rule_y >= area.bottom() {
-        return;
+        return None;
     }
     frame.render_widget(
         Paragraph::new("─".repeat(usize::from(area.width))).style(theme.border()),
@@ -521,11 +539,11 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ..area
     };
     if app.preview.path != entry.path {
-        return;
+        return None;
     }
     let width = usize::from(body.width);
     let paragraph = match &app.preview.body {
-        PreviewBody::Empty => return,
+        PreviewBody::Empty => return None,
         PreviewBody::Loading => Paragraph::new(Line::styled(
             format!("{} loading preview…", theme.spinner(app.spinner_frame())),
             theme.dim(),
@@ -560,7 +578,18 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Paragraph::new(Line::styled(error.clone(), theme.error())).wrap(Wrap { trim: true })
         }
     };
-    frame.render_widget(paragraph, body);
+    let text_height = match (&app.preview.image_state, &app.preview.body) {
+        (ImageState::None, _) => body.height,
+        (_, PreviewBody::Error(_)) => body.height.min(3),
+        _ => body.height.min(1),
+    };
+    frame.render_widget(
+        paragraph,
+        Rect {
+            height: text_height,
+            ..body
+        },
+    );
     if app.focus == Focus::Preview && app.preview_line_count() > usize::from(body.height) {
         let mut state = ScrollbarState::new(
             app.preview_line_count()
@@ -578,6 +607,25 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) {
             &mut state,
         );
     }
+    let picture = Rect {
+        y: body.y + text_height + 1,
+        height: body.height.saturating_sub(text_height + 1),
+        ..body
+    };
+    if picture.is_empty() {
+        return None;
+    }
+    let note = match &app.preview.image_state {
+        ImageState::Ready => return Some(picture),
+        ImageState::Loading if app.preview.body != PreviewBody::Loading => Line::styled(
+            format!("{} loading image…", theme.spinner(app.spinner_frame())),
+            theme.dim(),
+        ),
+        ImageState::Failed(error) => Line::styled(format!("no thumbnail: {error}"), theme.dim()),
+        _ => return None,
+    };
+    frame.render_widget(Paragraph::new(note).wrap(Wrap { trim: true }), picture);
+    None
 }
 
 fn progress_bar(theme: Theme, fraction: f64, width: usize) -> Vec<Span<'static>> {

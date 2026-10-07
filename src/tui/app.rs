@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Position, Rect};
+use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::thread::ThreadProtocol;
 
 use super::column::Column;
 use super::keymap::{Action, action_for};
@@ -93,11 +95,24 @@ pub enum PreviewBody {
     Error(String),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ImageState {
+    #[default]
+    None,
+    Loading,
+    Ready,
+    Failed(String),
+}
+
 pub struct Preview {
     /// Path of the entry this preview belongs to.
     pub path: String,
     pub body: PreviewBody,
     pub scroll: usize,
+    pub image_state: ImageState,
+    /// Picture for image files; resized and encoded off-thread. `None` when
+    /// the terminal could not be queried (and in tests).
+    pub image: Option<ThreadProtocol>,
 }
 
 pub struct SearchView {
@@ -178,6 +193,8 @@ impl App {
                 path: String::new(),
                 body: PreviewBody::Empty,
                 scroll: 0,
+                image_state: ImageState::None,
+                image: None,
             },
             focus: Focus::Files,
             overlay: Overlay::None,
@@ -292,6 +309,7 @@ impl App {
                 .get(&self.cwd)
                 .is_none_or(|listing| listing.refreshing)
             || self.preview.body == PreviewBody::Loading
+            || self.preview.image_state == ImageState::Loading
     }
 
     /// Whether the screen changes on its own (spinners, toasts).
@@ -350,8 +368,19 @@ impl App {
         if self.preview.path != path {
             self.preview.scroll = 0;
             self.preview.path = path.to_string();
+            self.set_preview_image(ImageState::None, None);
         }
         self.preview.body = body;
+    }
+
+    pub fn set_preview_image(&mut self, state: ImageState, picture: Option<StatefulProtocol>) {
+        self.preview.image_state = state;
+        if let Some(image) = &mut self.preview.image {
+            match picture {
+                Some(picture) => image.replace_protocol(picture),
+                None => image.empty_protocol(),
+            }
+        }
     }
 
     pub fn begin_search(&mut self, keyword: &str) {

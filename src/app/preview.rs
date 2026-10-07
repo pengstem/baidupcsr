@@ -1,12 +1,18 @@
+use std::io::Cursor;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use bytes::Bytes;
+use image::{DynamicImage, ImageReader, Limits};
 use lru::LruCache;
 
 use crate::pcs::FileEntry;
 
 /// Bytes fetched from the start of a file for text and image previews.
 pub const PREVIEW_FETCH_BYTES: u64 = 64 * 1024;
+/// Largest thumbnail accepted; Baidu returns GIFs unscaled.
+pub const THUMBNAIL_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const IMAGE_MAX_ALLOC: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FileKind {
@@ -104,14 +110,42 @@ pub fn describe_image(head: &[u8]) -> Option<String> {
     Some(format!("{kind:?} · {}×{}", size.width, size.height).to_uppercase())
 }
 
-/// Decoded text previews, bounded by total size.
-pub struct TextCache {
-    cache: LruCache<(i64, i64), Arc<str>>,
+/// Decode a thumbnail, refusing anything that would take unreasonable memory.
+pub fn decode_image(bytes: &[u8]) -> Result<DynamicImage, String> {
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(IMAGE_MAX_ALLOC);
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|error| error.to_string())?;
+    reader.limits(limits);
+    reader.decode().map_err(|error| error.to_string())
+}
+
+/// Previews keyed by file identity, bounded by their total size.
+pub struct PreviewCache<V> {
+    cache: LruCache<(i64, i64), V>,
     used: usize,
     limit: usize,
 }
 
-impl TextCache {
+/// Bytes a cached preview holds.
+pub trait Weight {
+    fn weight(&self) -> usize;
+}
+
+impl Weight for Arc<str> {
+    fn weight(&self) -> usize {
+        self.len()
+    }
+}
+
+impl Weight for Bytes {
+    fn weight(&self) -> usize {
+        self.len()
+    }
+}
+
+impl<V: Clone + Weight> PreviewCache<V> {
     pub fn new(limit: usize) -> Self {
         Self {
             cache: LruCache::new(NonZeroUsize::MIN.saturating_add(255)),
@@ -120,28 +154,29 @@ impl TextCache {
         }
     }
 
-    pub fn get(&mut self, entry: &FileEntry) -> Option<Arc<str>> {
+    pub fn get(&mut self, entry: &FileEntry) -> Option<V> {
         self.cache.get(&(entry.fs_id, entry.mtime)).cloned()
     }
 
-    pub fn insert(&mut self, entry: &FileEntry, bytes: &[u8]) -> Arc<str> {
-        let text: Arc<str> = String::from_utf8_lossy(bytes).into();
-        self.used += text.len();
-        if let Some((_, old)) = self
-            .cache
-            .push((entry.fs_id, entry.mtime), Arc::clone(&text))
-        {
-            self.used -= old.len();
+    pub fn insert(&mut self, entry: &FileEntry, value: V) -> V {
+        self.used += value.weight();
+        if let Some((_, old)) = self.cache.push((entry.fs_id, entry.mtime), value.clone()) {
+            self.used -= old.weight();
         }
         while self.used > self.limit {
             let Some((_, old)) = self.cache.pop_lru() else {
                 break;
             };
-            self.used -= old.len();
+            self.used -= old.weight();
         }
-        text
+        value
     }
 }
+
+/// Decoded text previews.
+pub type TextCache = PreviewCache<Arc<str>>;
+/// Thumbnails as Baidu sent them (decoding is cheap next to the fetch).
+pub type ThumbnailCache = PreviewCache<Bytes>;
 
 #[cfg(test)]
 mod tests {
@@ -163,8 +198,8 @@ mod tests {
             fs_id,
             ..FileEntry::default()
         };
-        cache.insert(&entry(1), b"123456");
-        cache.insert(&entry(2), b"abcdef");
+        cache.insert(&entry(1), "123456".into());
+        cache.insert(&entry(2), "abcdef".into());
         assert!(cache.get(&entry(1)).is_none());
         assert_eq!(cache.get(&entry(2)).as_deref(), Some("abcdef"));
     }

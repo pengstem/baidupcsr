@@ -2,7 +2,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use headers::HeaderMapExt as _;
-use reqwest::header::{COOKIE, RANGE, USER_AGENT};
+use reqwest::header::{CONTENT_TYPE, COOKIE, RANGE, USER_AGENT};
 use reqwest::{RequestBuilder, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use tokio_util::sync::CancellationToken;
@@ -192,6 +192,62 @@ impl PcsClient {
         Ok(body)
     }
 
+    /// A JPEG of `path` scaled by the server to fit `side`×`side` (Baidu
+    /// caps it at 1600). GIFs come back whole, hence `max_bytes`.
+    pub async fn thumbnail(
+        &self,
+        path: &str,
+        side: u32,
+        max_bytes: u64,
+        cancel: &CancellationToken,
+    ) -> Result<Bytes, PcsError> {
+        const OP: &str = "thumbnail";
+        let app_id = self.settings.app_id.to_string();
+        let side = side.to_string();
+        let url = self.endpoint_url(
+            "thumbnail",
+            &[
+                ("app_id", &app_id),
+                ("method", "generate"),
+                ("path", path),
+                ("quality", "90"),
+                ("width", &side),
+                ("height", &side),
+            ],
+        );
+        let mut response = send(OP, self.get(&url), cancel).await?;
+        let is_image = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("image/"));
+        if !is_image {
+            let status = response.status();
+            let body = cancellable(OP, cancel, response.bytes()).await?;
+            if let Ok(fields) = serde_json::from_slice::<ErrorFields>(&body)
+                && let Some(error) = fields.into_error(OP)
+            {
+                return Err(error);
+            }
+            return Err(PcsError::Network {
+                operation: OP,
+                message: format!("HTTP {status}, not an image"),
+            });
+        }
+        let too_large = || PcsError::parse(OP, "image too large to preview");
+        if response.content_length().is_some_and(|len| len > max_bytes) {
+            return Err(too_large());
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = cancellable(OP, cancel, response.chunk()).await? {
+            body.extend_from_slice(&chunk);
+            if body.len() as u64 > max_bytes {
+                return Err(too_large());
+            }
+        }
+        Ok(body.into())
+    }
+
     pub async fn mkdir(&self, path: &str, cancel: &CancellationToken) -> Result<(), PcsError> {
         let url = self.pcs_url(&[("method", "mkdir"), ("path", path)]);
         let _: Ignored = self.json("mkdir", self.post(&url), cancel).await?;
@@ -265,11 +321,15 @@ impl PcsClient {
     }
 
     fn url(&self, pairs: &[(&str, &str)]) -> String {
+        self.endpoint_url("file", pairs)
+    }
+
+    fn endpoint_url(&self, endpoint: &str, pairs: &[(&str, &str)]) -> String {
         let query = form_urlencoded::Serializer::new(String::new())
             .extend_pairs(pairs)
             .finish();
         format!(
-            "{}://{}/rest/2.0/pcs/file?{query}",
+            "{}://{}/rest/2.0/pcs/{endpoint}?{query}",
             scheme(self.settings.https),
             self.settings.pcs_addr
         )
