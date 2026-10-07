@@ -44,6 +44,13 @@ impl PcsError {
             message: message.to_string(),
         }
     }
+
+    pub(crate) fn http(operation: &'static str, status: impl std::fmt::Display) -> Self {
+        Self::Network {
+            operation,
+            message: format!("HTTP {status}"),
+        }
+    }
 }
 
 fn error_chain(error: &dyn std::error::Error) -> String {
@@ -126,7 +133,8 @@ impl ByteRange {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(default)]
 pub struct Quota {
     pub total: u64,
     pub used: u64,
@@ -165,6 +173,14 @@ pub(crate) struct ErrorFields {
 }
 
 impl ErrorFields {
+    /// The remote error a response `body` reports, if it is JSON with a
+    /// non-zero errno.
+    pub(crate) fn from_body(operation: &'static str, body: &[u8]) -> Option<PcsError> {
+        serde_json::from_slice::<Self>(body)
+            .ok()?
+            .into_error(operation)
+    }
+
     pub(crate) fn into_error(self, operation: &'static str) -> Option<PcsError> {
         let code = self.error_code.or(self.errno).unwrap_or(0);
         (code != 0).then(|| PcsError::Remote {
@@ -207,14 +223,6 @@ pub(crate) struct DownloadUrl {
     pub(crate) url: String,
     #[serde(default)]
     pub(crate) encrypt: i64,
-}
-
-#[derive(Deserialize)]
-pub(crate) struct QuotaResponse {
-    #[serde(default)]
-    pub(crate) total: u64,
-    #[serde(default)]
-    pub(crate) used: u64,
 }
 
 #[derive(Deserialize)]

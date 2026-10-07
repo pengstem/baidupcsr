@@ -2,6 +2,7 @@
 //! into it as [`Event`]s from background jobs.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -26,7 +27,7 @@ use crate::app::preview::{
 use crate::app::remote_path;
 use crate::app::task::{TaskId, TaskKind, TaskState};
 use crate::config::{self, PcsConfig, UiConfig};
-use crate::pcs::{ByteRange, FileEntry, PcsClient, Quota};
+use crate::pcs::{ByteRange, FileEntry, PcsClient, PcsError, Quota};
 use crate::tui::app::{App, Cmd, ImageState, PreviewBody, ToastLevel};
 use crate::tui::theme::Theme;
 
@@ -82,6 +83,26 @@ pub enum Outcome {
     Cancelled,
 }
 
+impl Outcome {
+    fn done(message: String) -> Self {
+        Self::Done {
+            message,
+            refresh: Vec::new(),
+            open: None,
+        }
+    }
+}
+
+impl From<PcsError> for Outcome {
+    fn from(error: PcsError) -> Self {
+        if error.is_cancelled() {
+            Self::Cancelled
+        } else {
+            Self::Failed(error.to_string())
+        }
+    }
+}
+
 struct Session {
     client: PcsClient,
     account: Option<Account>,
@@ -91,7 +112,7 @@ pub struct Controller {
     pub app: App,
     session: Option<Session>,
     pcs_config_path: PathBuf,
-    store: Option<DirectoryStore>,
+    store: DirectoryStore,
     ui: UiConfig,
     download_dir: PathBuf,
     texts: TextCache,
@@ -156,7 +177,7 @@ impl Controller {
             app,
             session,
             pcs_config_path,
-            store: Some(DirectoryStore::new(config::cache_dir(), account_uid)),
+            store: DirectoryStore::new(config::cache_dir(), account_uid),
             ui,
             download_dir,
             texts: TextCache::new(TEXT_CACHE_BYTES),
@@ -233,29 +254,62 @@ impl Controller {
     fn spawn<F, Fut>(&mut self, job: F)
     where
         F: FnOnce(UnboundedSender<Event>, CancellationToken) -> Fut,
-        Fut: std::future::Future<Output = ()> + Send + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
     {
-        self.jobs
-            .spawn(job(self.events.clone(), self.root.child_token()));
+        self.spawn_with(self.root.child_token(), job);
+    }
+
+    fn spawn_with<F, Fut>(&mut self, cancel: CancellationToken, job: F)
+    where
+        F: FnOnce(UnboundedSender<Event>, CancellationToken) -> Fut,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.jobs.spawn(job(self.events.clone(), cancel));
         while self.jobs.try_join_next().is_some() {}
     }
 
-    fn client_and_account(&mut self) -> Option<(PcsClient, Account)> {
-        match &self.session {
-            Some(Session {
-                client,
-                account: Some(account),
-            }) => Some((client.clone(), account.clone())),
-            Some(_) => {
-                self.app
-                    .toast(ToastLevel::Error, "account has no uid/BDUSS for downloads");
-                None
+    /// Run `job` as a cancellable entry in the task list and report its
+    /// outcome when it ends.
+    fn spawn_task<F, Fut>(
+        &mut self,
+        kind: TaskKind,
+        label: String,
+        total: Option<u64>,
+        job: F,
+    ) -> TaskId
+    where
+        F: FnOnce(TaskId, UnboundedSender<Event>, CancellationToken) -> Fut,
+        Fut: Future<Output = Outcome> + Send + 'static,
+    {
+        let id = self.app.tasks.start(kind, label, total);
+        let cancel = self.root.child_token();
+        self.task_cancels.insert(id, cancel.clone());
+        self.spawn_with(cancel, |events, cancel| {
+            let job = job(id, events.clone(), cancel);
+            async move {
+                let outcome = job.await;
+                let _ = events.send(Event::Finished { id, outcome });
             }
-            None => {
-                self.app.toast(ToastLevel::Error, "not logged in");
-                None
-            }
+        });
+        id
+    }
+
+    fn client(&mut self) -> Option<PcsClient> {
+        let client = self.session.as_ref().map(|session| session.client.clone());
+        if client.is_none() {
+            self.app.toast(ToastLevel::Error, "not logged in");
         }
+        client
+    }
+
+    fn client_and_account(&mut self) -> Option<(PcsClient, Account)> {
+        let client = self.client()?;
+        let Some(account) = self.session.as_ref().and_then(|s| s.account.clone()) else {
+            self.app
+                .toast(ToastLevel::Error, "account has no uid/BDUSS for downloads");
+            return None;
+        };
+        Some((client, account))
     }
 
     pub fn run(&mut self, cmds: Vec<Cmd>) {
@@ -284,7 +338,7 @@ impl Controller {
                         let target = self
                             .download_dir
                             .join(remote_path::local_file_name(&entry.server_filename));
-                        self.start_download(entry, target, None);
+                        self.start_download(TaskKind::Download, entry, target);
                     }
                 }
                 Cmd::Run(operation) => self.start_operation(operation),
@@ -296,7 +350,6 @@ impl Controller {
                         cancel.cancel();
                     }
                 }
-                Cmd::Quit => {}
             }
         }
     }
@@ -308,8 +361,7 @@ impl Controller {
             .cache
             .get(path)
             .is_some_and(|listing| listing.is_loaded())
-            && let Some((entries, saved_at)) =
-                self.store.as_ref().and_then(|store| store.read(path))
+            && let Some((entries, saved_at)) = self.store.read(path)
         {
             self.app.cache.insert_stale(path, entries, saved_at);
             self.app.listing_updated(path);
@@ -339,7 +391,7 @@ impl Controller {
     fn update_preview(&mut self) {
         self.preview_cancel.cancel();
         self.preview_cancel = self.root.child_token();
-        if self.app.selected().map(|entry| &entry.path) != Some(&self.app.preview.path) {
+        if !self.app.is_selected(&self.app.preview.path) {
             self.thumbnail_cancel.cancel();
         }
         let Some(entry) = self.app.selected().cloned() else {
@@ -372,22 +424,19 @@ impl Controller {
                 .map(|session| (session.client.clone(), session.account.clone()))
             {
                 Some((client, Some(account))) => {
-                    let cancel = self.preview_cancel.clone();
-                    let job_entry = entry.clone();
-                    self.jobs.spawn({
-                        let events = self.events.clone();
-                        async move {
-                            let file = RemoteFile::new(client, account, job_entry.path.clone());
-                            let result = match ByteRange::chunk(0, PREVIEW_FETCH_BYTES, size) {
-                                Ok(range) => file.fetch(range, &cancel).await,
-                                Err(error) => Err(error),
-                            };
-                            if !result.as_ref().is_err_and(|error| error.is_cancelled()) {
-                                let _ = events.send(Event::PreviewBytes {
-                                    entry: job_entry,
-                                    result: result.map_err(|error| error.to_string()),
-                                });
-                            }
+                    let entry = entry.clone();
+                    self.spawn_with(self.preview_cancel.clone(), |events, cancel| async move {
+                        let file = RemoteFile::new(client, account, entry.path.clone());
+                        let result = async {
+                            file.fetch(ByteRange::chunk(0, PREVIEW_FETCH_BYTES, size)?, &cancel)
+                                .await
+                        }
+                        .await;
+                        if !result.as_ref().is_err_and(PcsError::is_cancelled) {
+                            let _ = events.send(Event::PreviewBytes {
+                                entry,
+                                result: result.map_err(|error| error.to_string()),
+                            });
                         }
                     });
                     PreviewBody::Loading
@@ -419,9 +468,7 @@ impl Controller {
         let cached = self.thumbnails.get(&entry);
         self.thumbnail_cancel.cancel();
         self.thumbnail_cancel = self.root.child_token();
-        let cancel = self.thumbnail_cancel.clone();
-        let events = self.events.clone();
-        self.jobs.spawn(async move {
+        self.spawn_with(self.thumbnail_cancel.clone(), |events, cancel| async move {
             let (fetched, bytes) = match cached {
                 Some(bytes) => (None, bytes),
                 None => match client
@@ -478,7 +525,7 @@ impl Controller {
                 entry.mtime,
                 remote_path::local_file_name(&entry.server_filename)
             ));
-        self.start_download(entry, target.clone(), Some(target));
+        self.start_download(TaskKind::Open, entry, target);
     }
 
     fn play(&mut self, entry: FileEntry) {
@@ -512,115 +559,88 @@ impl Controller {
         });
     }
 
-    /// Download `entry` to `target`; `open` the result when given.
-    fn start_download(&mut self, entry: FileEntry, target: PathBuf, open: Option<PathBuf>) {
+    /// Download `entry` to `target`. A [`TaskKind::Open`] download reuses
+    /// an earlier copy and opens the file once it is complete.
+    fn start_download(&mut self, kind: TaskKind, entry: FileEntry, target: PathBuf) {
         let Some((client, account)) = self.client_and_account() else {
             return;
         };
-        let kind = if open.is_some() {
-            TaskKind::Open
-        } else {
-            TaskKind::Download
-        };
+        let open = kind == TaskKind::Open;
         let size = entry.size_bytes();
-        let id = self
-            .app
-            .tasks
-            .start(kind, entry.server_filename.clone(), Some(size));
-        let cancel = self.root.child_token();
-        self.task_cancels.insert(id, cancel.clone());
         let spec = DownloadSpec {
             target,
             size,
             chunk_size: self.ui.download.chunk_size,
             concurrency: self.ui.download.concurrency,
-            reuse_existing: open.is_some(),
+            reuse_existing: open,
         };
-        let events = self.events.clone();
-        self.jobs.spawn(async move {
+        let label = entry.server_filename.clone();
+        self.spawn_task(kind, label, Some(size), |id, events, cancel| async move {
             let file = RemoteFile::new(client, account, entry.path);
             let progress = |done| {
                 let _ = events.send(Event::Progress { id, done });
             };
-            let outcome = match download(&file, &spec, progress, &cancel).await {
-                Ok(DownloadOutcome::Completed) => Outcome::Done {
-                    message: if open.is_some() {
-                        format!("opened {}", entry.server_filename)
-                    } else {
-                        format!("saved {}", spec.target.display())
-                    },
+            match download(&file, &spec, progress, &cancel).await {
+                Ok(DownloadOutcome::Completed) if open => Outcome::Done {
+                    message: format!("opened {}", entry.server_filename),
                     refresh: Vec::new(),
-                    open,
+                    open: Some(spec.target),
                 },
+                Ok(DownloadOutcome::Completed) => {
+                    Outcome::done(format!("saved {}", spec.target.display()))
+                }
                 Ok(DownloadOutcome::Cancelled { .. }) => Outcome::Cancelled,
                 Err(error) => Outcome::Failed(error.to_string()),
-            };
-            let _ = events.send(Event::Finished { id, outcome });
+            }
         });
     }
 
     fn start_operation(&mut self, operation: Operation) {
-        let Some(session) = &self.session else {
-            self.app.toast(ToastLevel::Error, "not logged in");
+        let Some(client) = self.client() else {
             return;
         };
-        let client = session.client.clone();
         let summary = operation.summary();
-        let id = self
-            .app
-            .tasks
-            .start(TaskKind::Remote, summary.clone(), None);
-        let cancel = self.root.child_token();
-        self.task_cancels.insert(id, cancel.clone());
-        let events = self.events.clone();
-        self.jobs.spawn(async move {
-            let outcome = match operation.execute(&client, &cancel).await {
-                Ok(()) => Outcome::Done {
-                    message: summary,
-                    refresh: operation.affected_dirs(),
-                    open: None,
-                },
-                Err(error) if error.is_cancelled() => Outcome::Cancelled,
-                Err(error) => Outcome::Failed(error.to_string()),
-            };
-            let _ = events.send(Event::Finished { id, outcome });
-        });
+        self.spawn_task(
+            TaskKind::Remote,
+            summary.clone(),
+            None,
+            |_, _, cancel| async move {
+                match operation.execute(&client, &cancel).await {
+                    Ok(()) => Outcome::Done {
+                        message: summary,
+                        refresh: operation.affected_dirs(),
+                        open: None,
+                    },
+                    Err(error) => error.into(),
+                }
+            },
+        );
     }
 
     fn start_search(&mut self, keyword: String, mode: SearchMode) {
         if let Some(previous) = self.search_task.take() {
             self.run(vec![Cmd::Cancel(previous)]);
         }
-        let Some(session) = &self.session else {
-            self.app.toast(ToastLevel::Error, "not logged in");
+        let Some(client) = self.client() else {
             return;
         };
-        let client = session.client.clone();
         let root = self.app.cwd.clone();
-        let id = self
-            .app
-            .tasks
-            .start(TaskKind::Search, format!("search “{keyword}”"), None);
+        let label = format!("search “{keyword}”");
+        let id = self.spawn_task(
+            TaskKind::Search,
+            label,
+            None,
+            |id, events, cancel| async move {
+                let on_batch = |entries| {
+                    let _ = events.send(Event::SearchBatch { id, entries });
+                };
+                match ops::search(&client, &root, &keyword, mode, on_batch, &cancel).await {
+                    Ok(count) => Outcome::done(format!("{count} match(es) for “{keyword}”")),
+                    Err(error) => error.into(),
+                }
+            },
+        );
         self.search_task = Some(id);
-        let cancel = self.root.child_token();
-        self.task_cancels.insert(id, cancel.clone());
-        let events = self.events.clone();
-        self.jobs.spawn(async move {
-            let on_batch = |entries| {
-                let _ = events.send(Event::SearchBatch { id, entries });
-            };
-            let outcome = match ops::search(&client, &root, &keyword, mode, on_batch, &cancel).await
-            {
-                Ok(count) => Outcome::Done {
-                    message: format!("{count} match(es) for “{keyword}”"),
-                    refresh: Vec::new(),
-                    open: None,
-                },
-                Err(error) if error.is_cancelled() => Outcome::Cancelled,
-                Err(error) => Outcome::Failed(error.to_string()),
-            };
-            let _ = events.send(Event::Finished { id, outcome });
-        });
     }
 
     pub fn handle(&mut self, event: Event) {
@@ -632,12 +652,13 @@ impl Controller {
                 result,
             } => {
                 let failed = result.as_ref().err().cloned();
-                let to_store = result.as_ref().ok().cloned();
+                let before = self.app.selected().cloned();
                 if !self.app.cache.finish_refresh(&path, generation, result) {
                     return;
                 }
-                if let (Some(entries), Some(store)) = (to_store, self.store.clone()) {
-                    let path = path.clone();
+                if failed.is_none() {
+                    let (store, path) = (self.store.clone(), path.clone());
+                    let entries = self.app.cache.entries(&path).to_vec();
                     self.jobs.spawn_blocking(move || {
                         let _ = store.write(&path, entries);
                     });
@@ -645,12 +666,17 @@ impl Controller {
                 if let Some(error) = failed.filter(|_| path == self.app.cwd) {
                     self.app.toast(ToastLevel::Error, error);
                 }
-                if self.app.listing_updated(&path) {
+                // A refetch that leaves the selected entry as it was keeps its
+                // preview; a failed one gets another try.
+                if self.app.listing_updated(&path)
+                    && (self.app.selected() != before.as_ref()
+                        || matches!(self.app.preview.body, PreviewBody::Error(_)))
+                {
                     self.update_preview();
                 }
             }
             Event::PreviewBytes { entry, result } => {
-                if self.app.selected().map(|selected| &selected.path) != Some(&entry.path) {
+                if !self.app.is_selected(&entry.path) {
                     return;
                 }
                 let body = match result {
@@ -671,10 +697,12 @@ impl Controller {
                 fetched,
                 result,
             } => {
-                if let (Some(bytes), true) = (fetched, result.is_ok()) {
+                if let Some(bytes) = fetched
+                    && result.is_ok()
+                {
                     self.thumbnails.insert(&entry, bytes);
                 }
-                if self.app.selected().map(|selected| &selected.path) != Some(&entry.path) {
+                if !self.app.is_selected(&entry.path) {
                     return;
                 }
                 match (result, &self.picker) {
@@ -700,9 +728,9 @@ impl Controller {
             Event::Progress { id, done } => self.app.tasks.progress(id, done),
             Event::SearchBatch { id, entries } => {
                 if self.search_task == Some(id) {
-                    let before = self.app.selected().map(|entry| entry.path.clone());
+                    let before = self.app.selected_path().map(str::to_owned);
                     self.app.add_search_results(entries);
-                    if self.app.selected().map(|entry| &entry.path) != before.as_ref() {
+                    if self.app.selected_path() != before.as_deref() {
                         self.update_preview();
                     }
                 }
@@ -736,6 +764,12 @@ impl Controller {
                 search.running = false;
             }
         }
+        let label = self
+            .app
+            .tasks
+            .get(id)
+            .map(|task| task.label.clone())
+            .unwrap_or_default();
         let state = match outcome {
             Outcome::Done {
                 message,
@@ -753,23 +787,11 @@ impl Controller {
                 TaskState::Done
             }
             Outcome::Failed(error) => {
-                let label = self
-                    .app
-                    .tasks
-                    .get(id)
-                    .map(|task| task.label.clone())
-                    .unwrap_or_default();
                 self.app
                     .toast(ToastLevel::Error, format!("{label}: {error}"));
                 TaskState::Failed(error)
             }
             Outcome::Cancelled => {
-                let label = self
-                    .app
-                    .tasks
-                    .get(id)
-                    .map(|task| task.label.clone())
-                    .unwrap_or_default();
                 self.app
                     .toast(ToastLevel::Info, format!("cancelled {label}"));
                 TaskState::Cancelled

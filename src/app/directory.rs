@@ -60,8 +60,8 @@ impl Default for SortMode {
 
 impl SortMode {
     /// Choosing the current key again flips the direction.
-    pub const fn choose(self, key: SortKey) -> Self {
-        if self.key as u8 == key as u8 {
+    pub fn choose(self, key: SortKey) -> Self {
+        if self.key == key {
             Self {
                 key,
                 ascending: !self.ascending,

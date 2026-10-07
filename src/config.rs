@@ -36,6 +36,13 @@ pub enum ConfigError {
 }
 
 impl ConfigError {
+    fn read(path: &Path, source: std::io::Error) -> Self {
+        Self::Read {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
     fn invalid(path: &Path, message: impl ToString) -> Self {
         Self::Invalid {
             path: path.to_path_buf(),
@@ -70,17 +77,12 @@ pub struct BaiduUser {
     pub stoken: String,
     pub baiduid: String,
     pub cookies: String,
-    pub accesstoken: String,
     pub workdir: String,
 }
 
 impl PcsConfig {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        let data = std::fs::read(path).map_err(|source| ConfigError::Read {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        serde_json::from_slice(&data).map_err(|error| ConfigError::invalid(path, error))
+        read_json(path)
     }
 
     pub fn active_user(&self) -> Option<&BaiduUser> {
@@ -169,12 +171,7 @@ impl BaiduUser {
 /// Persist the active user's working directory, like BaiduPCS-Go's `cd`.
 /// Edits the JSON in place so fields we do not model survive.
 pub fn save_workdir(path: &Path, workdir: &str) -> Result<(), ConfigError> {
-    let data = std::fs::read(path).map_err(|source| ConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let mut config: Value =
-        serde_json::from_slice(&data).map_err(|error| ConfigError::invalid(path, error))?;
+    let mut config: Value = read_json(path)?;
     let active_uid = config.get("baidu_active_uid").and_then(Value::as_u64);
     let user = config
         .get_mut("baidu_user_list")
@@ -201,6 +198,11 @@ pub fn save_workdir(path: &Path, workdir: &str) -> Result<(), ConfigError> {
     let mut file = AtomicWriteFile::open(path).map_err(write_error)?;
     file.write_all(serialized.as_bytes()).map_err(write_error)?;
     file.commit().map_err(write_error)
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, ConfigError> {
+    let data = std::fs::read(path).map_err(|source| ConfigError::read(path, source))?;
+    serde_json::from_slice(&data).map_err(|error| ConfigError::invalid(path, error))
 }
 
 /// `ui_config.toml`. Every section and field is optional.
@@ -277,12 +279,7 @@ impl UiConfig {
         let mut config = match std::fs::read_to_string(path) {
             Ok(data) => Self::parse(path, &data)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
-            Err(source) => {
-                return Err(ConfigError::Read {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
+            Err(source) => return Err(ConfigError::read(path, source)),
         };
         if let Some(dir) = env::var_os(ENV_DOWNLOAD_DIR) {
             config.download.dir = Some(PathBuf::from(dir));

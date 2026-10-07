@@ -8,7 +8,8 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
 };
 use ratatui_image::{FilterType, Resize, StatefulImage};
 use unicode_width::UnicodeWidthStr;
@@ -250,13 +251,15 @@ fn entry_row(app: &App, entry: &FileEntry, width: usize, row: RowStyle) -> Line<
     let size = if !row.size {
         String::new()
     } else if entry.is_dir {
-        app.cache
+        let count = app
+            .cache
             .get(&entry.path)
             .filter(|listing| listing.is_loaded())
             .map(|listing| listing.entries.len().to_string())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        format!(" {count:>SIZE_WIDTH$}")
     } else {
-        format::size(entry.size_bytes())
+        format!(" {:>SIZE_WIDTH$}", format::size(entry.size_bytes()))
     };
     let name_width = name_width(app, width, row.size);
     let name = match row.marquee {
@@ -274,11 +277,6 @@ fn entry_row(app: &App, entry: &FileEntry, width: usize, row: RowStyle) -> Line<
         Span::styled("▍", theme.marked())
     } else {
         Span::raw(" ")
-    };
-    let size = if row.size {
-        format!(" {size:>SIZE_WIDTH$}")
-    } else {
-        String::new()
     };
     let mut spans = vec![
         gutter,
@@ -364,21 +362,32 @@ fn draw_files(frame: &mut Frame<'_>, app: &App, area: Rect) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
-    if app.column.len() > usize::from(area.height) {
-        let mut state =
-            ScrollbarState::new(app.column.len().saturating_sub(usize::from(area.height)))
-                .position(app.column.offset());
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(None)
-                .thumb_symbol("▐")
-                .thumb_style(theme.dim()),
-            area,
-            &mut state,
-        );
+    draw_scrollbar(
+        frame,
+        area,
+        app.column.len(),
+        app.column.offset(),
+        theme.dim(),
+    );
+}
+
+/// A thin thumb on the right edge when `len` rows overflow `area`.
+fn draw_scrollbar(frame: &mut Frame<'_>, area: Rect, len: usize, position: usize, style: Style) {
+    let height = usize::from(area.height);
+    if len <= height {
+        return;
     }
+    let mut state = ScrollbarState::new(len - height).position(position);
+    frame.render_stateful_widget(
+        Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_symbol(None)
+            .thumb_symbol("▐")
+            .thumb_style(style),
+        area,
+        &mut state,
+    );
 }
 
 fn empty_message(app: &App) -> (String, Style) {
@@ -422,9 +431,8 @@ fn side_listing(frame: &mut Frame<'_>, app: &App, area: Rect, dir: &str, highlig
         );
         return;
     }
-    let highlighted =
-        highlight.and_then(|path| entries.iter().position(|entry| entry.path == path));
-    let offset = super::app::side_offset(highlighted, entries.len(), usize::from(area.height));
+    let (highlighted, offset) =
+        super::app::side_scroll(entries, highlight, usize::from(area.height));
     let lines: Vec<Line<'_>> = entries
         .iter()
         .enumerate()
@@ -449,14 +457,9 @@ fn side_listing(frame: &mut Frame<'_>, app: &App, area: Rect, dir: &str, highlig
 }
 
 fn draw_parent(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let (dir, highlight) = match &app.search {
-        Some(search) => (search.root.clone(), None),
-        None => match remote_path::parent(&app.cwd) {
-            Some(parent) => (parent, Some(app.cwd.as_str())),
-            None => return,
-        },
-    };
-    side_listing(frame, app, area, &dir, highlight);
+    if let Some((dir, highlight)) = app.parent_column() {
+        side_listing(frame, app, area, &dir, highlight);
+    }
 }
 
 /// Returns where the picture of an image file goes.
@@ -590,21 +593,13 @@ fn draw_preview(frame: &mut Frame<'_>, app: &App, area: Rect) -> Option<Rect> {
             ..body
         },
     );
-    if app.focus == Focus::Preview && app.preview_line_count() > usize::from(body.height) {
-        let mut state = ScrollbarState::new(
-            app.preview_line_count()
-                .saturating_sub(usize::from(body.height)),
-        )
-        .position(app.preview.scroll);
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None)
-                .track_symbol(None)
-                .thumb_symbol("▐")
-                .thumb_style(theme.accent()),
+    if app.focus == Focus::Preview {
+        draw_scrollbar(
+            frame,
             body,
-            &mut state,
+            app.preview_line_count(),
+            app.preview.scroll,
+            theme.accent(),
         );
     }
     let picture = Rect {
@@ -804,12 +799,7 @@ fn draw_toasts(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled(format!("{icon} "), style.bold()),
                 Span::raw(text.into_owned()),
             ]))
-            .block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(style)
-                    .padding(ratatui::widgets::Padding::horizontal(1)),
-            ),
+            .block(rounded_block(style)),
             rect,
         );
     }
@@ -829,16 +819,20 @@ fn popup(frame: &mut Frame<'_>, theme: Theme, title: &str, width: u16, height: u
         width,
         height,
     );
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(theme.accent())
-        .title(Span::styled(format!(" {title} "), theme.title()))
-        .padding(ratatui::widgets::Padding::horizontal(1));
+    let block =
+        rounded_block(theme.accent()).title(Span::styled(format!(" {title} "), theme.title()));
     let inner = block.inner(area);
     clear_cut_wide_chars(frame, area);
     frame.render_widget(Clear, area);
     frame.render_widget(block, area);
     inner
+}
+
+fn rounded_block(border: Style) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border)
+        .padding(Padding::horizontal(1))
 }
 
 /// A wide character just left of `area` would hide the box's left border

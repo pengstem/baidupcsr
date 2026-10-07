@@ -86,8 +86,7 @@ impl RemoteFile {
     async fn promote(&self, url: &str) {
         let mut urls = self.urls.lock().await;
         if let Some(index) = urls.iter().position(|candidate| candidate == url) {
-            let url = urls.remove(index);
-            urls.insert(0, url);
+            urls[..=index].rotate_right(1);
         }
     }
 }

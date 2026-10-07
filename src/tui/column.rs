@@ -82,11 +82,6 @@ impl Column {
             .and_then(|&index| entries.get(index))
     }
 
-    /// Entry index at a visible position.
-    pub fn entry_at(&self, position: usize) -> Option<usize> {
-        self.visible.get(position).copied()
-    }
-
     /// Entry indices for visible positions in `range`.
     pub fn entries_in(&self, range: Range<usize>) -> &[usize] {
         let end = range.end.min(self.visible.len());

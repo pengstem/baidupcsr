@@ -120,9 +120,11 @@ impl TaskList {
         }
     }
 
-    /// Move a task to a terminal state and return it.
-    pub fn finish(&mut self, id: TaskId, state: TaskState) -> Option<&Task> {
-        let task = self.get_mut(id)?;
+    /// Move a task to a terminal state.
+    pub fn finish(&mut self, id: TaskId, state: TaskState) {
+        let Some(task) = self.get_mut(id) else {
+            return;
+        };
         if state == TaskState::Done
             && let Some(total) = task.total
         {
@@ -131,7 +133,6 @@ impl TaskList {
         task.state = state;
         task.speed = 0.0;
         self.prune();
-        self.tasks.iter().find(|task| task.id == id)
     }
 
     pub fn get(&self, id: TaskId) -> Option<&Task> {

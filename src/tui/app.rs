@@ -14,7 +14,7 @@ use super::column::Column;
 use super::keymap::{Action, action_for};
 use super::line_edit::{Edit, LineEdit};
 use super::theme::Theme;
-use crate::app::directory::{DirectoryCache, SortKey, SortMode};
+use crate::app::directory::{DirectoryCache, SortKey, SortMode, sort_entries};
 use crate::app::ops::{self, Command, CommandContext, Operation, SearchMode};
 use crate::app::remote_path;
 use crate::app::task::{TaskId, TaskList};
@@ -40,7 +40,6 @@ pub enum Cmd {
         mode: SearchMode,
     },
     Cancel(TaskId),
-    Quit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,14 +214,27 @@ impl App {
 
     /// Entries shown in the middle column.
     pub fn entries(&self) -> &[FileEntry] {
-        match &self.search {
-            Some(search) => &search.entries,
-            None => self.cache.entries(&self.cwd),
-        }
+        shown(self.search.as_ref(), &self.cache, &self.cwd)
     }
 
     pub fn selected(&self) -> Option<&FileEntry> {
         self.column.selected(self.entries())
+    }
+
+    pub fn selected_path(&self) -> Option<&str> {
+        self.selected().map(|entry| entry.path.as_str())
+    }
+
+    pub fn is_selected(&self, path: &str) -> bool {
+        self.selected_path() == Some(path)
+    }
+
+    /// The directory the parent column lists, and the entry it highlights.
+    pub fn parent_column(&self) -> Option<(String, Option<&str>)> {
+        match &self.search {
+            Some(search) => Some((search.root.clone(), None)),
+            None => remote_path::parent(&self.cwd).map(|parent| (parent, Some(self.cwd.as_str()))),
+        }
     }
 
     pub fn is_marked(&self, position: usize, path: &str) -> bool {
@@ -244,28 +256,29 @@ impl App {
     /// Entries an action applies to: marked ones, else the cursor's.
     fn target_entries(&mut self) -> Vec<FileEntry> {
         self.commit_visual();
-        let entries = self.entries();
-        let targets: Vec<FileEntry> = if self.marks.is_empty() {
-            self.selected().cloned().into_iter().collect()
-        } else {
-            let mut marked: Vec<FileEntry> = entries
-                .iter()
-                .filter(|entry| self.marks.contains(&entry.path))
-                .cloned()
-                .collect();
-            // Marks may come from other directories.
-            for path in &self.marks {
-                if !marked.iter().any(|entry| &entry.path == path) {
-                    marked.push(FileEntry {
-                        path: path.clone(),
-                        server_filename: remote_path::file_name(path).to_string(),
-                        ..FileEntry::default()
-                    });
-                }
-            }
-            marked
-        };
-        targets
+        if self.marks.is_empty() {
+            return self.selected().cloned().into_iter().collect();
+        }
+        let mut marked: Vec<FileEntry> = self
+            .entries()
+            .iter()
+            .filter(|entry| self.marks.contains(&entry.path))
+            .cloned()
+            .collect();
+        // Marks may come from other directories.
+        let listed: HashSet<&str> = marked.iter().map(|entry| entry.path.as_str()).collect();
+        let elsewhere: Vec<FileEntry> = self
+            .marks
+            .iter()
+            .filter(|path| !listed.contains(path.as_str()))
+            .map(|path| FileEntry {
+                path: path.clone(),
+                server_filename: remote_path::file_name(path).to_string(),
+                ..FileEntry::default()
+            })
+            .collect();
+        marked.extend(elsewhere);
+        marked
     }
 
     fn target_paths(&mut self) -> Vec<String> {
@@ -281,10 +294,7 @@ impl App {
         };
         let cursor = self.column.cursor();
         let range = anchor.min(cursor)..anchor.max(cursor) + 1;
-        let entries = match &self.search {
-            Some(search) => &search.entries,
-            None => self.cache.entries(&self.cwd),
-        };
+        let entries = shown(self.search.as_ref(), &self.cache, &self.cwd);
         for &index in self.column.entries_in(range) {
             self.marks.insert(entries[index].path.clone());
         }
@@ -331,8 +341,8 @@ impl App {
     /// Open `path` as the current directory.
     pub fn enter_dir(&mut self, path: &str) -> Cmd {
         let path = remote_path::normalize(path);
-        if let Some(selected) = self.selected().map(|entry| entry.path.clone())
-            && self.search.is_none()
+        if self.search.is_none()
+            && let Some(selected) = self.selected_path().map(str::to_owned)
         {
             self.remembered.insert(self.cwd.clone(), selected);
         }
@@ -343,11 +353,15 @@ impl App {
         self.search = None;
         self.visual = None;
         self.focus = Focus::Files;
-        let select = self.remembered.get(&self.cwd).cloned();
-        let entries = self.cache.entries(&self.cwd);
-        self.column.reset(entries, select.as_deref());
+        self.reset_column();
         self.cursor_moved_at = Instant::now();
         Cmd::Navigate
+    }
+
+    /// Show the current directory with its remembered selection.
+    fn reset_column(&mut self) {
+        let select = self.remembered.get(&self.cwd).map(String::as_str);
+        self.column.reset(self.cache.entries(&self.cwd), select);
     }
 
     /// A listing changed; returns whether the visible column did.
@@ -356,11 +370,11 @@ impl App {
             return false;
         }
         let selected = self
-            .selected()
-            .map(|entry| entry.path.clone())
-            .or_else(|| self.remembered.get(path).cloned());
-        let entries = self.cache.entries(&self.cwd);
-        self.column.rebuild(entries, selected.as_deref());
+            .selected_path()
+            .or_else(|| self.remembered.get(path).map(String::as_str))
+            .map(str::to_owned);
+        self.column
+            .rebuild(self.cache.entries(&self.cwd), selected.as_deref());
         true
     }
 
@@ -384,12 +398,8 @@ impl App {
     }
 
     pub fn begin_search(&mut self, keyword: &str) {
-        self.remembered.insert(
-            self.cwd.clone(),
-            self.selected()
-                .map(|entry| entry.path.clone())
-                .unwrap_or_default(),
-        );
+        let selected = self.selected_path().unwrap_or_default().to_owned();
+        self.remembered.insert(self.cwd.clone(), selected);
         self.search = Some(SearchView {
             root: self.cwd.clone(),
             keyword: keyword.to_string(),
@@ -410,29 +420,24 @@ impl App {
             .selected(&search.entries)
             .map(|entry| entry.path.clone());
         search.entries.append(&mut found);
-        crate::app::directory::sort_entries(&mut search.entries, sort);
+        sort_entries(&mut search.entries, sort);
         self.column.rebuild(&search.entries, selected.as_deref());
     }
 
     fn exit_search(&mut self) -> Cmd {
         self.search = None;
         self.visual = None;
-        let select = self.remembered.get(&self.cwd).cloned();
-        let entries = self.cache.entries(&self.cwd);
-        self.column.reset(entries, select.as_deref());
+        self.reset_column();
         Cmd::SelectionChanged
     }
 
     fn set_sort(&mut self, sort: SortMode) {
-        let selected = self.selected().map(|entry| entry.path.clone());
+        let selected = self.selected_path().map(str::to_owned);
         self.cache.set_sort(sort);
         if let Some(search) = self.search.as_mut() {
-            crate::app::directory::sort_entries(&mut search.entries, sort);
+            sort_entries(&mut search.entries, sort);
         }
-        let entries = match &self.search {
-            Some(search) => &search.entries,
-            None => self.cache.entries(&self.cwd),
-        };
+        let entries = shown(self.search.as_ref(), &self.cache, &self.cwd);
         self.column.rebuild(entries, selected.as_deref());
     }
 
@@ -481,19 +486,8 @@ impl App {
             return Vec::new();
         };
         let pending = self.pending.take();
-        if self.focus == Focus::Preview {
-            let page = (self.regions.preview.height / 2).max(1) as isize;
-            let delta = match action {
-                Action::Down => Some(1),
-                Action::Up => Some(-1),
-                Action::HalfPageDown | Action::PageDown => Some(page),
-                Action::HalfPageUp | Action::PageUp => Some(-page),
-                _ => None,
-            };
-            if let Some(delta) = delta {
-                self.scroll_preview(delta);
-                return Vec::new();
-            }
+        if self.focus == Focus::Preview && self.scroll_preview_for(action) {
+            return Vec::new();
         }
         let page = self.column.height().max(1) as isize;
         match action {
@@ -503,19 +497,14 @@ impl App {
             Action::HalfPageUp => self.cursor_by(-page / 2),
             Action::PageDown => self.cursor_by(page),
             Action::PageUp => self.cursor_by(-page),
-            Action::Bottom => {
-                let moved = self.column.move_to(usize::MAX);
-                self.moved(moved)
-            }
+            Action::Bottom => self.cursor_to(usize::MAX),
             Action::G if pending == Some(Action::G) || key.code == KeyCode::Home => {
-                let moved = self.column.move_to(0);
-                self.moved(moved)
+                self.cursor_to(0)
             }
             Action::G | Action::D if pending != Some(action) => {
                 self.pending = Some(action);
                 Vec::new()
             }
-            Action::G => Vec::new(),
             Action::D => {
                 let paths = self.target_paths();
                 if !paths.is_empty() {
@@ -526,7 +515,7 @@ impl App {
             Action::Parent => self.leave(),
             Action::Open => self.open_selected(),
             Action::Mark => {
-                if let Some(path) = self.selected().map(|entry| entry.path.clone())
+                if let Some(path) = self.selected_path().map(str::to_owned)
                     && !self.marks.remove(&path)
                 {
                     self.marks.insert(path);
@@ -541,22 +530,7 @@ impl App {
                 }
                 Vec::new()
             }
-            Action::MarkAll => {
-                self.visual = None;
-                let paths: Vec<String> = self
-                    .entries()
-                    .iter()
-                    .map(|entry| entry.path.clone())
-                    .collect();
-                if paths.iter().all(|path| self.marks.contains(path)) {
-                    for path in &paths {
-                        self.marks.remove(path);
-                    }
-                } else {
-                    self.marks.extend(paths);
-                }
-                Vec::new()
-            }
+            Action::MarkAll => self.toggle_mark_all(),
             Action::Filter => {
                 let filter = self.column.filter().to_owned();
                 self.begin_input(InputKind::Filter, &filter)
@@ -568,34 +542,10 @@ impl App {
                 Some(name) => self.begin_input(InputKind::Rename, &name),
                 None => Vec::new(),
             },
-            Action::Yank | Action::Cut => {
-                let paths = self.target_paths();
-                if !paths.is_empty() {
-                    let cut = action == Action::Cut;
-                    let verb = if cut { "cut" } else { "yanked" };
-                    self.toast(
-                        ToastLevel::Info,
-                        format!("{verb} {} item(s) — p to paste", paths.len()),
-                    );
-                    self.clipboard = Some(Clipboard { paths, cut });
-                    self.marks.clear();
-                }
-                Vec::new()
-            }
+            Action::Yank => self.copy_to_clipboard(false),
+            Action::Cut => self.copy_to_clipboard(true),
             Action::Paste => self.paste(),
-            Action::Download => {
-                let files: Vec<FileEntry> = self
-                    .target_entries()
-                    .into_iter()
-                    .filter(|entry| !entry.is_dir && entry.fs_id != 0)
-                    .collect();
-                self.marks.clear();
-                if files.is_empty() {
-                    self.toast(ToastLevel::Info, "only files can be downloaded");
-                    return Vec::new();
-                }
-                vec![Cmd::Download(files)]
-            }
+            Action::Download => self.download(),
             Action::Sort => {
                 self.overlay = Overlay::Sort;
                 Vec::new()
@@ -624,40 +574,100 @@ impl App {
                 self.overlay = Overlay::Help;
                 Vec::new()
             }
-            Action::Escape => {
-                if self.visual.take().is_none()
-                    && self.marks.is_empty()
-                    && self.focus == Focus::Files
-                {
-                    if !self.column.filter().is_empty() {
-                        let entries = match &self.search {
-                            Some(search) => &search.entries,
-                            None => self.cache.entries(&self.cwd),
-                        };
-                        self.column.set_filter("", entries);
-                    } else if self.search.is_some() {
-                        return vec![self.exit_search()];
-                    }
-                }
-                self.marks.clear();
-                self.focus = Focus::Files;
-                Vec::new()
-            }
+            Action::Escape => self.escape(),
             Action::Quit => {
                 if self.tasks.has_active() {
                     self.overlay = Overlay::ConfirmQuit;
-                    Vec::new()
                 } else {
                     self.quit = true;
-                    vec![Cmd::Quit]
                 }
+                Vec::new()
             }
-            Action::Mkdir => Vec::new(),
+            Action::G | Action::Mkdir => Vec::new(),
         }
+    }
+
+    /// Scroll the focused preview; returns whether `action` was a scroll.
+    fn scroll_preview_for(&mut self, action: Action) -> bool {
+        let page = (self.regions.preview.height / 2).max(1) as isize;
+        let delta = match action {
+            Action::Down => 1,
+            Action::Up => -1,
+            Action::HalfPageDown | Action::PageDown => page,
+            Action::HalfPageUp | Action::PageUp => -page,
+            _ => return false,
+        };
+        self.scroll_preview(delta);
+        true
+    }
+
+    fn toggle_mark_all(&mut self) -> Vec<Cmd> {
+        self.visual = None;
+        let paths: Vec<String> = self
+            .entries()
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        if paths.iter().all(|path| self.marks.contains(path)) {
+            for path in &paths {
+                self.marks.remove(path);
+            }
+        } else {
+            self.marks.extend(paths);
+        }
+        Vec::new()
+    }
+
+    fn copy_to_clipboard(&mut self, cut: bool) -> Vec<Cmd> {
+        let paths = self.target_paths();
+        if !paths.is_empty() {
+            let verb = if cut { "cut" } else { "yanked" };
+            self.toast(
+                ToastLevel::Info,
+                format!("{verb} {} item(s) — p to paste", paths.len()),
+            );
+            self.clipboard = Some(Clipboard { paths, cut });
+            self.marks.clear();
+        }
+        Vec::new()
+    }
+
+    fn download(&mut self) -> Vec<Cmd> {
+        let files: Vec<FileEntry> = self
+            .target_entries()
+            .into_iter()
+            .filter(|entry| !entry.is_dir && entry.fs_id != 0)
+            .collect();
+        self.marks.clear();
+        if files.is_empty() {
+            self.toast(ToastLevel::Info, "only files can be downloaded");
+            return Vec::new();
+        }
+        vec![Cmd::Download(files)]
+    }
+
+    /// Back out one layer: selection, then filter, then search results.
+    fn escape(&mut self) -> Vec<Cmd> {
+        if self.visual.take().is_none() && self.marks.is_empty() && self.focus == Focus::Files {
+            if !self.column.filter().is_empty() {
+                let entries = shown(self.search.as_ref(), &self.cache, &self.cwd);
+                self.column.set_filter("", entries);
+            } else if self.search.is_some() {
+                return vec![self.exit_search()];
+            }
+        }
+        self.marks.clear();
+        self.focus = Focus::Files;
+        Vec::new()
     }
 
     fn cursor_by(&mut self, delta: isize) -> Vec<Cmd> {
         let moved = self.column.move_by(delta);
+        self.moved(moved)
+    }
+
+    fn cursor_to(&mut self, position: usize) -> Vec<Cmd> {
+        let moved = self.column.move_to(position);
         self.moved(moved)
     }
 
@@ -732,10 +742,7 @@ impl App {
         let kind = input.kind;
         let edit = input.edit.handle(key);
         let text = input.edit.text().trim().to_string();
-        let entries = match &self.search {
-            Some(search) => &search.entries,
-            None => self.cache.entries(&self.cwd),
-        };
+        let entries = shown(self.search.as_ref(), &self.cache, &self.cwd);
         match (edit, kind) {
             (Edit::Changed, InputKind::Filter) => {
                 let before = self
@@ -762,7 +769,7 @@ impl App {
     }
 
     fn submit(&mut self, kind: InputKind, text: &str) -> Vec<Cmd> {
-        if text.is_empty() && kind != InputKind::Filter {
+        if text.is_empty() {
             return Vec::new();
         }
         let result = match kind {
@@ -775,10 +782,10 @@ impl App {
                 &self.cwd, text,
             )))),
             InputKind::Rename => {
-                let Some(from) = self.selected().map(|entry| entry.path.clone()) else {
+                let Some(from) = self.selected_path() else {
                     return Vec::new();
                 };
-                match ops::rename(&from, text) {
+                match ops::rename(from, text) {
                     Ok(Some(operation)) => Ok(Command::Run(operation)),
                     Ok(None) => return Vec::new(),
                     Err(error) => Err(error),
@@ -786,8 +793,13 @@ impl App {
             }
             InputKind::Command => {
                 let targets = self.target_paths();
-                let cwd = self.cwd.clone();
-                ops::parse_command(text, &CommandContext { cwd: &cwd, targets })
+                ops::parse_command(
+                    text,
+                    &CommandContext {
+                        cwd: &self.cwd,
+                        targets,
+                    },
+                )
             }
         };
         match result {
@@ -848,17 +860,14 @@ impl App {
                     self.visual = None;
                     return vec![Cmd::Run(operation)];
                 }
-                KeyCode::Char('n' | 'N') | KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
                     self.overlay = Overlay::None;
                 }
                 _ => {}
             },
             Overlay::ConfirmQuit => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                    self.quit = true;
-                    return vec![Cmd::Quit];
-                }
-                KeyCode::Char('n' | 'N') | KeyCode::Esc | KeyCode::Char('q') => {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.quit = true,
+                KeyCode::Char('n' | 'N' | 'q') | KeyCode::Esc => {
                     self.overlay = Overlay::None;
                 }
                 _ => {}
@@ -908,16 +917,13 @@ impl App {
                 }
                 if in_files {
                     self.focus = Focus::Files;
-                    let row = usize::from(position.y - self.regions.files.y);
-                    let target = self.column.offset() + row;
-                    if target >= self.column.len() {
+                    let Some(target) = self.file_row_at(position) else {
                         return Vec::new();
-                    }
+                    };
                     if double && target == self.column.cursor() {
                         return self.open_selected();
                     }
-                    let moved = self.column.move_to(target);
-                    return self.moved(moved);
+                    return self.cursor_to(target);
                 }
                 if in_parent {
                     return self.click_parent(position);
@@ -933,14 +939,11 @@ impl App {
                 Vec::new()
             }
             MouseEventKind::Down(MouseButton::Right) if in_files => {
-                let row = usize::from(position.y - self.regions.files.y);
-                let target = self.column.offset() + row;
-                if target >= self.column.len() {
+                let Some(target) = self.file_row_at(position) else {
                     return Vec::new();
-                }
+                };
                 self.focus = Focus::Files;
-                let moved = self.column.move_to(target);
-                let mut cmds = self.moved(moved);
+                let mut cmds = self.cursor_to(target);
                 cmds.extend(self.open_selected());
                 cmds
             }
@@ -948,23 +951,19 @@ impl App {
         }
     }
 
+    /// Position in the file list of the row under `position`, if any.
+    fn file_row_at(&self, position: Position) -> Option<usize> {
+        let row = usize::from(position.y - self.regions.files.y);
+        Some(self.column.offset() + row).filter(|&target| target < self.column.len())
+    }
+
     /// Like yazi: a row of the parent column is revealed there (the cursor
     /// lands on it one level up); empty space just goes up.
     fn click_parent(&mut self, position: Position) -> Vec<Cmd> {
-        let (dir, highlight) = match &self.search {
-            Some(search) => (search.root.clone(), None),
-            None => match remote_path::parent(&self.cwd) {
-                Some(parent) => (parent, Some(self.cwd.clone())),
-                None => return Vec::new(),
-            },
+        let Some((dir, highlight)) = self.parent_column() else {
+            return Vec::new();
         };
-        match side_row(
-            &self.cache,
-            &dir,
-            highlight.as_deref(),
-            self.regions.parent,
-            position,
-        ) {
+        match side_row(&self.cache, &dir, highlight, self.regions.parent, position) {
             Some(path) => self.reveal(&path),
             None => self.leave(),
         }
@@ -973,7 +972,7 @@ impl App {
     /// Like yazi: a row of the child column enters the hovered directory
     /// with the cursor on that row; empty space just enters.
     fn click_child(&mut self, position: Position) -> Vec<Cmd> {
-        let Some(dir) = self.selected().map(|entry| entry.path.clone()) else {
+        let Some(dir) = self.selected_path().map(str::to_owned) else {
             return Vec::new();
         };
         match side_row(&self.cache, &dir, None, self.regions.preview, position) {
@@ -983,8 +982,20 @@ impl App {
     }
 }
 
-/// The entry under `position` in a side column listing `dir`, scrolled the
-/// way `view::side_listing` draws it.
+/// Entries shown in the middle column: search results, else the listing
+/// of `cwd`. Borrows only what it reads, so callers may mutate other fields.
+fn shown<'a>(
+    search: Option<&'a SearchView>,
+    cache: &'a DirectoryCache,
+    cwd: &str,
+) -> &'a [FileEntry] {
+    match search {
+        Some(search) => &search.entries,
+        None => cache.entries(cwd),
+    }
+}
+
+/// The entry under `position` in a side column listing `dir`.
 fn side_row(
     cache: &DirectoryCache,
     dir: &str,
@@ -993,14 +1004,24 @@ fn side_row(
     position: Position,
 ) -> Option<String> {
     let entries = cache.entries(dir);
-    let highlight = highlight.and_then(|path| entries.iter().position(|entry| entry.path == path));
-    let offset = side_offset(highlight, entries.len(), usize::from(area.height));
+    let (_, offset) = side_scroll(entries, highlight, usize::from(area.height));
     let row = offset + usize::from(position.y - area.y);
     entries.get(row).map(|entry| entry.path.clone())
 }
 
+/// Index of the `highlight`ed entry in a side column, and the scroll offset
+/// it is drawn at. Shared by drawing and mouse hit-testing.
+pub fn side_scroll(
+    entries: &[FileEntry],
+    highlight: Option<&str>,
+    height: usize,
+) -> (Option<usize>, usize) {
+    let index = highlight.and_then(|path| entries.iter().position(|entry| entry.path == path));
+    (index, side_offset(index, entries.len(), height))
+}
+
 /// Scroll offset that keeps `highlight` in the middle third of a side column.
-pub fn side_offset(highlight: Option<usize>, len: usize, height: usize) -> usize {
+fn side_offset(highlight: Option<usize>, len: usize, height: usize) -> usize {
     match highlight {
         Some(index) if index >= height.saturating_sub(height / 3) => (index + height / 3 + 1)
             .saturating_sub(height)

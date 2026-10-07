@@ -24,6 +24,11 @@ pub fn parent(path: &str) -> Option<String> {
     }
 }
 
+/// The parent directory; the root is its own parent.
+pub fn parent_or_root(path: &str) -> String {
+    parent(path).unwrap_or_else(|| "/".to_string())
+}
+
 pub fn join(dir: &str, name: &str) -> String {
     let dir = normalize(dir);
     let name = name.trim_matches('/');

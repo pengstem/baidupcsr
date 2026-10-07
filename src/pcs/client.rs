@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bytes::Bytes;
 use headers::HeaderMapExt as _;
@@ -10,7 +10,7 @@ use url::form_urlencoded;
 
 use super::model::{
     ByteRange, ErrorFields, FileEntry, FileOperation, FileOperationPair, Ignored, ListResponse,
-    LocateDownloadResponse, ParamList, PathParam, PcsError, Quota, QuotaResponse, locate_sign,
+    LocateDownloadResponse, ParamList, PathParam, PcsError, Quota, locate_sign,
 };
 
 /// App id the official netdisk client uses for `locatedownload`.
@@ -93,16 +93,12 @@ impl PcsClient {
     }
 
     pub async fn quota(&self, cancel: &CancellationToken) -> Result<Quota, PcsError> {
-        let request = self
-            .http
-            .get("https://pan.baidu.com/api/quota?checkexpire=1&checkfree=1")
-            .header(USER_AGENT, &self.settings.pan_ua)
-            .header(COOKIE, &self.cookie);
-        let response: QuotaResponse = self.json("quota", request, cancel).await?;
-        Ok(Quota {
-            total: response.total,
-            used: response.used,
-        })
+        let request = self.with_auth(
+            self.http
+                .get("https://pan.baidu.com/api/quota?checkexpire=1&checkfree=1"),
+            &self.settings.pan_ua,
+        );
+        self.json("quota", request, cancel).await
     }
 
     /// Direct download links for `path`, best first. They only need the pan
@@ -114,7 +110,8 @@ impl PcsClient {
         bduss: &str,
         cancel: &CancellationToken,
     ) -> Result<Vec<String>, PcsError> {
-        let sign = locate_sign(unix_now(), uid, bduss);
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let sign = locate_sign(now, uid, bduss);
         let (time, rand) = (sign.time.to_string(), sign.rand);
         // No `ant=1`: it adds P2P "acceleration" mirrors (`*-ant.baidu.com`)
         // that redirect to nodes serving scrambled bytes.
@@ -137,11 +134,7 @@ impl PcsClient {
             ("devuid", &sign.devuid),
             ("cuid", &sign.devuid),
         ]);
-        let request = self
-            .http
-            .post(&url)
-            .header(USER_AGENT, &self.settings.pan_ua)
-            .header(COOKIE, &self.cookie);
+        let request = self.with_auth(self.http.post(&url), &self.settings.pan_ua);
         let response: LocateDownloadResponse = self.json("locatedownload", request, cancel).await?;
         let urls: Vec<String> = response
             .urls
@@ -170,10 +163,7 @@ impl PcsClient {
             .header(RANGE, range.header_value());
         let response = send(OP, request, cancel).await?;
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(PcsError::Network {
-                operation: OP,
-                message: format!("HTTP {}", response.status()),
-            });
+            return Err(PcsError::http(OP, response.status()));
         }
         let content_range = response
             .headers()
@@ -224,15 +214,8 @@ impl PcsClient {
         if !is_image {
             let status = response.status();
             let body = cancellable(OP, cancel, response.bytes()).await?;
-            if let Ok(fields) = serde_json::from_slice::<ErrorFields>(&body)
-                && let Some(error) = fields.into_error(OP)
-            {
-                return Err(error);
-            }
-            return Err(PcsError::Network {
-                operation: OP,
-                message: format!("HTTP {status}, not an image"),
-            });
+            return Err(ErrorFields::from_body(OP, &body)
+                .unwrap_or_else(|| PcsError::http(OP, format!("{status}, not an image"))));
         }
         let too_large = || PcsError::parse(OP, "image too large to preview");
         if response.content_length().is_some_and(|len| len > max_bytes) {
@@ -300,16 +283,16 @@ impl PcsClient {
     }
 
     fn get(&self, url: &str) -> RequestBuilder {
-        self.with_auth(self.http.get(url))
+        self.with_auth(self.http.get(url), &self.settings.pcs_ua)
     }
 
     fn post(&self, url: &str) -> RequestBuilder {
-        self.with_auth(self.http.post(url))
+        self.with_auth(self.http.post(url), &self.settings.pcs_ua)
     }
 
-    fn with_auth(&self, request: RequestBuilder) -> RequestBuilder {
+    fn with_auth(&self, request: RequestBuilder, user_agent: &str) -> RequestBuilder {
         request
-            .header(USER_AGENT, &self.settings.pcs_ua)
+            .header(USER_AGENT, user_agent)
             .header(COOKIE, &self.cookie)
     }
 
@@ -356,16 +339,11 @@ impl PcsClient {
         let response = send(operation, request, cancel).await?;
         let status = response.status();
         let body = cancellable(operation, cancel, response.bytes()).await?;
-        if let Ok(fields) = serde_json::from_slice::<ErrorFields>(&body)
-            && let Some(error) = fields.into_error(operation)
-        {
+        if let Some(error) = ErrorFields::from_body(operation, &body) {
             return Err(error);
         }
         if !status.is_success() {
-            return Err(PcsError::Network {
-                operation,
-                message: format!("HTTP {status}"),
-            });
+            return Err(PcsError::http(operation, status));
         }
         serde_json::from_slice(&body).map_err(|error| PcsError::parse(operation, error))
     }
@@ -392,22 +370,11 @@ async fn cancellable<T>(
 }
 
 fn is_accelerated_mirror(url: &str) -> bool {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.contains("-ant.")))
-        .unwrap_or(false)
+    url::Url::parse(url).is_ok_and(|url| url.host_str().is_some_and(|host| host.contains("-ant.")))
 }
 
 const fn scheme(https: bool) -> &'static str {
     if https { "https" } else { "http" }
-}
-
-fn unix_now() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| {
-            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
-        })
 }
 
 #[cfg(test)]

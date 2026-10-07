@@ -73,10 +73,7 @@ impl Operation {
                 .flat_map(|pair| [pair.from.as_str(), pair.to.as_str()])
                 .collect(),
         };
-        let dirs: BTreeSet<String> = paths
-            .into_iter()
-            .map(|path| remote_path::parent(path).unwrap_or_else(|| "/".to_string()))
-            .collect();
+        let dirs: BTreeSet<String> = paths.into_iter().map(remote_path::parent_or_root).collect();
         dirs.into_iter().collect()
     }
 
@@ -140,7 +137,7 @@ pub fn rename(from: &str, name: &str) -> Result<Option<Operation>, String> {
     if name.is_empty() {
         return Err("name must not be empty".to_string());
     }
-    let parent = remote_path::parent(from).unwrap_or_else(|| "/".to_string());
+    let parent = remote_path::parent_or_root(from);
     let to = remote_path::resolve(&parent, name);
     Ok((to != from).then(|| Operation::Rename {
         from: from.to_string(),
